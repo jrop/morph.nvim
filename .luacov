@@ -1,0 +1,6 @@
+return {
+  include = {
+    'lua/morph',
+  },
+  tick = true,
+}

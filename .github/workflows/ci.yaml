@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: NeoVim tests
+on: [push]
+jobs:
+  code-quality:
+    runs-on: ubuntu-latest
+    env:
+      XDG_CONFIG_HOME: ${{ github.workspace }}/.config/
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Populate Nix store
+        run:
+          nix-shell --pure --run 'true'
+
+      - name: Type-check
+        run:
+          nix-shell --pure --run 'make lint'
+
+      - name: Check formatting with stylua
+        run:
+          nix-shell --pure --run 'make fmt-check'
+
+      - name: Run busted tests
+        run:
+          nix-shell --pure --run 'make test'

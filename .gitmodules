@@ -1,0 +1,4 @@
+[submodule "library/busted"]
+	path = library/busted
+	url = https://github.com/LuaCATS/busted
+	branch = main
