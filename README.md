@@ -2,6 +2,8 @@
 
 Build interactive text user interfaces in Neovim with a React-like component model.
 
+![Blob](./morph.jpg)
+
 ## What is morph.nvim?
 
 morph.nvim lets you create dynamic, interactive buffers using familiar React patterns like components, state, and event handlers. Perfect for building custom UIs, forms, dashboards, or any interactive text-based interface within Neovim.
@@ -243,7 +245,7 @@ The `h` function creates virtual elements that get rendered to buffer text with 
 - `ctx.props` - Component properties
 - `ctx.state` - Component state
 - `ctx.children` - Child elements
-- `ctx:update(newState)` - Update state and trigger re-render
+- `ctx:update(new_state)` - Update state and trigger re-render
 - `ctx.phase` - Current lifecycle phase ('mount', 'update', 'unmount')
 
 ### Event Handlers

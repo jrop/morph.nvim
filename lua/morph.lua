@@ -1,3 +1,51 @@
+--                                             _                  _
+--                  _ __ ___   ___  _ __ _ __ | |__    _ ____   _(_)_ __ ___
+--                 | '_ ` _ \ / _ \| '__| '_ \| '_ \  | '_ \ \ / / | '_ ` _ \
+--                 | | | | | | (_) | |  | |_) | | | |_| | | \ V /| | | | | | |
+--                 |_| |_| |_|\___/|_|  | .__/|_| |_(_)_| |_|\_/ |_|_| |_| |_|
+--                                      |_|
+--
+-- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@F~`     `~4@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@F`             4@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@~_ya$@@@@gy       ~@@@E@@@@@@@@@@@@F~~`   `~~F@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@~yg@F~```~@@@$       $@@@@@@@@@@@@F`             `~R@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@~y$@P    _gg$@@@l      7~~`` ``~F@@~   _ag@@@@$gy_    `5@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@ a@@@     @@@@@@@F                 '   g@@~``_Z@@@@$y    `R@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@ a@@@@L    _a@@@@@                     g@@    @@@@@@@@@_    7@@@@@@@@@@@@@@@@P~~   ~~R@@@@@
+-- @@^y@@@@@@@@@@@@@@@@F                     @@@    ~~~J@@@@@@y    ~@@@@@@@@@$@@@@~         4@@@@
+-- @F $@@@@@@@@@@@@@@@F                      @@@$_    _$@@@@@@@,    4@@@@@@@@PPFPF           4@@@
+-- @  $@@@@@@@@@@@@@@`                       $@@@@@gg@@@@@@@@@@$     $@@@P~                   ~@@
+-- $  ~@@@@@@@@@@@P~                         `@@@@@@@@@@@@@@@@@@     `?@F                      $@
+-- $   `4@@@@@@P~                             ~@@@@@@@@@@@@@@@@F                             _a@@
+-- @                                            ?@@@@@@@@@@@@@@                            a@@@@@
+-- @$                                             ~4@@@@@@@@@~                             4@@@@@
+-- @@F                                               `~~~~~`                                @@@@@
+-- @`                                                                                       @@@@@
+-- $                                                                                        $@@@@
+-- @                                                                                        $@@@@
+-- @L                                                                                       @@@@@
+-- @@g                                                                                     y@@@@@
+-- @@@@w                                                                                   $@@@@@
+-- @@@@^                                                                                  y@@@@@@
+-- @@@@                                                                                  y@@@@@@@
+-- @@@@                                                                                 y@@@@@@@@
+-- @@@@L                                                                               a@@@@@@@@@
+-- @@@@@y                                                                           _a@@@@@@@@@@@
+-- @@@@@@$y_                                                                      _$@@@@@@@@@@@@@
+-- @@@@@@@@@g_                                                                   _@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@gy_                                                              y@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@$_                                                          y@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@g_                                                     _a@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@g_                                             __yyg@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@gy                                         _a@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@@@@gy_                                   _a@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@@@@@@@@gy_                            _yg@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@gg_                    _yg@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@$gy___     ___yyg$@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+-- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+--
+
 function _G.MorphOpFuncNoop() end
 
 local H = {}
@@ -6,12 +54,12 @@ local H = {}
 -- Type definitions
 --------------------------------------------------------------------------------
 
---- @alias morph.TagEventHandler fun(e: { tag: morph.Tag, mode: string, lhs: string, bubble_up: boolean }): string
+--- @alias morph.TagEventHandler fun(e: { tag: morph.Element, mode: string, lhs: string, bubble_up: boolean }): string
 
 --- @alias morph.TagAttributes {
 ---   [string]?: unknown,
 ---   on_change?: (fun(e: { text: string,  bubble_up: boolean }): unknown),
----   key?: string|number,
+---   key?: string|integer,
 ---   imap?: table<string, morph.TagEventHandler>,
 ---   nmap?: table<string, morph.TagEventHandler>,
 ---   vmap?: table<string, morph.TagEventHandler>,
@@ -20,6 +68,8 @@ local H = {}
 ---   extmark?: vim.api.keyset.set_extmark
 --- }
 
+--- A tag is the result of calling h(...): it is a recipe for creating an
+--- element.
 --- @class morph.Tag
 --- @field kind 'tag'
 --- @field name string | morph.Component<any, any>
@@ -27,23 +77,213 @@ local H = {}
 --- @field children morph.Tree
 --- @field private ctx? morph.Ctx
 
+--- An element is an instantiated Tag
+--- @class morph.Element : morph.Tag
+--- @field extmark morph.Extmark
+
 --- @alias morph.Node nil | boolean | string | morph.Tag
 --- @alias morph.Tree morph.Node | morph.Node[]
-
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
---- @class morph.MorphExtmark
---- @field id? integer
---- @field start [integer, integer]
---- @field stop [integer, integer]
---- @field opts vim.api.keyset.set_extmark
---- @field tag morph.Tag
-
 --------------------------------------------------------------------------------
--- h, Ctx, Morph implementations
+-- Pos00
 --------------------------------------------------------------------------------
 
--- luacheck: ignore
+--- @class morph.Pos00
+--- @field [1] integer 0-based row
+--- @field [2] integer 0-based column
+local Pos00 = {}
+Pos00.__index = Pos00
+
+--- @param row integer
+--- @param col integer
+function Pos00.new(row, col) return setmetatable({ row, col }, Pos00) end
+--- @param other morph.Pos00
+function Pos00:__eq(other) return self[1] == other[1] and self[2] == other[2] end
+--- @param other morph.Pos00
+function Pos00:__lt(other) return self[1] < other[1] or (self[1] == other[1] and self[2] < other[2]) end
+--- @param other morph.Pos00
+function Pos00:__gt(other) return self[1] > other[1] or (self[1] == other[1] and self[2] > other[2]) end
+
+--------------------------------------------------------------------------------
+-- Extmark
+--------------------------------------------------------------------------------
+
+--- @class morph.Extmark
+--- @field id integer
+--- @field start morph.Pos00
+--- @field stop morph.Pos00
+--- @field raw vim.api.keyset.extmark_details
+--- @field private ns integer
+--- @field private bufnr integer
+local Extmark = {}
+Extmark.__index = Extmark
+
+--- @param bufnr integer
+--- @param ns integer
+--- @param start morph.Pos00
+--- @param stop morph.Pos00
+--- @param opts vim.api.keyset.set_extmark
+--- @return morph.Extmark
+function Extmark.new(bufnr, ns, start, stop, opts)
+  local id = vim.api.nvim_buf_set_extmark(
+    bufnr,
+    ns,
+    start[1],
+    start[2],
+    vim.tbl_extend('force', {
+      end_row = stop[1],
+      end_col = stop[2],
+      right_gravity = false,
+      end_right_gravity = true,
+    }, opts)
+  )
+  return setmetatable(
+    { id = id, start = start, stop = stop, raw = opts, ns = ns, bufnr = bufnr },
+    Extmark
+  )
+end
+
+--- @private
+--- @param bufnr integer
+--- @param ns integer
+--- @param id integer
+--- @param start_row0 integer
+--- @param start_col0 integer
+--- @param details vim.api.keyset.extmark_details
+--- @return morph.Extmark
+function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
+  local start = Pos00.new(start_row0, start_col0)
+  local stop = Pos00.new(start_row0, start_col0)
+  if details and details.end_row ~= nil and details.end_col ~= nil then
+    stop = Pos00.new(details.end_row --[[@as integer]], details.end_col --[[@as integer]])
+  end
+
+  local extmark = setmetatable({
+    id = id,
+    start = start,
+    stop = stop,
+    raw = details,
+    ns = ns,
+    bufnr = bufnr,
+  }, Extmark)
+
+  -- Normalize extmark ending-bounds:
+  local buf_max_line0 = math.max(1, vim.api.nvim_buf_line_count(bufnr) - 1)
+  if extmark.stop[1] > buf_max_line0 then
+    local last_line = vim.api.nvim_buf_get_lines(bufnr, buf_max_line0, buf_max_line0 + 1, false)[1]
+      or ''
+    extmark.stop = Pos00.new(buf_max_line0, last_line:len())
+  end
+  if extmark.stop[2] == 0 then
+    local prev_row = extmark.stop[1] - 1
+    local last_line = vim.api.nvim_buf_get_lines(bufnr, prev_row, prev_row + 1, false)[1] or ''
+    extmark.stop = Pos00.new(prev_row, last_line:len())
+  end
+
+  return extmark
+end
+
+--- @param bufnr integer
+--- @param ns integer
+--- @param id integer
+function Extmark.by_id(bufnr, ns, id)
+  local raw_extmark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, id, { details = true })
+  if not raw_extmark then return nil end
+  local start_row0, start_col0, details = unpack(raw_extmark)
+  return Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, assert(details))
+end
+
+function Extmark:refresh()
+  local x = Extmark.by_id(self.bufnr, self.ns, self.id)
+  if not x then return nil end
+  self.start = x.start
+  self.stop = x.stop
+  self.raw = x.raw
+  return self
+end
+
+--- @private
+--- @param bufnr integer
+--- @param ns integer
+--- @param start morph.Pos00
+--- @param stop morph.Pos00
+--- @return morph.Extmark[]
+function Extmark._get_near_overshoot(bufnr, ns, start, stop)
+  return vim
+    .iter(
+      vim.api.nvim_buf_get_extmarks(
+        bufnr,
+        ns,
+        { start[1], start[2] },
+        { stop[1], stop[2] },
+        { details = true, overlap = true }
+      )
+    )
+    :map(function(ext)
+      --- @type integer, integer, integer, any|nil
+      local id, line0, col0, details = unpack(ext)
+      return Extmark._from_raw(bufnr, ns, id, line0, col0, assert(details))
+    end)
+    :totable()
+end
+
+--------------------------------------------------------------------------------
+-- Tree Utilities
+--------------------------------------------------------------------------------
+
+--- @param tree morph.Tree
+--- @param visitors {
+---   nil_?: (fun(): any),
+---   boolean?: (fun(b: boolean): any),
+---   string?: (fun(s: string): any),
+---   array?: (fun(tags: morph.Node[]): any),
+---   tag?: (fun(tag: morph.Tag): any),
+---   component?: (fun(component: morph.Component, tag: morph.Tag): any),
+---   unknown?: fun(tag: any): any
+--- }
+local function tree_match(tree, visitors)
+  local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
+  local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
+
+  if tree == nil then
+    return visitors.nil_ and visitors.nil_() or nil
+  elseif type(tree) == 'boolean' then
+    return visitors.boolean and visitors.boolean(tree) or nil
+  elseif type(tree) == 'string' then
+    return visitors.string and visitors.string(tree) or nil
+  elseif is_tag_arr(tree) then
+    return visitors.array and visitors.array(tree --[[@as any]]) or nil
+  elseif is_tag(tree) then
+    local tag = tree --[[@as morph.Tag]]
+    if type(tag.name) == 'function' then
+      return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
+    else
+      return visitors.tag and visitors.tag(tree --[[@as any]]) or nil
+    end
+  else
+    return visitors.unknown and visitors.unknown(tree) or error 'unknown value: not a tag'
+  end
+end
+
+--- @param tree morph.Tree
+--- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
+local function tree_kind(tree)
+  return tree_match(tree, {
+    nil_ = function() return 'nil' end,
+    boolean = function() return 'boolean' end,
+    string = function() return 'string' end,
+    array = function() return 'array' end,
+    tag = function() return 'tag' end,
+    component = function(c) return c end,
+    unknown = function() return 'unknown' end,
+  }) --[[@as any]]
+end
+
+--------------------------------------------------------------------------------
+-- h
+--------------------------------------------------------------------------------
+
 H.h = setmetatable({}, {
   --- @param name 'text' | morph.Component
   --- @param attributes? morph.TagAttributes
@@ -71,9 +311,14 @@ H.h = setmetatable({}, {
   end,
 }) --[[@as table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>]]
 
+--------------------------------------------------------------------------------
+-- Ctx
+--------------------------------------------------------------------------------
+
 --- @generic TProps
 --- @generic TState
 --- @class morph.Ctx<TProps, TState>
+--- @field document? morph.Morph
 --- @field phase 'mount'|'update'|'unmount'
 --- @field props TProps
 --- @field state? TState
@@ -83,11 +328,13 @@ H.h = setmetatable({}, {
 local Ctx = {}
 Ctx.__index = Ctx
 
+--- @param document? morph.Morph
 --- @param props TProps
 --- @param state? TState
 --- @param children morph.Tree
-function Ctx.new(props, state, children)
+function Ctx.new(document, props, state, children)
   return setmetatable({
+    document = document,
     phase = 'mount',
     props = props,
     state = state,
@@ -109,12 +356,23 @@ function Ctx:update(new_state)
   end
 end
 
+--------------------------------------------------------------------------------
+-- Morph
+--------------------------------------------------------------------------------
+
+--- @alias morph.MorphTextState {
+---   lines: string[],
+---   extmarks: morph.Extmark[],
+---   tags_to_extmark_ids: table<morph.Tag, integer?>,
+---   extmark_ids_to_tag: table<integer, morph.Tag?>
+--- }
+
 --- @class morph.Morph
 --- @field bufnr integer
 --- @field ns integer
 --- @field changedtick integer
 --- @field changing boolean
---- @field text_content { old: { lines: string[], extmarks: morph.MorphExtmark[] }, curr: { lines: string[], extmarks: morph.MorphExtmark[] } }
+--- @field text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field component_tree { old: morph.Tree  }
 local Morph = {}
 Morph.__index = Morph
@@ -123,59 +381,10 @@ Morph.__index = Morph
 --- Morph: Static functions
 --------------------------------------------------------------------------------
 
---- @private
---- @param tree morph.Tree
---- @param visitors {
----   nil_?: (fun(): any),
----   boolean?: (fun(b: boolean): any),
----   string?: (fun(s: string): any),
----   array?: (fun(tags: morph.Node[]): any),
----   tag?: (fun(tag: morph.Tag): any),
----   component?: (fun(component: morph.Component, tag: morph.Tag): any),
----   unknown?: fun(tag: any): any
---- }
-function Morph.tree_match(tree, visitors)
-  local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
-  local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
-
-  if tree == nil then
-    return visitors.nil_ and visitors.nil_() or nil
-  elseif type(tree) == 'boolean' then
-    return visitors.boolean and visitors.boolean(tree) or nil
-  elseif type(tree) == 'string' then
-    return visitors.string and visitors.string(tree) or nil
-  elseif is_tag_arr(tree) then
-    return visitors.array and visitors.array(tree --[[@as any]]) or nil
-  elseif is_tag(tree) then
-    local tag = tree --[[@as morph.Tag]]
-    if type(tag.name) == 'function' then
-      return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
-    else
-      return visitors.tag and visitors.tag(tree --[[@as any]]) or nil
-    end
-  else
-    return visitors.unknown and visitors.unknown(tree) or error 'unknown value: not a tag'
-  end
-end
-
---- @private
---- @param tree morph.Tree
---- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
-function Morph.tree_kind(tree)
-  return Morph.tree_match(tree, {
-    nil_ = function() return 'nil' end,
-    boolean = function() return 'boolean' end,
-    string = function() return 'string' end,
-    array = function() return 'array' end,
-    tag = function() return 'tag' end,
-    component = function(c) return c end,
-    unknown = function() return 'unknown' end,
-  }) --[[@as any]]
-end
-
+-- TODO: public API Pos00
 --- @param opts {
 ---   tree: morph.Tree,
----   on_tag?: fun(tag: morph.Tag, start0: [number, number], stop0: [number, number]): any
+---   on_tag?: fun(tag: morph.Tag, start0: morph.Pos00, stop0: morph.Pos00): any
 --- }
 function Morph.markup_to_lines(opts)
   --- @type string[]
@@ -196,7 +405,7 @@ function Morph.markup_to_lines(opts)
 
   --- @param node morph.Tree
   local function visit(node)
-    Morph.tree_match(node, {
+    tree_match(node, {
       string = function(s_node)
         local node_lines = vim.split(s_node, '\n')
         for lnum, s in ipairs(node_lines) do
@@ -210,18 +419,23 @@ function Morph.markup_to_lines(opts)
         end
       end,
       tag = function(t)
-        local start0 = { curr_line1 - 1, curr_col1 - 1 }
+        local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
         visit(t.children)
-        local stop0 = { curr_line1 - 1, curr_col1 - 1 }
+        local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
 
         if opts.on_tag then opts.on_tag(t, start0, stop0) end
       end,
       component = function(Component, t)
-        local start0 = { curr_line1 - 1, curr_col1 - 1 }
-        visit(Component(Ctx.new(t.attributes, nil, t.children)))
-        local stop0 = { curr_line1 - 1, curr_col1 - 1 }
+        local ctx = Ctx.new(nil, t.attributes, nil, t.children)
 
-        if opts.on_tag then opts.on_tag(t, start0, stop0) end
+        local start = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+        visit(Component(ctx))
+        local stop = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+
+        ctx.phase = 'unmount'
+        Component(ctx)
+
+        if opts.on_tag then opts.on_tag(t, start, stop) end
       end,
     })
   end
@@ -310,8 +524,8 @@ function Morph.new(bufnr)
     changedtick = 0,
     changing = false,
     text_content = {
-      old = { lines = {}, extmarks = {} },
-      curr = { lines = {}, extmarks = {} },
+      old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
     },
     component_tree = {
       old = nil,
@@ -337,19 +551,25 @@ end
 function Morph:render(tree)
   local changedtick = vim.b[self.bufnr].changedtick
   if changedtick ~= self.changedtick then
-    self.text_content.curr =
-      { extmarks = {}, lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false) }
+    self.text_content.curr = {
+      extmarks = {},
+      lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false),
+      tags_to_extmark_ids = {},
+      extmark_ids_to_tag = {},
+    } --[[@as morph.MorphTextState]]
     self.changedtick = changedtick
   end
 
-  --- @type morph.MorphExtmark[]
-  local extmarks = {}
+  -- Extmarks have to correlate to actual text, so we have to accumulate which
+  -- ones we want to set, morph the buffer, then set the extmarks:
+  --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
+  local extmarks_to_set = {}
 
   --- @type string[]
   local lines = Morph.markup_to_lines {
     tree = tree,
 
-    on_tag = function(tag, start0, stop0)
+    on_tag = function(tag, start, stop)
       if tag.name == 'text' then
         local hl = tag.attributes.hl
         if type(hl) == 'string' then
@@ -357,7 +577,12 @@ function Morph:render(tree)
           tag.attributes.extmark.hl_group = tag.attributes.extmark.hl_group or hl
         end
 
-        local extmark_opts = tag.attributes.extmark or {}
+        table.insert(extmarks_to_set, {
+          tag = tag,
+          start = start,
+          stop = stop,
+          opts = tag.attributes.extmark or {},
+        })
 
         -- Set any necessary keymaps:
         for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
@@ -384,21 +609,40 @@ function Morph:render(tree)
             end, { buffer = self.bufnr, expr = true, replace_keycodes = true })
           end
         end
-
-        table.insert(extmarks, {
-          start = start0,
-          stop = stop0,
-          opts = extmark_opts,
-          tag = tag,
-        })
       end
     end,
   }
 
   self.text_content.old = self.text_content.curr
-  self.text_content.curr = { lines = lines, extmarks = extmarks }
-  self:_reconcile_extmarks()
-  vim.cmd.doautocmd { args = { 'User', 'Morph:' .. tostring(self.bufnr) .. ':render' } }
+  self.text_content.curr = {
+    lines = lines,
+    extmarks = {},
+    tags_to_extmark_ids = {},
+    extmark_ids_to_tag = {},
+  }
+
+  -- Step 1: morph the buffer content:
+  self.changing = true
+  Morph.patch_lines(self.bufnr, self.text_content.old.lines, self.text_content.curr.lines)
+  self.changing = false
+  self.changedtick = vim.b[self.bufnr].changedtick
+
+  -- Step 1: apply the new extmarks:
+  vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
+  local bookkeeping = self.text_content.curr
+  for _, extmark_to_set in ipairs(extmarks_to_set) do
+    local tag = extmark_to_set.tag
+    local extmark = Extmark.new(
+      self.bufnr,
+      self.ns,
+      extmark_to_set.start,
+      extmark_to_set.stop,
+      extmark_to_set.opts
+    )
+    bookkeeping.extmark_ids_to_tag[extmark.id] = tag
+    bookkeeping.tags_to_extmark_ids[tag] = extmark.id
+    table.insert(bookkeeping.extmarks, extmark)
+  end
 end
 
 --- Render a component tree
@@ -411,7 +655,7 @@ function Morph:mount(tree)
     function H2.unmount(tree)
       --- @param tree morph.Tree
       local function visit(tree)
-        Morph.tree_match(tree, {
+        tree_match(tree, {
           array = function(tags)
             for _, tag in ipairs(tags) do
               visit(tag)
@@ -440,10 +684,10 @@ function Morph:mount(tree)
     --- @param new_tree morph.Tree
     --- @return morph.Tree
     function H2.visit_tree(old_tree, new_tree)
-      local old_tree_kind = Morph.tree_kind(old_tree)
-      local new_tree_kind = Morph.tree_kind(new_tree)
+      local old_tree_kind = tree_kind(old_tree)
+      local new_tree_kind = tree_kind(new_tree)
 
-      local new_tree_rendered = Morph.tree_match(new_tree, {
+      local new_tree_rendered = tree_match(new_tree, {
         string = function(s) return s end,
         boolean = function(b) return b end,
         nil_ = function() return nil end,
@@ -462,15 +706,13 @@ function Morph:mount(tree)
 
         component = function(NewC, new_tag)
           --- @type { tag: morph.Tag, ctx?: morph.Ctx } | nil
-          local old_component_info = Morph.tree_match(
-            old_tree,
-            { component = function(_, t) return { tag = t, ctx = t.ctx } end }
-          )
+          local old_component_info =
+            tree_match(old_tree, { component = function(_, t) return { tag = t, ctx = t.ctx } end })
           local ctx = old_component_info and old_component_info.ctx or nil
 
           if not ctx then
             --- @type morph.Ctx
-            ctx = Ctx.new(new_tag.attributes, nil, new_tag.children)
+            ctx = Ctx.new(self, new_tag.attributes, nil, new_tag.children)
           else
             ctx.phase = 'update'
           end
@@ -497,7 +739,7 @@ function Morph:mount(tree)
     function H2.visit_array(old_arr, new_arr)
       --- @return string
       local function verbose_tree_kind(tree, idx)
-        return Morph.tree_match(tree, {
+        return tree_match(tree, {
           nil_ = function() return 'nil' end,
           string = function() return 'string' end,
           boolean = function() return 'boolean' end,
@@ -574,50 +816,90 @@ function Morph:mount(tree)
   rerender()
 end
 
---- @private
-function Morph:_reconcile_extmarks()
-  --
-  -- Step 1: morph the text to the desired state:
-  --
-  self.changing = true
-  Morph.patch_lines(self.bufnr, self.text_content.old.lines, self.text_content.curr.lines)
-  self.changing = false
-  self.changedtick = vim.b[self.bufnr].changedtick
+--- @param pos [integer, integer]|morph.Pos00
+--- @param mode string?
+--- @return morph.Element[]
+function Morph:get_elements_at(pos, mode)
+  pos = Pos00.new(pos[1], pos[2])
+  if not mode then mode = vim.api.nvim_get_mode().mode end
+  mode = mode:sub(1, 1) -- we don't care about sub-modes
 
-  --
-  -- Step 2: reconcile extmarks:
-  -- You may be tempted to try to keep track of which extmarks are needed, and
-  -- only delete those that are not needed. However, each time a tree is
-  -- rendered, brand new extmarks are created. For simplicity, it is better to
-  -- just delete all extmarks, and recreate them.
-  --
+  -- The cursor (block) occupies **two** extmark spaces: one for it's left
+  -- edge, and one for it's right. We need to do our own intersection test,
+  -- because the NeoVim API is over-inclusive in what it returns:
+  local overlapping_extmarks = Extmark._get_near_overshoot(self.bufnr, self.ns, pos, pos)
 
-  -- Clear current extmarks:
-  vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
+  --- @type morph.Extmark[]
+  local intersecting_extmarks = vim
+    .iter(overlapping_extmarks)
+    :filter(
+      --- @param ext morph.Extmark
+      function(ext)
+        if ext.stop[1] ~= nil and ext.stop[2] ~= nil then
+          -- If we've "ciw" and "collapsed" an extmark onto the cursor,
+          -- the cursor pos will equal the exmark's start AND end. In this
+          -- case, we want to include the extmark.
+          if pos == ext.start and pos == ext.stop then return true end
 
-  -- Set current extmarks:
-  for _, extmark in ipairs(self.text_content.curr.extmarks) do
-    extmark.id = vim.api.nvim_buf_set_extmark(
-      self.bufnr,
-      self.ns,
-      extmark.start[1],
-      extmark.start[2],
-      vim.tbl_extend('force', {
-        id = extmark.id,
-        end_row = extmark.stop[1],
-        end_col = extmark.stop[2],
-        -- If we change the text starting from the beginning (where the extmark
-        -- is), we don't want the extmark to move to the right.
-        right_gravity = false,
-        -- If we change the text starting from the end (where the end extmark
-        -- is), we don't want the extmark to stay stationary: we want it to
-        -- move to the right.
-        end_right_gravity = true,
-      }, extmark.opts)
+          return
+            -- START: line check
+            pos[1] >= ext.start[1]
+              -- START: column check
+              and (pos[1] ~= ext.start[1] or pos[2] >= ext.start[2])
+              -- STOP: line check
+              and pos[1] <= ext.stop[1]
+              -- STOP: column check
+              and (
+                pos[1] ~= ext.stop[1]
+                or (
+                  mode == 'i'
+                    -- In insert mode, the cursor is "thin", so <= to compensate:
+                    and pos[2] <= ext.stop[2]
+                  -- In normal mode, the cursor is "wide", so < to compensate:
+                  or pos[2] < ext.stop[2]
+                )
+              )
+        else
+          return true
+        end
+      end
     )
-  end
+    :totable()
 
-  self.text_content.old = self.text_content.curr
+  -- Sort the tags into smallest (inner) to largest (outer):
+  table.sort(
+    intersecting_extmarks,
+    --- @param x1 morph.Extmark
+    --- @param x2 morph.Extmark
+    function(x1, x2)
+      if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
+      return x1.start >= x2.start and x1.stop <= x2.stop
+    end
+  )
+
+  --- @type morph.Element[]
+  return vim
+    .iter(intersecting_extmarks)
+    :map(
+      --- @param extmark morph.Extmark
+      function(extmark)
+        local tag = assert(self.text_content.curr.extmark_ids_to_tag[extmark.id])
+        return vim.tbl_extend('force', {}, tag, { extmark = extmark })
+      end
+    )
+    :totable()
+end
+
+--- @param id string
+--- @return morph.Element?
+function Morph:get_element_by_id(id)
+  for tag, _ in pairs(self.text_content.curr.tags_to_extmark_ids) do
+    local extmark_id = assert(self.text_content.curr.tags_to_extmark_ids[tag])
+    local extmark = assert(Extmark.by_id(self.bufnr, self.ns, extmark_id))
+    if tag.attributes.id == id then
+      return vim.tbl_extend('force', {}, tag, { extmark = extmark }) --[[@as morph.Element]]
+    end
+  end
 end
 
 --- @private
@@ -630,22 +912,21 @@ function Morph:_expr_map_callback(mode, lhs)
     pos0[1]--[[@cast -?]]
     - 1
   ) -- make it actually 0-based
-  local pos_infos = self:get_tags_at(pos0)
+  local elements = self:get_elements_at(pos0)
 
-  if #pos_infos == 0 then return lhs end
+  if #elements == 0 then return lhs end
 
   -- Find the first tag that is listening for this event:
   local keypress_cancel = false
+  --- @type { bubble_up: boolean }
   local loop_control = { bubble_up = true }
-  for _, pos_info in ipairs(pos_infos) do
+  for _, elem in ipairs(elements) do
     if loop_control.bubble_up then
-      local tag = pos_info.tag
-
       -- is the tag listening?
       --- @type morph.TagEventHandler?
-      local f = vim.tbl_get(tag.attributes, mode .. 'map', lhs)
+      local f = vim.tbl_get(elem.attributes, mode .. 'map', lhs)
       if type(f) == 'function' then
-        local e = { tag = tag, mode = mode, lhs = lhs, bubble_up = true }
+        local e = { tag = elem, mode = mode, lhs = lhs, bubble_up = true }
         local result = f(e)
         loop_control.bubble_up = e.bubble_up
         if result == '' then
@@ -663,6 +944,7 @@ function Morph:_expr_map_callback(mode, lhs)
   return keypress_cancel and '' or lhs
 end
 
+--- @private
 function Morph:_on_text_changed()
   if self.changing or self.changedtick == vim.b[self.bufnr].changedtick then return end
 
@@ -671,61 +953,27 @@ function Morph:_on_text_changed()
   self.changedtick = 0
 
   local l, c = unpack(vim.api.nvim_win_get_cursor(0))
-  l = l - 1 -- make it actually 0-based
-  local pos_infos = self:get_tags_at({ l, c }, 'i')
+  l = assert(l) - 1 -- make it actually 0-based
+  local elements = self:get_elements_at(Pos00.new(l, assert(c)), 'i')
+  --- @type { bubble_up: boolean }
   local loop_control = { bubble_up = true }
-  for _, pos_info in ipairs(pos_infos) do
+  for _, elem in ipairs(elements) do
     if loop_control.bubble_up then
-      local extmark_inf = pos_info.extmark
-      local tag = pos_info.tag
-
-      local on_change = tag.attributes.on_change
+      local on_change = elem.attributes.on_change
       if on_change and type(on_change) == 'function' then
-        local extmark = vim.api.nvim_buf_get_extmark_by_id(
-          self.bufnr,
-          self.ns,
-          extmark_inf.id,
-          { details = true }
-        )
-
-        --- @type integer, integer, vim.api.keyset.extmark_details
-        local start_row0, start_col0, details = unpack(extmark)
-        local end_row0, end_col0 = details.end_row, details.end_col
-
-        if start_row0 == end_row0 and start_col0 == end_col0 then
+        if elem.extmark.start == elem.extmark.stop then
           local e = { text = '', bubble_up = true }
           on_change(e)
           loop_control.bubble_up = e.bubble_up
           return -- TODO
         end
 
-        local buf_max_line0 = math.max(1, vim.api.nvim_buf_line_count(self.bufnr) - 1)
-        if end_row0 > buf_max_line0 then
-          end_row0 = buf_max_line0
-          local last_line = vim.api.nvim_buf_get_lines(self.bufnr, end_row0, end_row0 + 1, false)[1]
-            or ''
-          end_col0 = last_line:len()
-        end
-        if end_col0 == 0 then
-          end_row0 = end_row0 - 1
-          local last_line = vim.api.nvim_buf_get_lines(self.bufnr, end_row0, end_row0 + 1, false)[1]
-            or ''
-          end_col0 = last_line:len()
-        end
-
-        if start_row0 == end_row0 and start_col0 == end_col0 then
-          local e = { text = '', bubble_up = true }
-          on_change(e)
-          loop_control.bubble_up = e.bubble_up
-          return -- TODO
-        end
-
-        local pos1 = { self.bufnr, start_row0 + 1, start_col0 + 1 }
-        local pos2 = { self.bufnr, end_row0 + 1, end_col0 }
+        local pos1 = { self.bufnr, elem.extmark.start[1] + 1, elem.extmark.start[2] + 1 }
+        local pos2 = { self.bufnr, elem.extmark.stop[1] + 1, elem.extmark.stop[2] }
         local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
         if not ok then
           vim.api.nvim_echo({
-            { '(u.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
+            { '(morph.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
             {
               '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }),
             },
@@ -742,148 +990,6 @@ function Morph:_on_text_changed()
   end
 end
 
---- Returns pairs of extmarks and tags associate with said extmarks. The
---- returned tags/extmarks are sorted smallest (innermost) to largest
---- (outermost).
----
---- @private (private for now)
---- @param pos0 [integer, integer]
---- @param mode string?
---- @return { extmark: morph.MorphExtmark, tag: morph.Tag }[]
-function Morph:get_tags_at(pos0, mode)
-  local cursor_line0, cursor_col0 = pos0[1], pos0[2]
-  if not mode then mode = vim.api.nvim_get_mode().mode end
-  mode = mode:sub(1, 1) -- we don't care about sub-modes
-
-  local raw_overlapping_extmarks = vim.api.nvim_buf_get_extmarks(
-    self.bufnr,
-    self.ns,
-    pos0,
-    pos0,
-    { details = true, overlap = true }
-  )
-
-  -- The cursor (block) occupies **two** extmark spaces: one for it's left
-  -- edge, and one for it's right. We need to do our own intersection test,
-  -- because the NeoVim API is over-inclusive in what it returns:
-  --- @type morph.MorphExtmark[]
-  local mapped_extmarks = vim
-    .iter(raw_overlapping_extmarks)
-    :map(
-      --- @return morph.MorphExtmark
-      function(ext)
-        --- @type integer, integer, integer, { end_row?: number, end_col?: number }|nil
-        local id, line0, col0, details = unpack(ext)
-        local start = { line0, col0 }
-        local stop = { line0, col0 }
-        if details and details.end_row ~= nil and details.end_col ~= nil then
-          stop = {
-            details.end_row --[[@as integer]],
-            details.end_col --[[@as integer]],
-          }
-        end
-        return { id = id, start = start, stop = stop, opts = details }
-      end
-    )
-    :totable()
-
-  local intersecting_extmarks = vim
-    .iter(mapped_extmarks)
-    :filter(
-      --- @param ext morph.MorphExtmark
-      function(ext)
-        if ext.stop[1] ~= nil and ext.stop[2] ~= nil then
-          -- If we've "ciw" and "collapsed" an extmark onto the cursor,
-          -- the cursor pos will equal the exmark's start AND end. In this
-          -- case, we want to include the extmark.
-          if
-            cursor_line0 == ext.start[1]
-            and cursor_col0 == ext.start[2]
-            and cursor_line0 == ext.stop[1]
-            and cursor_col0 == ext.stop[2]
-          then
-            return true
-          end
-
-          return
-            -- START: line check
-            cursor_line0 >= ext.start[1]
-              -- START: column check
-              and (cursor_line0 ~= ext.start[1] or cursor_col0 >= ext.start[2])
-              -- STOP: line check
-              and cursor_line0 <= ext.stop[1]
-              -- STOP: column check
-              and (
-                cursor_line0 ~= ext.stop[1]
-                or (
-                  mode == 'i'
-                    -- In insert mode, the cursor is "thin", so <= to compensate:
-                    and cursor_col0 <= ext.stop[2]
-                  -- In normal mode, the cursor is "wide", so < to compensate:
-                  or cursor_col0 < ext.stop[2]
-                )
-              )
-        else
-          return true
-        end
-      end
-    )
-    :totable()
-
-  -- Sort the tags into smallest (inner) to largest (outer):
-  table.sort(
-    intersecting_extmarks,
-    --- @param x1 morph.MorphExtmark
-    --- @param x2 morph.MorphExtmark
-    function(x1, x2)
-      if
-        x1.start[1] == x2.start[1]
-        and x1.start[2] == x2.start[2]
-        and x1.stop[1] == x2.stop[1]
-        and x1.stop[2] == x2.stop[2]
-      then
-        return x1.id < x2.id
-      end
-
-      return x1.start[1] >= x2.start[1]
-        and x1.start[2] >= x2.start[2]
-        and x1.stop[1] <= x2.stop[1]
-        and x1.stop[2] <= x2.stop[2]
-    end
-  )
-
-  -- When we set the extmarks in the step above, we captured the IDs of the
-  -- created extmarks in self.text_content.curr.extmarks, which also has which tag each
-  -- extmark is associated with. Cross-reference with that list to get a list
-  -- of tags that we need to fire events for:
-  --- @type { extmark: morph.MorphExtmark, tag: morph.Tag }[]
-  local matching_tags = vim
-    .iter(intersecting_extmarks)
-    :map(
-      --- @param ext morph.MorphExtmark
-      function(ext)
-        for _, extmark_cache in ipairs(self.text_content.curr.extmarks) do
-          if extmark_cache.id == ext.id then return { extmark = ext, tag = extmark_cache.tag } end
-        end
-      end
-    )
-    :totable()
-
-  return matching_tags
-end
-
---- @private (private for now)
---- @param tag_or_id string | morph.Tag
---- @return { start: [number, number], stop: [number, number] } | nil
-function Morph:get_tag_bounds(tag_or_id)
-  for _, x in ipairs(self.text_content.curr.extmarks) do
-    local pos = { start = x.start, stop = x.stop }
-    local does_tag_match = type(tag_or_id) == 'string' and x.tag.attributes.id == tag_or_id
-      or x.tag == tag_or_id
-    if does_tag_match then return pos end
-  end
-end
-
 --- @alias morph.LevenshteinChange<T> ({ kind: 'add', item: T, index: integer } | { kind: 'delete', item: T, index: integer } | { kind: 'change', from: T, to: T, index: integer })
 --- @private
 --- @generic T
@@ -892,22 +998,13 @@ end
 ---   to: T[],
 ---   are_equal?: (fun(x: T, y: T, xidx: integer, yidx: integer): boolean),
 ---   cost?: {
----     of_delete?: (fun(x: T, idx: integer): number),
----     of_add?: (fun(x: T, idx: integer): number),
----     of_change?: (fun(x: T, y: T, xidx: integer, yidx: integer): number)
+---     of_delete?: (fun(x: T, idx: integer): integer),
+---     of_add?: (fun(x: T, idx: integer): integer),
+---     of_change?: (fun(x: T, y: T, xidx: integer, yidx: integer): integer)
 ---   }
 --- }
 --- @return morph.LevenshteinChange<T>[] The changes, from last (greatest index) to first (smallest index).
 function H.levenshtein(opts)
-  -- At the moment, this whole `cost` plumbing is not used. Deletes have the
-  -- same cost as Adds or Changes. I can imagine a future, however, where
-  -- fudging with the costs of operations produces a more optimized change-set
-  -- that is tailored to working better with how NeoVim manipulates text. I've
-  -- done no further investigation in this area, however, so it's impossible to
-  -- tell if such tuning would produce real benefit. For now, I'm leaving this
-  -- in here even though it's not actively used. Hopefully having this
-  -- callback-based plumbing does not cause too much of a performance hit to
-  -- the renderer.
   if not opts.are_equal then opts.are_equal = function(x, y) return x == y end end
   if not opts.cost then opts.cost = {} end
   if not opts.cost.of_add then opts.cost.of_add = function() return 1 end end
@@ -916,6 +1013,7 @@ function H.levenshtein(opts)
 
   local m, n = #opts.from, #opts.to
   -- Initialize the distance matrix
+  --- @type integer[][]
   local dp = {}
   for i = 0, m do
     dp[i] = {}
@@ -926,22 +1024,23 @@ function H.levenshtein(opts)
 
   -- Fill the base cases
   for i = 0, m do
-    dp[i][0] = i
+    assert(dp[i])[0] = i
   end
   for j = 0, n do
-    dp[0][j] = j
+    assert(dp[0])[j] = j
   end
 
   -- Compute the Levenshtein distance dynamically
   for i = 1, m do
     for j = 1, n do
       if opts.are_equal(opts.from[i], opts.to[j], i, j) then
-        dp[i][j] = dp[i - 1][j - 1] -- no cost if items are the same
+        assert(dp[i])[j] = assert(dp[i - 1])[j - 1] -- no cost if items are the same
       else
-        local cost_delete = dp[i - 1][j] + opts.cost.of_delete(opts.from[i], i)
-        local cost_add = dp[i][j - 1] + opts.cost.of_add(opts.to[j], j)
-        local cost_change = dp[i - 1][j - 1] + opts.cost.of_change(opts.from[i], opts.to[j], i, j)
-        dp[i][j] = math.min(cost_delete, cost_add, cost_change)
+        local cost_delete = assert(assert(dp[i - 1])[j]) + opts.cost.of_delete(opts.from[i], i)
+        local cost_add = assert(assert(dp[i])[j - 1]) + opts.cost.of_add(opts.to[j], j)
+        local cost_change = assert(assert(dp[i - 1])[j - 1])
+          + opts.cost.of_change(opts.from[i], opts.to[j], i, j)
+        assert(dp[i])[j] = math.min(cost_delete, cost_add, cost_change)
       end
     end
   end
@@ -953,14 +1052,14 @@ function H.levenshtein(opts)
   local changes = {}
 
   while i > 0 or j > 0 do
-    local default_cost = dp[i][j]
-    local cost_of_change = (i > 0 and j > 0) and dp[i - 1][j - 1] or default_cost
-    local cost_of_add = j > 0 and dp[i][j - 1] or default_cost
-    local cost_of_delete = i > 0 and dp[i - 1][j] or default_cost
+    local default_cost = assert(assert(dp[i])[j])
+    local cost_of_change = (i > 0 and j > 0) and assert(dp[i - 1])[j - 1] or default_cost
+    local cost_of_add = j > 0 and assert(dp[i])[j - 1] or default_cost
+    local cost_of_delete = i > 0 and assert(dp[i - 1])[j] or default_cost
 
-    --- @param u number
-    --- @param v number
-    --- @param w number
+    --- @param u integer
+    --- @param v integer
+    --- @param w integer
     local function is_first_min(u, v, w) return u <= v and u <= w end
 
     if is_first_min(cost_of_change, cost_of_add, cost_of_delete) then
@@ -994,4 +1093,6 @@ end
 
 local M = Morph
 Morph.h = H.h
+Morph.Pos00 = Pos00
+
 return M
