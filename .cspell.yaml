@@ -1,0 +1,27 @@
+---
+$schema: https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json
+version: '0.2'
+words:
+  - autocmd
+  - bdelete
+  - bleh
+  - bufhidden
+  - buflisted
+  - bufnr
+  - buftype
+  - changedtick
+  - extmark
+  - extmarks
+  - getregion
+  - keymap
+  - nmap
+  - nowrite
+  - nvim
+  - omap
+  - operatorfunc
+  - setreg
+  - swapfile
+  - textlock
+  - vmap
+  - vnew
+  - xmap

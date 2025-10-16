@@ -645,7 +645,7 @@ describe('Morph', function()
   -- _expr_map_callback tests
   --
 
-  it('should handle keypresses only in defined regions', function()
+  it('should handle key-presses only in defined regions', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local captured_events = {}
@@ -692,7 +692,7 @@ describe('Morph', function()
     end)
   end)
 
-  it('should handle multiple overlapping regions with different keymaps', function()
+  it('should handle multiple overlapping regions with different key-maps', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local captured_events = {}

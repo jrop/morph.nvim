@@ -12,7 +12,8 @@
   "workspace": {
     "library": [
       "$VIMRUNTIME",
-      "library/busted"
+      "library/busted",
+      "library/luv"
     ]
   }
 }

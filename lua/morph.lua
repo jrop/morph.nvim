@@ -5,45 +5,43 @@
 --                 |_| |_| |_|\___/|_|  | .__/|_| |_(_)_| |_|\_/ |_|_| |_| |_|
 --                                      |_|
 --
--- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@F~`     `~4@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@F`             4@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@~_ya$@@@@gy       ~@@@E@@@@@@@@@@@@F~~`   `~~F@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@~yg@F~```~@@@$       $@@@@@@@@@@@@F`             `~R@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@~y$@P    _gg$@@@l      7~~`` ``~F@@~   _ag@@@@$gy_    `5@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@ a@@@     @@@@@@@F                 '   g@@~``_Z@@@@$y    `R@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@ a@@@@L    _a@@@@@                     g@@    @@@@@@@@@_    7@@@@@@@@@@@@@@@@P~~   ~~R@@@@@
--- @@^y@@@@@@@@@@@@@@@@F                     @@@    ~~~J@@@@@@y    ~@@@@@@@@@$@@@@~         4@@@@
--- @F $@@@@@@@@@@@@@@@F                      @@@$_    _$@@@@@@@,    4@@@@@@@@PPFPF           4@@@
--- @  $@@@@@@@@@@@@@@`                       $@@@@@gg@@@@@@@@@@$     $@@@P~                   ~@@
--- $  ~@@@@@@@@@@@P~                         `@@@@@@@@@@@@@@@@@@     `?@F                      $@
--- $   `4@@@@@@P~                             ~@@@@@@@@@@@@@@@@F                             _a@@
--- @                                            ?@@@@@@@@@@@@@@                            a@@@@@
--- @$                                             ~4@@@@@@@@@~                             4@@@@@
--- @@F                                               `~~~~~`                                @@@@@
--- @`                                                                                       @@@@@
--- $                                                                                        $@@@@
--- @                                                                                        $@@@@
--- @L                                                                                       @@@@@
--- @@g                                                                                     y@@@@@
--- @@@@w                                                                                   $@@@@@
--- @@@@^                                                                                  y@@@@@@
--- @@@@                                                                                  y@@@@@@@
--- @@@@                                                                                 y@@@@@@@@
--- @@@@L                                                                               a@@@@@@@@@
--- @@@@@y                                                                           _a@@@@@@@@@@@
--- @@@@@@$y_                                                                      _$@@@@@@@@@@@@@
--- @@@@@@@@@g_                                                                   _@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@gy_                                                              y@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@$_                                                          y@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@g_                                                     _a@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@g_                                             __yyg@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@gy                                         _a@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@@@@gy_                                   _a@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@@@@@@@@gy_                            _yg@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@gg_                    _yg@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@$gy___     ___yyg$@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
--- @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
+--                      .:   :
+--                   =.:=:      :
+--                 %#      +#    =               :::::::
+--               %   #@@=    +   .            ..  :++=.  .:
+--              :  %@@@      %    : .====.   : +%       %=  :
+--            :    @@@:      %  .=         := %   @@@     #=  =
+--           .     @@@@      # =       .   =.%   @@@        %  =               .:..:
+--           #              #.=     ....   =.%   @@@@ #      %  :             :      =
+--          .              += =    ...  =  =.%    @@@@        #  :           :       =
+--          #             %:  =.        ==   %                %  :     =    .:         :
+--          =%           #     .==::==##%%#=.:%               %   =   .     .:         =
+--          :.%       +#   ..... =###%%%%%%.  =.              %   ===+=.     =.       :
+--          =   =%%#.      ...... +##%%%%%%.   :%            %.   =.= = :=  ..:======
+--           .             ...... :##%%%%%%:...  +%         %.   .=  = =.  ......   :
+--           =:       .=   ...... .##%%%%%%....    .#%+==##.     =      =:........  .
+--          =  :=:.:=:     .....   ##%%%%%#....  :.             = .:    .=.::::.... .
+--          :             .....    ##%%%%%...      ==         :=  =. ...:::::::.... .
+--          =            . .. =   .##%%%%+  =          :====:   :=...:::::::::.==.  .
+--                            ######%%%%%  .: ...            .=:...::::=:::::..:=   .
+--           ..             =####%%%%%%%   ==.    =:           ..:::=======::..:=   :
+--             =    .=:..:=:%#+#+++++%+  =         :+==+=      ..::::=====:::. ::   :
+--             .   =.       .#%###%#=  .=     .......          ..:::=======::. ::  :
+--                =. ...      :==      =    ...:......        ..::::======::.. =   .
+--                .........    .==    .:  ........... . . . ....::::======::. .=  :
+--             : ...:::......   :. :::.=:  . ..:=:.... . . ....::::::::=:::.  :..
+--              : .....=:....   ::  .....======. ..  . .  . ....::::::::::.. .=
+--               .:.. ..==:    :=...:.::.... .= .... .  .  . ....:::::::::.  =
+--                 ::       .:...::::::::::...=:   .  .  .    ............  =
+--                    .=.     ...::::::::::::...... .. . ...      . ...   .:
+--                       :     ..:::::=:==::::............. .       :.   :
+--                        =    ...::::=====:::::............       =.  =
+--                          =    ..:::=====::::::::::.:.....      ==
+--                            =.    ..::::::::::::::::.:...     .
+--                               :.    ......:.::::..:....    ..
+--                                  =:..   . . ........     :.
+--                                       +=====:         =:
+--                                           :=::::==.
 --
 
 function _G.MorphOpFuncNoop() end
@@ -51,7 +49,7 @@ function _G.MorphOpFuncNoop() end
 local H = {}
 
 --------------------------------------------------------------------------------
--- Type definitions
+-- Type Definitions
 --------------------------------------------------------------------------------
 
 --- @alias morph.TagEventHandler fun(e: { tag: morph.Element, mode: string, lhs: string, bubble_up: boolean }): string
@@ -86,7 +84,38 @@ local H = {}
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
 --------------------------------------------------------------------------------
--- Pos00
+-- h: Hyper-script Utility
+--------------------------------------------------------------------------------
+
+H.h = setmetatable({}, {
+  --- @param name 'text' | morph.Component
+  --- @param attributes? morph.TagAttributes
+  --- @param children? morph.Tree
+  __call = function(_, name, attributes, children)
+    return {
+      kind = 'tag',
+      name = name,
+      attributes = attributes or {},
+      children = children or {},
+    }
+  end,
+
+  --- @param hl string
+  __index = function(_, hl)
+    --- @param attributes? morph.TagAttributes
+    --- @param children? morph.Tree
+    return function(attributes, children)
+      return H.h(
+        'text',
+        vim.tbl_deep_extend('force', { hl = hl }, attributes or {}),
+        children or {}
+      )
+    end
+  end,
+}) --[[@as table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>]]
+
+--------------------------------------------------------------------------------
+-- class Pos00
 --------------------------------------------------------------------------------
 
 --- @class morph.Pos00
@@ -106,7 +135,7 @@ function Pos00:__lt(other) return self[1] < other[1] or (self[1] == other[1] and
 function Pos00:__gt(other) return self[1] > other[1] or (self[1] == other[1] and self[2] > other[2]) end
 
 --------------------------------------------------------------------------------
--- Extmark
+-- class Extmark
 --------------------------------------------------------------------------------
 
 --- @class morph.Extmark
@@ -229,90 +258,7 @@ function Extmark._get_near_overshoot(bufnr, ns, start, stop)
 end
 
 --------------------------------------------------------------------------------
--- Tree Utilities
---------------------------------------------------------------------------------
-
---- @param tree morph.Tree
---- @param visitors {
----   nil_?: (fun(): any),
----   boolean?: (fun(b: boolean): any),
----   string?: (fun(s: string): any),
----   array?: (fun(tags: morph.Node[]): any),
----   tag?: (fun(tag: morph.Tag): any),
----   component?: (fun(component: morph.Component, tag: morph.Tag): any),
----   unknown?: fun(tag: any): any
---- }
-local function tree_match(tree, visitors)
-  local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
-  local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
-
-  if tree == nil then
-    return visitors.nil_ and visitors.nil_() or nil
-  elseif type(tree) == 'boolean' then
-    return visitors.boolean and visitors.boolean(tree) or nil
-  elseif type(tree) == 'string' then
-    return visitors.string and visitors.string(tree) or nil
-  elseif is_tag_arr(tree) then
-    return visitors.array and visitors.array(tree --[[@as any]]) or nil
-  elseif is_tag(tree) then
-    local tag = tree --[[@as morph.Tag]]
-    if type(tag.name) == 'function' then
-      return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
-    else
-      return visitors.tag and visitors.tag(tree --[[@as any]]) or nil
-    end
-  else
-    return visitors.unknown and visitors.unknown(tree) or error 'unknown value: not a tag'
-  end
-end
-
---- @param tree morph.Tree
---- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
-local function tree_kind(tree)
-  return tree_match(tree, {
-    nil_ = function() return 'nil' end,
-    boolean = function() return 'boolean' end,
-    string = function() return 'string' end,
-    array = function() return 'array' end,
-    tag = function() return 'tag' end,
-    component = function(c) return c end,
-    unknown = function() return 'unknown' end,
-  }) --[[@as any]]
-end
-
---------------------------------------------------------------------------------
--- h
---------------------------------------------------------------------------------
-
-H.h = setmetatable({}, {
-  --- @param name 'text' | morph.Component
-  --- @param attributes? morph.TagAttributes
-  --- @param children? morph.Tree
-  __call = function(_, name, attributes, children)
-    return {
-      kind = 'tag',
-      name = name,
-      attributes = attributes or {},
-      children = children or {},
-    }
-  end,
-
-  --- @param hl string
-  __index = function(_, hl)
-    --- @param attributes? morph.TagAttributes
-    --- @param children? morph.Tree
-    return function(attributes, children)
-      return H.h(
-        'text',
-        vim.tbl_deep_extend('force', { hl = hl }, attributes or {}),
-        children or {}
-      )
-    end
-  end,
-}) --[[@as table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>]]
-
---------------------------------------------------------------------------------
--- Ctx
+-- class Ctx
 --------------------------------------------------------------------------------
 
 --- @generic TProps
@@ -345,10 +291,8 @@ end
 --- @param new_state TState
 function Ctx:update(new_state)
   self.state = new_state
-  if self.on_change then
-    if
-      vim.in_fast_event() --[[@as boolean]]
-    then
+  if self.on_change and self.phase ~= 'mount' then
+    if H.is_textlock() then
       vim.schedule(function() self.on_change() end)
     else
       self.on_change()
@@ -357,7 +301,7 @@ function Ctx:update(new_state)
 end
 
 --------------------------------------------------------------------------------
--- Morph
+-- class Morph
 --------------------------------------------------------------------------------
 
 --- @alias morph.MorphTextState {
@@ -378,7 +322,7 @@ local Morph = {}
 Morph.__index = Morph
 
 --------------------------------------------------------------------------------
---- Morph: Static functions
+-- class Morph: Static functions
 --------------------------------------------------------------------------------
 
 -- TODO: public API Pos00
@@ -405,11 +349,11 @@ function Morph.markup_to_lines(opts)
 
   --- @param node morph.Tree
   local function visit(node)
-    tree_match(node, {
+    H.tree_match(node, {
       string = function(s_node)
         local node_lines = vim.split(s_node, '\n')
-        for lnum, s in ipairs(node_lines) do
-          if lnum > 1 then put_line() end
+        for line_num, s in ipairs(node_lines) do
+          if line_num > 1 then put_line() end
           put(s)
         end
       end,
@@ -476,35 +420,42 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
   end
 
   -- Morph the text to the desired state:
-  local line_changes = H.levenshtein {
-    from = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-    to = new_lines,
-  }
+  local line_changes = (
+    H.levenshtein {
+      from = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+      to = new_lines,
+    }
+  ) --[[@as (morph.LevenshteinChange<string>[])]]
+
   for _, line_change in ipairs(line_changes) do
-    local lnum0 = line_change.index - 1
+    local line_num0 = line_change.index - 1
 
     if line_change.kind == 'add' then
-      _set_lines(lnum0, lnum0, true, { line_change.item })
+      _set_lines(line_num0, line_num0, true, { line_change.item })
     elseif line_change.kind == 'change' then
       -- Compute inter-line diff, and apply:
-      local col_changes =
-        H.levenshtein { from = vim.split(line_change.from, ''), to = vim.split(line_change.to, '') }
+      local col_changes = (
+        H.levenshtein {
+          from = vim.split(line_change.from, ''),
+          to = vim.split(line_change.to, ''),
+        }
+      ) --[[@as (morph.LevenshteinChange<string>[])]]
 
       for _, col_change in ipairs(col_changes) do
-        local cnum0 = col_change.index - 1
+        local col_num0 = col_change.index - 1
         if col_change.kind == 'add' then
-          _set_text(lnum0, cnum0, lnum0, cnum0, { col_change.item })
+          _set_text(line_num0, col_num0, line_num0, col_num0, { col_change.item })
         elseif col_change.kind == 'change' then
-          _set_text(lnum0, cnum0, lnum0, cnum0 + 1, { col_change.to })
+          _set_text(line_num0, col_num0, line_num0, col_num0 + 1, { col_change.to })
         elseif col_change.kind == 'delete' then
-          _set_text(lnum0, cnum0, lnum0, cnum0 + 1, {})
-        else -- luacheck: ignore
+          _set_text(line_num0, col_num0, line_num0, col_num0 + 1, {})
+        else
           -- No change
         end
       end
     elseif line_change.kind == 'delete' then
-      _set_lines(lnum0, lnum0 + 1, true, {})
-    else -- luacheck: ignore
+      _set_lines(line_num0, line_num0 + 1, true, {})
+    else
       -- No change
     end
   end
@@ -543,7 +494,7 @@ function Morph.new(bufnr)
 end
 
 --------------------------------------------------------------------------------
---- Morph: Instance methods
+-- class Morph: Instance methods
 --------------------------------------------------------------------------------
 
 --- Render static markup
@@ -584,7 +535,7 @@ function Morph:render(tree)
           opts = tag.attributes.extmark or {},
         })
 
-        -- Set any necessary keymaps:
+        -- Set any necessary key-maps:
         for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
           for lhs, _ in pairs(tag.attributes[mode .. 'map'] or {}) do
             -- Force creating an extmark if there are key handlers. To accurately
@@ -655,7 +606,7 @@ function Morph:mount(tree)
     function H2.unmount(tree)
       --- @param tree morph.Tree
       local function visit(tree)
-        tree_match(tree, {
+        H.tree_match(tree, {
           array = function(tags)
             for _, tag in ipairs(tags) do
               visit(tag)
@@ -684,10 +635,10 @@ function Morph:mount(tree)
     --- @param new_tree morph.Tree
     --- @return morph.Tree
     function H2.visit_tree(old_tree, new_tree)
-      local old_tree_kind = tree_kind(old_tree)
-      local new_tree_kind = tree_kind(new_tree)
+      local old_tree_kind = H.tree_kind(old_tree)
+      local new_tree_kind = H.tree_kind(new_tree)
 
-      local new_tree_rendered = tree_match(new_tree, {
+      local new_tree_rendered = H.tree_match(new_tree, {
         string = function(s) return s end,
         boolean = function(b) return b end,
         nil_ = function() return nil end,
@@ -706,8 +657,10 @@ function Morph:mount(tree)
 
         component = function(NewC, new_tag)
           --- @type { tag: morph.Tag, ctx?: morph.Ctx } | nil
-          local old_component_info =
-            tree_match(old_tree, { component = function(_, t) return { tag = t, ctx = t.ctx } end })
+          local old_component_info = H.tree_match(
+            old_tree,
+            { component = function(_, t) return { tag = t, ctx = t.ctx } end }
+          )
           local ctx = old_component_info and old_component_info.ctx or nil
 
           if not ctx then
@@ -724,6 +677,11 @@ function Morph:mount(tree)
           local NewC_rendered_children = NewC(ctx)
           local result = H2.visit_tree(ctx.prev_rendered_children, NewC_rendered_children)
           ctx.prev_rendered_children = NewC_rendered_children
+          -- As soon as we've mounted, move past the 'mount' state. This is
+          -- because Ctx will not fire `on_update` if it is still in the
+          -- 'mount' state (to avoid stack overflows).
+          ctx.phase = 'update'
+
           return result
         end,
       })
@@ -739,7 +697,7 @@ function Morph:mount(tree)
     function H2.visit_array(old_arr, new_arr)
       --- @return string
       local function verbose_tree_kind(tree, idx)
-        return tree_match(tree, {
+        return H.tree_match(tree, {
           nil_ = function() return 'nil' end,
           string = function() return 'string' end,
           boolean = function() return 'boolean' end,
@@ -762,18 +720,21 @@ function Morph:mount(tree)
       -- What levenshtein gives us for free in this model is also informing
       -- us what needs to be added (i.e., "mounted"), what needs to be
       -- deleted ("unmounted") and what needs to be changed ("updated").
-      local changes = H.levenshtein {
-        from = old_arr or {},
-        to = new_arr or {},
-        are_equal = function() return false end,
-        cost = {
-          of_change = function(tree1, tree2, tree1_idx, tree2_idx)
-            local tree1_inf = verbose_tree_kind(tree1, tree1_idx)
-            local tree2_inf = verbose_tree_kind(tree2, tree2_idx)
-            return tree1_inf == tree2_inf and 1 or 2
-          end,
-        },
-      }
+      local changes = (
+        H.levenshtein {
+          --- @diagnostic disable-next-line: assign-type-mismatch
+          from = old_arr or {},
+          to = new_arr or {},
+          are_equal = function() return false end,
+          cost = {
+            of_change = function(node1, node2, node1_idx, node2_idx)
+              local node1_inf = verbose_tree_kind(node1, node1_idx)
+              local node2_inf = verbose_tree_kind(node2, node2_idx)
+              return node1_inf == node2_inf and 1 or 2
+            end,
+          },
+        }
+      ) --[[@as (morph.LevenshteinChange<morph.Node>[])]]
 
       --- @type morph.Node[]
       local resulting_nodes = {}
@@ -807,9 +768,9 @@ function Morph:mount(tree)
       return resulting_nodes
     end
 
-    local renderable_tree = H2.visit_tree(self.component_tree.old, tree)
+    local simplified_tree = H2.visit_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
-    self:render(renderable_tree)
+    self:render(simplified_tree)
   end
 
   -- Kick off initial render:
@@ -824,20 +785,31 @@ function Morph:get_elements_at(pos, mode)
   if not mode then mode = vim.api.nvim_get_mode().mode end
   mode = mode:sub(1, 1) -- we don't care about sub-modes
 
-  -- The cursor (block) occupies **two** extmark spaces: one for it's left
-  -- edge, and one for it's right. We need to do our own intersection test,
-  -- because the NeoVim API is over-inclusive in what it returns:
-  local overlapping_extmarks = Extmark._get_near_overshoot(self.bufnr, self.ns, pos, pos)
-
-  --- @type morph.Extmark[]
-  local intersecting_extmarks = vim
-    .iter(overlapping_extmarks)
-    :filter(
+  --- @type morph.Element[]
+  local intersecting_elements = vim
+    --
+    -- The cursor (block) occupies **two** extmark spaces: one for it's left
+    -- edge, and one for it's right. We need to do our own intersection test,
+    -- because the Neovim API is over-inclusive in what it returns:
+    .iter(Extmark._get_near_overshoot(self.bufnr, self.ns, pos, pos))
+    --
+    -- First, convert the list of extmarks to Elements:
+    :map(
       --- @param ext morph.Extmark
-      function(ext)
+      function(extmark)
+        local tag = assert(self.text_content.curr.extmark_ids_to_tag[extmark.id])
+        return vim.tbl_extend('force', {}, tag, { extmark = extmark })
+      end
+    )
+    --
+    -- Now do our own custom intersection test:
+    :filter(
+      --- @param elem morph.Element
+      function(elem)
+        local ext = elem.extmark
         if ext.stop[1] ~= nil and ext.stop[2] ~= nil then
           -- If we've "ciw" and "collapsed" an extmark onto the cursor,
-          -- the cursor pos will equal the exmark's start AND end. In this
+          -- the cursor pos will equal the extmark's start AND end. In this
           -- case, we want to include the extmark.
           if pos == ext.start and pos == ext.stop then return true end
 
@@ -867,27 +839,13 @@ function Morph:get_elements_at(pos, mode)
     :totable()
 
   -- Sort the tags into smallest (inner) to largest (outer):
-  table.sort(
-    intersecting_extmarks,
-    --- @param x1 morph.Extmark
-    --- @param x2 morph.Extmark
-    function(x1, x2)
-      if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
-      return x1.start >= x2.start and x1.stop <= x2.stop
-    end
-  )
+  table.sort(intersecting_elements, function(e1, e2)
+    local x1, x2 = e1.extmark, e2.extmark
+    if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
+    return x1.start >= x2.start and x1.stop <= x2.stop
+  end)
 
-  --- @type morph.Element[]
-  return vim
-    .iter(intersecting_extmarks)
-    :map(
-      --- @param extmark morph.Extmark
-      function(extmark)
-        local tag = assert(self.text_content.curr.extmark_ids_to_tag[extmark.id])
-        return vim.tbl_extend('force', {}, tag, { extmark = extmark })
-      end
-    )
-    :totable()
+  return intersecting_elements
 end
 
 --- @param id string
@@ -925,8 +883,9 @@ function Morph:_expr_map_callback(mode, lhs)
       -- is the tag listening?
       --- @type morph.TagEventHandler?
       local f = vim.tbl_get(elem.attributes, mode .. 'map', lhs)
-      if type(f) == 'function' then
+      if vim.is_callable(f) then
         local e = { tag = elem, mode = mode, lhs = lhs, bubble_up = true }
+        --- @diagnostic disable-next-line: need-check-nil
         local result = f(e)
         loop_control.bubble_up = e.bubble_up
         if result == '' then
@@ -960,9 +919,10 @@ function Morph:_on_text_changed()
   for _, elem in ipairs(elements) do
     if loop_control.bubble_up then
       local on_change = elem.attributes.on_change
-      if on_change and type(on_change) == 'function' then
+      if vim.is_callable(on_change) then
         if elem.extmark.start == elem.extmark.stop then
           local e = { text = '', bubble_up = true }
+          --- @diagnostic disable-next-line: need-check-nil
           on_change(e)
           loop_control.bubble_up = e.bubble_up
           return -- TODO
@@ -983,6 +943,7 @@ function Morph:_on_text_changed()
         if type(lines) == 'string' then lines = { lines } end
 
         local e = { text = table.concat(lines, '\n'), bubble_up = true }
+        --- @diagnostic disable-next-line: need-check-nil
         on_change(e)
         loop_control.bubble_up = e.bubble_up
       end
@@ -990,20 +951,95 @@ function Morph:_on_text_changed()
   end
 end
 
+--------------------------------------------------------------------------------
+-- Utilities
+--------------------------------------------------------------------------------
+
+--- @param tree morph.Tree
+--- @param visitors {
+---   nil_?: (fun(): any),
+---   boolean?: (fun(b: boolean): any),
+---   string?: (fun(s: string): any),
+---   array?: (fun(tags: morph.Node[]): any),
+---   tag?: (fun(tag: morph.Tag): any),
+---   component?: (fun(component: morph.Component, tag: morph.Tag): any),
+---   unknown?: fun(tag: any): any
+--- }
+function H.tree_match(tree, visitors)
+  local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
+  local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
+
+  if tree == nil then
+    return visitors.nil_ and visitors.nil_() or nil
+  elseif type(tree) == 'boolean' then
+    return visitors.boolean and visitors.boolean(tree) or nil
+  elseif type(tree) == 'string' then
+    return visitors.string and visitors.string(tree) or nil
+  elseif is_tag_arr(tree) then
+    return visitors.array and visitors.array(tree --[[@as any]]) or nil
+  elseif is_tag(tree) then
+    local tag = tree --[[@as morph.Tag]]
+    if vim.is_callable(tag.name) then
+      return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
+    else
+      return visitors.tag and visitors.tag(tree --[[@as any]]) or nil
+    end
+  else
+    return visitors.unknown and visitors.unknown(tree) or error 'unknown value: not a tag'
+  end
+end
+
+--- @param tree morph.Tree
+--- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
+function H.tree_kind(tree)
+  return H.tree_match(tree, {
+    nil_ = function() return 'nil' end,
+    boolean = function() return 'boolean' end,
+    string = function() return 'string' end,
+    array = function() return 'array' end,
+    tag = function() return 'tag' end,
+    component = function(c) return c end,
+    unknown = function() return 'unknown' end,
+  }) --[[@as any]]
+end
+
+function H.is_textlock()
+  local curr_win = vim.api.nvim_get_current_win()
+
+  -- Try to change the window: if textlock is active, an error will be raised:
+  local tmp_buf = vim.api.nvim_create_buf(false, true)
+  local ok, tmp_win = pcall(vim.api.nvim_open_win, tmp_buf, true, {})
+  if
+    not ok
+    and type(tmp_win) == 'string'
+    and tmp_win:find 'E565: Not allowed to change text or change window'
+  then
+    pcall(vim.api.nvim_buf_delete, tmp_buf, { force = true })
+    return true
+  end
+
+  pcall(vim.api.nvim_win_close, tmp_win --[[@as integer]], true)
+  pcall(vim.api.nvim_buf_delete, tmp_buf, { force = true })
+  vim.api.nvim_set_current_win(curr_win)
+
+  return false
+end
+
 --- @alias morph.LevenshteinChange<T> ({ kind: 'add', item: T, index: integer } | { kind: 'delete', item: T, index: integer } | { kind: 'change', from: T, to: T, index: integer })
+
 --- @private
 --- @generic T
 --- @param opts {
 ---   from: `T`[],
 ---   to: T[],
----   are_equal?: (fun(x: T, y: T, xidx: integer, yidx: integer): boolean),
+---   are_equal?: (fun(x: T, y: T, x_idx: integer, y_idx: integer): boolean),
 ---   cost?: {
 ---     of_delete?: (fun(x: T, idx: integer): integer),
 ---     of_add?: (fun(x: T, idx: integer): integer),
----     of_change?: (fun(x: T, y: T, xidx: integer, yidx: integer): integer)
+---     of_change?: (fun(x: T, y: T, x_idx: integer, y_idx: integer): integer)
 ---   }
 --- }
---- @return morph.LevenshteinChange<T>[] The changes, from last (greatest index) to first (smallest index).
+--- @return morph.LevenshteinChange<T>[]
 function H.levenshtein(opts)
   if not opts.are_equal then opts.are_equal = function(x, y) return x == y end end
   if not opts.cost then opts.cost = {} end
@@ -1090,6 +1126,10 @@ function H.levenshtein(opts)
 
   return changes
 end
+
+--------------------------------------------------------------------------------
+-- Exports
+--------------------------------------------------------------------------------
 
 local M = Morph
 Morph.h = H.h
