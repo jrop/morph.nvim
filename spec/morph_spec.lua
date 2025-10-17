@@ -144,6 +144,35 @@ describe('Morph', function()
     end)
   end)
 
+  it('should return correct tags for elements enclosing empty lines', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      -- Text:
+      --   012345
+      -- 0 Header
+      -- 1
+      -- 2
+
+      local tag, start0, stop0
+      local lines = Morph.markup_to_lines {
+        on_tag = function(_tag, _start0, _stop0)
+          tag = _tag
+          start0 = _start0
+          stop0 = _stop0
+        end,
+        tree = h('text', {}, { 'Header\n\n' }),
+      }
+      assert.are.same(lines, { 'Header', '', '' })
+
+      r:render(h('text', {}, { 'Header\n\n' }))
+
+      local tags = r:get_elements_at { 0, 2 }
+      assert.are.same(#tags, 1)
+      assert.are.same(tags[1].extmark.start, Pos00.new(0, 0))
+      assert.are.same(tags[1].extmark.stop, Pos00.new(2, 0))
+    end)
+  end)
+
   it('should return multiple extmarks for overlapping text', function()
     with_buf({}, function()
       local r = Morph.new(0)
@@ -197,6 +226,13 @@ describe('Morph', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local captured_changed_text = ''
+
+      -- Text:
+      --   01234
+      -- 0 one
+      -- 1 two
+      -- 2 three
+      -- 3
       r:render {
         h('text', {
           on_change = function(e) captured_changed_text = e.text end,
@@ -207,8 +243,21 @@ describe('Morph', function()
         }),
       }
 
+      local elems = r:get_elements_at { 0, 1 }
+      assert.are.same(#elems, 1)
+      assert.are.same(elems[1].extmark.start, Pos00.new(0, 0))
+      assert.are.same(elems[1].extmark.stop, Pos00.new(3, 0))
+
+      -- New text:
+      --   1234
+      -- 0 bleh
       vim.fn.setreg('"', 'bleh')
       vim.cmd [[normal! ggVGp]]
+
+      assert.are.same(vim.api.nvim_buf_line_count(0), 1)
+      elems = r:get_elements_at { 0, 1 }
+      assert.are.same(#elems, 1)
+
       -- For some reason, the autocmd does not fire in the busted environment.
       -- We'll call the handler ourselves:
       r:_on_text_changed()

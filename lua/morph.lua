@@ -198,16 +198,11 @@ function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
   }, Extmark)
 
   -- Normalize extmark ending-bounds:
-  local buf_max_line0 = math.max(1, vim.api.nvim_buf_line_count(bufnr) - 1)
+  local buf_max_line0 = math.max(0, vim.api.nvim_buf_line_count(bufnr) - 1)
   if extmark.stop[1] > buf_max_line0 then
-    local last_line = vim.api.nvim_buf_get_lines(bufnr, buf_max_line0, buf_max_line0 + 1, false)[1]
+    local last_line = vim.api.nvim_buf_get_lines(bufnr, buf_max_line0, buf_max_line0 + 1, true)[1]
       or ''
     extmark.stop = Pos00.new(buf_max_line0, last_line:len())
-  end
-  if extmark.stop[2] == 0 then
-    local prev_row = extmark.stop[1] - 1
-    local last_line = vim.api.nvim_buf_get_lines(bufnr, prev_row, prev_row + 1, false)[1] or ''
-    extmark.stop = Pos00.new(prev_row, last_line:len())
   end
 
   return extmark
@@ -221,15 +216,6 @@ function Extmark.by_id(bufnr, ns, id)
   if not raw_extmark then return nil end
   local start_row0, start_col0, details = unpack(raw_extmark)
   return Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, assert(details))
-end
-
-function Extmark:refresh()
-  local x = Extmark.by_id(self.bufnr, self.ns, self.id)
-  if not x then return nil end
-  self.start = x.start
-  self.stop = x.stop
-  self.raw = x.raw
-  return self
 end
 
 --- @private
@@ -969,7 +955,7 @@ function H.tree_match(tree, visitors)
   local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
   local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
 
-  if tree == nil then
+  if tree == nil or tree == vim.NIL then
     return visitors.nil_ and visitors.nil_() or nil
   elseif type(tree) == 'boolean' then
     return visitors.boolean and visitors.boolean(tree) or nil
@@ -1004,6 +990,8 @@ function H.tree_kind(tree)
 end
 
 function H.is_textlock()
+  if vim.in_fast_event() then return true end
+
   local curr_win = vim.api.nvim_get_current_win()
 
   -- Try to change the window: if textlock is active, an error will be raised:
