@@ -898,17 +898,26 @@ end
 
 --- @private
 function Morph:_on_text_changed()
-  --- @type morph.Extmark[]
+  --- @type { extmark: morph.Extmark, text: string }[]
   local changed = {}
   for _, cached_extmark in ipairs(self.text_content.curr.extmarks) do
     local live_extmark = assert(Extmark.by_id(self.bufnr, self.ns, cached_extmark.id))
     if live_extmark.start ~= cached_extmark or live_extmark.stop ~= cached_extmark.stop then
-      table.insert(changed, live_extmark)
+      -- Just because extmarks have shifted, doesn't mean their text has changed:
+      -- Lookup the old value vs the new on and check:
+      local cached_tag = assert(self.text_content.curr.extmark_ids_to_tag[cached_extmark.id])
+      local cached_tag_text = Morph.markup_to_string { tree = cached_tag }
+      local curr_text = live_extmark:_text()
+
+      if cached_tag_text ~= curr_text then
+        table.insert(changed, { extmark = live_extmark, text = curr_text })
+      end
     end
   end
 
   -- Sort the tags into smallest (inner) to largest (outer):
-  table.sort(changed, function(x1, x2)
+  table.sort(changed, function(a, b)
+    local x1, x2 = a.extmark, b.extmark
     if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
     return x1.start >= x2.start and x1.stop <= x2.stop
   end)
@@ -931,12 +940,12 @@ function Morph:_on_text_changed()
   -- called (at lease, the ones we CAN guarantee).
   local old_textlock = self.textlock
   self.textlock = true
-  for _, extmark in ipairs(changed) do
+  for _, extmark_and_text in ipairs(changed) do
     if loop_control.bubble_up then
-      local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
+      local tag = self.text_content.curr.extmark_ids_to_tag[extmark_and_text.extmark.id]
       local on_change = tag and tag.attributes.on_change
       if vim.is_callable(on_change) then
-        local e = { text = extmark:_text(), bubble_up = true }
+        local e = { text = extmark_and_text.text, bubble_up = true }
         --- @diagnostic disable-next-line: need-check-nil
         on_change(e)
         loop_control.bubble_up = e.bubble_up

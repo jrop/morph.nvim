@@ -533,6 +533,157 @@ describe('Morph', function()
     end)
   end)
 
+  it('get_elements_at should not get siblings', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_events = {}
+
+      -- Text structure:
+      --           1111111111222222
+      -- 01234567890123456789012345
+      -- sibling outer middle inner
+      r:render {
+        h('text', {
+          id = 'sibling',
+          on_change = function(e) table.insert(captured_events, { id = 'sibling', text = e.text }) end,
+        }, 'sibling'),
+        ' ',
+        h('text', {
+          id = 'outer',
+          on_change = function(e) table.insert(captured_events, { id = 'outer', text = e.text }) end,
+        }, {
+          'outer ',
+          h('text', {
+            id = 'middle',
+          }, {
+            'middle ',
+            h('text', {
+              id = 'inner',
+              on_change = function(e)
+                table.insert(captured_events, { id = 'inner', text = e.text })
+              end,
+            }, 'inner'),
+          }),
+        }),
+      }
+
+      local elems = r:get_elements_at { 0, 23 }
+      assert.are.same(#elems, 3)
+      -- Should return inner, middle, and outer (innermost to outermost)
+      assert.are.same(elems[1].attributes.id, 'inner')
+      assert.are.same(elems[2].attributes.id, 'middle')
+      assert.are.same(elems[3].attributes.id, 'outer')
+
+      -- Test position in sibling - should only return sibling
+      local sibling_elems = r:get_elements_at { 0, 3 }
+      assert.are.same(#sibling_elems, 1)
+      assert.are.same(sibling_elems[1].attributes.id, 'sibling')
+
+      -- Test position in outer but not in nested elements
+      local outer_elems = r:get_elements_at { 0, 9 }
+      assert.are.same(#outer_elems, 1)
+      assert.are.same(outer_elems[1].attributes.id, 'outer')
+    end)
+  end)
+
+  it('should fire on_change handlers from inner to outer and not affect siblings', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_events = {}
+
+      -- Text structure:
+      --           1111111111222222
+      -- 01234567890123456789012345
+      -- sibling outer middle inner
+      local function reset_render()
+        r:render {
+          h('text', {
+            id = 'sibling',
+            on_change = function(e)
+              table.insert(captured_events, { id = 'sibling', text = e.text })
+            end,
+          }, 'sibling'),
+          ' ',
+          h('text', {
+            id = 'outer',
+            on_change = function(e) table.insert(captured_events, { id = 'outer', text = e.text }) end,
+          }, {
+            'outer ',
+            h('text', {
+              id = 'middle',
+            }, {
+              'middle ',
+              h('text', {
+                id = 'inner',
+                on_change = function(e)
+                  table.insert(captured_events, { id = 'inner', text = e.text })
+                end,
+              }, 'inner'),
+            }),
+          }),
+        }
+      end
+      reset_render()
+
+      -- Test 1: Change text in the innermost element
+      -- This should fire inner handler first, then outer handler
+      captured_events = {}
+
+      -- Replace "inner" with "changed"
+      vim.api.nvim_buf_set_text(0, 0, 21, 0, 26, { 'changed' })
+      assert.are.same(
+        vim.api.nvim_buf_get_lines(0, 0, -1, false),
+        { 'sibling outer middle changed' }
+      )
+      -- Text structure:
+      --           111111111122222222
+      -- 0123456789012345678901234567
+      -- sibling outer middle changed
+      r:_on_text_changed()
+
+      assert.are.same(#captured_events, 2)
+      assert.are.same(captured_events[1].id, 'inner')
+      assert.are.same(captured_events[1].text, 'changed')
+      assert.are.same(captured_events[2].id, 'outer')
+      assert.are.same(captured_events[2].text, 'outer middle changed')
+
+      -- Test 2: Change text in the sibling element
+      -- This should only fire the sibling handler, not any of the nested ones
+      reset_render()
+      captured_events = {}
+
+      -- Replace "sibling" with "modified"
+      vim.api.nvim_buf_set_text(0, 0, 0, 0, 7, { 'modified' })
+      assert.are.same(
+        vim.api.nvim_buf_get_lines(0, 0, -1, false),
+        { 'modified outer middle inner' }
+      )
+      -- Text structure:
+      --           1111111111222222222
+      -- 01234567890123456789012345678
+      -- modified outer middle inner
+      r:_on_text_changed()
+
+      assert.are.same(#captured_events, 1)
+      assert.are.same(captured_events[1].id, 'sibling')
+      assert.are.same(captured_events[1].text, 'modified')
+
+      -- Test 3: Change text in the middle element (which has no handler)
+      -- This should only fire the outer handler
+      reset_render()
+      captured_events = {}
+
+      -- Replace "middle" with "center"
+      vim.api.nvim_buf_set_text(0, 0, 14, 0, 20, { 'center' })
+      assert.are.same(vim.api.nvim_buf_get_lines(0, 0, -1, false), { 'sibling outer center inner' })
+      r:_on_text_changed()
+
+      assert.are.same(#captured_events, 1)
+      assert.are.same(captured_events[1].id, 'outer')
+      assert.are.same(captured_events[1].text, 'outer center inner')
+    end)
+  end)
+
   it('should find tags by id', function()
     with_buf({}, function()
       local r = Morph.new(0)
