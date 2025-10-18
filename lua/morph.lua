@@ -299,7 +299,7 @@ end
 function Ctx:update(new_state)
   self.state = new_state
   if self.on_change and self.phase ~= 'mount' then
-    if H.is_textlock() then
+    if (self.document and self.document.textlock) or H.is_textlock() then
       vim.schedule(function() self.on_change() end)
     else
       self.on_change()
@@ -323,6 +323,7 @@ end
 --- @field ns integer
 --- @field changedtick integer
 --- @field changing boolean
+--- @field textlock boolean
 --- @field text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field component_tree { old: morph.Tree  }
 local Morph = {}
@@ -481,6 +482,7 @@ function Morph.new(bufnr)
     ns = vim.b[bufnr]._renderer_ns,
     changedtick = 0,
     changing = false,
+    textlock = false,
     text_content = {
       old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
       curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
@@ -930,9 +932,23 @@ function Morph:_on_text_changed()
   local loop_control = {
     bubble_up = true --[[@as boolean]],
   }
+
+  -- NOTE: Sometimes we can lose the correlation of tag <=> extmark. Don't we
+  -- track all extmarks/tags in our bookkeeping? Yes: yes we do. However, we
+  -- operate on the assumption that the buffer could have changed outside of
+  -- our (Morph's) control. In fact, this does frequently happen. It can even
+  -- happen in this block because as we iterate through the list, calling
+  -- on_change, the on_change handler can update state => cause a re-render.
+  -- This is why we set the textlock, which Ctx:update checks to see if it can
+  -- apply the update immediately, or if it needs to vim.schedule(...) it. By
+  -- setting the text lock, we make sure we can iterate through the list,
+  -- maintaining whatever tag <=> extmark correlations exist at the beginning
+  -- of this loop, and we can maintain that all the correct handlers are
+  -- called (at lease, the ones we CAN guarantee).
+  local old_textlock = self.textlock
+  self.textlock = true
   for _, extmark in ipairs(changed) do
     if loop_control.bubble_up then
-      -- TODO: why is tag sometimes nil?
       local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
       local on_change = tag and tag.attributes.on_change
       if vim.is_callable(on_change) then
@@ -943,6 +959,7 @@ function Morph:_on_text_changed()
       end
     end
   end
+  self.textlock = old_textlock
 end
 
 --------------------------------------------------------------------------------
