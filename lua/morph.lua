@@ -704,22 +704,6 @@ function Morph:mount(tree)
     --- @param new_arr morph.Node[]
     --- @return morph.Node[]
     function H2.visit_array(old_arr, new_arr)
-      --- @return string
-      local function verbose_tree_kind(tree, idx)
-        return H.tree_match(tree, {
-          nil_ = function() return 'nil' end,
-          string = function() return 'string' end,
-          boolean = function() return 'boolean' end,
-          array = function() return 'array' end,
-          tag = function(tag)
-            return ('tag-%s-%s'):format(tag.name, tostring(tag.attributes.key or idx))
-          end,
-          component = function(C, tag)
-            return ('component-%s-%s'):format(C, tostring(tag.attributes.key or idx))
-          end,
-        })
-      end
-
       -- We are going to hijack levenshtein in order to compute the
       -- difference between elements/components. In this model, we need to
       -- "update" all the nodes, so no nodes are equal. We will rely on
@@ -737,8 +721,8 @@ function Morph:mount(tree)
           are_equal = function() return false end,
           cost = {
             of_change = function(node1, node2, node1_idx, node2_idx)
-              local node1_inf = verbose_tree_kind(node1, node1_idx)
-              local node2_inf = verbose_tree_kind(node2, node2_idx)
+              local node1_inf = H.verbose_tree_kind(node1, node1_idx)
+              local node2_inf = H.verbose_tree_kind(node2, node2_idx)
               return node1_inf == node2_inf and 1 or 2
             end,
           },
@@ -760,8 +744,8 @@ function Morph:mount(tree)
           -- change is either:
           -- - unmount, then mount
           -- - update
-          local from_kind = verbose_tree_kind(change.from)
-          local to_kind = verbose_tree_kind(change.to)
+          local from_kind = H.verbose_tree_kind(change.from)
+          local to_kind = H.verbose_tree_kind(change.to)
           if from_kind == to_kind then
             resulting_node = H2.visit_tree(change.from, change.to)
           else
@@ -966,6 +950,11 @@ end
 -- Utilities
 --------------------------------------------------------------------------------
 
+--- @param x morph.Tree
+function H.tree_is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
+--- @param x morph.Tree
+function H.tree_is_tag_arr(x) return type(x) == 'table' and not H.tree_is_tag(x) end
+
 --- @param tree morph.Tree
 --- @param visitors {
 ---   nil_?: (fun(): any),
@@ -977,18 +966,15 @@ end
 ---   unknown?: fun(tag: any): any
 --- }
 function H.tree_match(tree, visitors)
-  local function is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
-  local function is_tag_arr(x) return type(x) == 'table' and not is_tag(x) end
-
   if tree == nil or tree == vim.NIL then
     return visitors.nil_ and visitors.nil_() or nil
   elseif type(tree) == 'boolean' then
     return visitors.boolean and visitors.boolean(tree) or nil
   elseif type(tree) == 'string' then
     return visitors.string and visitors.string(tree) or nil
-  elseif is_tag_arr(tree) then
+  elseif H.tree_is_tag_arr(tree) then
     return visitors.array and visitors.array(tree --[[@as any]]) or nil
-  elseif is_tag(tree) then
+  elseif H.tree_is_tag(tree) then
     local tag = tree --[[@as morph.Tag]]
     if vim.is_callable(tag.name) then
       return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
@@ -1003,15 +989,34 @@ end
 --- @param tree morph.Tree
 --- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
 function H.tree_kind(tree)
-  return H.tree_match(tree, {
-    nil_ = function() return 'nil' end,
-    boolean = function() return 'boolean' end,
-    string = function() return 'string' end,
-    array = function() return 'array' end,
-    tag = function() return 'tag' end,
-    component = function(c) return c end,
-    unknown = function() return 'unknown' end,
-  }) --[[@as any]]
+  if tree == nil or tree == vim.NIL then return 'nil' end
+  if type(tree) == 'string' then return 'string' end
+  if type(tree) == 'boolean' then return 'boolean' end
+  if H.tree_is_tag_arr(tree) then return 'array' end
+  if H.tree_is_tag(tree) then
+    if vim.is_callable(tree.name) then
+      return tree.name --[[@as morph.Component]]
+    else
+      return 'tag'
+    end
+  end
+  return 'unknown'
+end
+
+--- @return string
+function H.verbose_tree_kind(tree, idx)
+  if tree == nil or tree == vim.NIL then return 'nil' end
+  if type(tree) == 'string' then return 'string' end
+  if type(tree) == 'boolean' then return 'boolean' end
+  if H.tree_is_tag_arr(tree) then return 'array' end
+  if H.tree_is_tag(tree) then
+    if vim.is_callable(tree.name) then
+      return 'component-' .. tostring(tree.name) .. '-' .. tostring(tree.attributes.key or idx)
+    else
+      return 'tag-' .. tree.name .. '-' .. tostring(tree.attributes.key or idx)
+    end
+  end
+  error 'unknown'
 end
 
 function H.is_textlock()
