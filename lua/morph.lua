@@ -204,7 +204,6 @@ function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
       or ''
     extmark.stop = Pos00.new(buf_max_line0, last_line:len())
   end
-
   return extmark
 end
 
@@ -241,6 +240,28 @@ function Extmark._get_near_overshoot(bufnr, ns, start, stop)
       return Extmark._from_raw(bufnr, ns, id, line0, col0, assert(details))
     end)
     :totable()
+end
+
+--- @private
+function Extmark:_text()
+  local start = self.start
+  local stop = self.stop
+  if start == stop then return '' end
+
+  local pos1 = { self.bufnr, start[1] + 1, start[2] + 1 }
+  local pos2 = { self.bufnr, stop[1] + 1, stop[2] }
+  local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
+  if not ok then
+    vim.api.nvim_echo({
+      { '(morph.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
+      {
+        '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }),
+      },
+    }, true, {})
+    error(lines)
+  end
+  if type(lines) == 'string' then return lines end
+  return vim.iter(lines):join '\n'
 end
 
 --------------------------------------------------------------------------------
@@ -891,44 +912,31 @@ end
 
 --- @private
 function Morph:_on_text_changed()
-  if self.changing or self.changedtick == vim.b[self.bufnr].changedtick then return end
+  --- @type morph.Extmark[]
+  local changed = {}
+  for _, cached_extmark in ipairs(self.text_content.curr.extmarks) do
+    local live_extmark = assert(Extmark.by_id(self.bufnr, self.ns, cached_extmark.id))
+    if live_extmark.start ~= cached_extmark or live_extmark.stop ~= cached_extmark.stop then
+      table.insert(changed, live_extmark)
+    end
+  end
 
-  -- Reset changedtick, so that the reconciler knows to refresh its cached
-  -- buffer-content before computing the diff:
-  self.changedtick = 0
+  -- Sort the tags into smallest (inner) to largest (outer):
+  table.sort(changed, function(x1, x2)
+    if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
+    return x1.start >= x2.start and x1.stop <= x2.stop
+  end)
 
-  local l, c = unpack(vim.api.nvim_win_get_cursor(0))
-  l = assert(l) - 1 -- make it actually 0-based
-  local elements = self:get_elements_at(Pos00.new(l, assert(c)), 'i')
-  --- @type { bubble_up: boolean }
-  local loop_control = { bubble_up = true }
-  for _, elem in ipairs(elements) do
+  local loop_control = {
+    bubble_up = true --[[@as boolean]],
+  }
+  for _, extmark in ipairs(changed) do
     if loop_control.bubble_up then
-      local on_change = elem.attributes.on_change
+      -- TODO: why is tag sometimes nil?
+      local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
+      local on_change = tag and tag.attributes.on_change
       if vim.is_callable(on_change) then
-        if elem.extmark.start == elem.extmark.stop then
-          local e = { text = '', bubble_up = true }
-          --- @diagnostic disable-next-line: need-check-nil
-          on_change(e)
-          loop_control.bubble_up = e.bubble_up
-          return -- TODO
-        end
-
-        local pos1 = { self.bufnr, elem.extmark.start[1] + 1, elem.extmark.start[2] + 1 }
-        local pos2 = { self.bufnr, elem.extmark.stop[1] + 1, elem.extmark.stop[2] }
-        local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
-        if not ok then
-          vim.api.nvim_echo({
-            { '(morph.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
-            {
-              '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }),
-            },
-          }, true, {})
-          error(lines)
-        end
-        if type(lines) == 'string' then lines = { lines } end
-
-        local e = { text = table.concat(lines, '\n'), bubble_up = true }
+        local e = { text = extmark:_text(), bubble_up = true }
         --- @diagnostic disable-next-line: need-check-nil
         on_change(e)
         loop_control.bubble_up = e.bubble_up
