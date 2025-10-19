@@ -4,6 +4,12 @@ Build interactive text user interfaces in Neovim with a React-like component mod
 
 ![Blob](./morph.jpg)
 
+## Demo
+
+Show, don't tell: If you want to see the kinds of things you can make with Morph, see the following screencast, that demos [one of the examples](./examples/docker-containers.lua) from this repo.
+
+[![asciicast](https://asciinema.org/a/sErPWJAgYge1DSskj5zrgNJZM.svg)](https://asciinema.org/a/sErPWJAgYge1DSskj5zrgNJZM)
+
 ## Table of Contents
 
 - [What is morph.nvim?](#what-is-morphnvim)

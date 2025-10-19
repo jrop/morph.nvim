@@ -249,7 +249,7 @@ function Extmark:_text()
   if start == stop then return '' end
 
   local pos1 = { self.bufnr, start[1] + 1, start[2] + 1 }
-  local pos2 = { self.bufnr, stop[1] + 1, stop[2] }
+  local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2] }
   local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
   if not ok then
     vim.api.nvim_echo({
