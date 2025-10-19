@@ -54,7 +54,7 @@ end
 
 --- @param ctx morph.Ctx<{ users: { first_name: string, last_name: string, email: string, username: string }[] }, { filter: string }>
 local function Users(ctx)
-  if ctx.phase == 'mount' then ctx.state = { filter = 'e' } end
+  if ctx.phase == 'mount' then ctx.state = { filter = '' } end
   local state = assert(ctx.state)
 
   local table_cells = {}

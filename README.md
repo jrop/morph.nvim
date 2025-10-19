@@ -4,9 +4,32 @@ Build interactive text user interfaces in Neovim with a React-like component mod
 
 ![Blob](./morph.jpg)
 
+## Table of Contents
+
+- [What is morph.nvim?](#what-is-morphnvim)
+- [Quick Start](#quick-start)
+- [Key Features](#key-features)
+  - [Component-Based Architecture](#-component-based-architecture)
+  - [Efficient Reconciliation](#-efficient-reconciliation)
+  - [Rich Text Styling](#-rich-text-styling)
+  - [Interactive Event Handling](#-interactive-event-handling)
+  - [Text Change Detection](#-text-change-detection)
+- [Real-World Example](#real-world-example)
+- [Installation](#installation)
+- [Hyperscript Syntax](#hyperscript-syntax)
+  - [Element Types](#element-types)
+  - [Special Attributes](#special-attributes)
+- [API Reference](#api-reference)
+  - [Core Functions](#core-functions)
+  - [Component Context](#component-context)
+  - [Event Handlers](#event-handlers)
+- [Why morph.nvim?](#why-morphnvim)
+- [Similar Projects](#similar-projects)
+- [License (MIT)](#license-mit)
+
 ## What is morph.nvim?
 
-morph.nvim lets you create dynamic, interactive buffers using familiar React patterns like components, state, and event handlers. Perfect for building custom UIs, forms, dashboards, or any interactive text-based interface within Neovim.
+morph.nvim transforms Neovim into a powerful **TUI (Terminal User Interface) framework**, letting you create dynamic, interactive buffers using familiar React patterns like components, state, and event handlers. Perfect for building custom UIs, forms, dashboards, file explorers, or any interactive text-based interface within Neovim's editing environment.
 
 ## Quick Start
 
@@ -45,6 +68,9 @@ renderer:mount(h(Counter, {}, {}))
 
 ### 🎯 **Component-Based Architecture**
 Write reusable components with props, state, and lifecycle methods. Components can render other components, creating a composable hierarchy:
+
+<details>
+<summary>View TodoList component example</summary>
 
 ```lua
 --- @param ctx morph.Ctx<{ todo: any, on_toggle: function }, {}>
@@ -94,11 +120,16 @@ local function TodoList(ctx)
 end
 ```
 
+</details>
+
 ### ⚡ **Efficient Reconciliation**
-Only updates what changed, using a diffing algorithm similar to React's virtual DOM.
+Only updates what changed, using a diffing algorithm similar to React's virtual DOM. The renderer intelligently patches only the specific text regions that have actually changed, preserving cursor position and avoiding disruptive window jumps. This means smooth, flicker-free updates even for complex UIs with frequent state changes.
 
 ### 🎨 **Rich Text Styling**
 Apply highlight groups and extmarks with simple attributes:
+
+<details>
+<summary>View styling examples</summary>
 
 ```lua
 h.ErrorMsg({ 
@@ -108,8 +139,13 @@ h.ErrorMsg({
 }, 'Invalid input')
 ```
 
+</details>
+
 ### 🔥 **Interactive Event Handling**
 Respond to keypresses with mode-specific handlers:
+
+<details>
+<summary>View event handling examples</summary>
 
 ```lua
 h('text', {
@@ -121,8 +157,13 @@ h('text', {
 }, 'Interactive text')
 ```
 
+</details>
+
 ### 📝 **Text Change Detection**
 Automatically detect when users edit text within tags:
+
+<details>
+<summary>View text change detection example</summary>
 
 ```lua
 h('text', {
@@ -133,7 +174,12 @@ h('text', {
 }, 'Editable content')
 ```
 
+</details>
+
 ## Real-World Example
+
+<details>
+<summary>View SearchForm component example</summary>
 
 ```lua
 --- @param ctx morph.Ctx<{}, { query: string, results: table[] }>
@@ -172,6 +218,8 @@ local function SearchForm(ctx)
 end
 ```
 
+</details>
+
 ## Installation
 
 Since this is not a traditional Neovim "plugin" (it is a library), plugin authors are the intended consumers. Neovim does not have a good answer for automatic management of plugin dependencies. As such, it is recommended that library authors:
@@ -182,9 +230,47 @@ OR:
 
 2. Suggest to their users to add morph.nvim as a dependency in their package manager. The major con here is that breaking changes could be inadvertantly pulled in by users when they update their plugins.
 
+**Future Option:** I'm considering using an [Artifact Branch](https://www.toddway.com/2020/04/18/share-artifacts-with-an-orphan-branch.html) to publish the standalone `morph.lua` (as `init.lua`) file, which would enable cleaner git submodule integration for plugin authors who want to vendor the library.
+
+<details>
+<summary>Example git submodule setup (future)</summary>
+
+```bash
+# In your plugin repository
+git submodule add -b artifact https://github.com/jrapodaca/morph.nvim.git lua/vendor/morph
+git submodule update --init --recursive
+
+# This would place Morph at:
+# lua/vendor/morph/init.lua
+
+# Then in your plugin code:
+local Morph = require('vendor.morph')
+```
+
+This approach would allow plugin authors to:
+- Pin to specific versions of morph.nvim
+- Get updates with `git submodule update --remote`
+- Keep the dependency explicit and version-controlled
+- Avoid namespace conflicts with user-installed plugins
+
+</details>
+
 ## Hyperscript Syntax
 
 morph.nvim uses a hyperscript-like syntax for creating elements, similar to React's JSX but in Lua:
+
+### Element Types
+
+Currently, morph.nvim understands only one type of string-based element: `'text'`.
+
+### Special Attributes
+
+Several attributes have special meaning in morph.nvim:
+
+- `id` - Unique identifier for the element (used with `renderer:get_element_by_id()`)
+- `hl` - Highlight group name for styling the text
+- `extmark` - Raw extmark options passed to `nvim_buf_set_extmark()`
+- `key` - Helps the reconciler identify matchup old elements in arrays with new ones during updates (similar to React keys)
 
 ```lua
 -- Basic text element
@@ -192,6 +278,10 @@ h('text', { hl = 'Comment' }, 'Hello world')
 
 -- Shorthand for highlight groups
 h.Comment({}, 'Hello world')  -- equivalent to above
+
+-- Semantic element names (all treated as 'text' internally)
+h('button', { hl = 'Keyword' }, '[Click me]')
+h('header', { hl = 'Title' }, 'Section Title')
 
 -- Nested elements
 h('text', {}, {
@@ -233,20 +323,83 @@ The `h` function creates virtual elements that get rendered to buffer text with 
 
 ## API Reference
 
+### Key Concepts
+
+Understanding morph.nvim's core data structures:
+
+- **Tree** - A declarative description of what you want to render. A Tree can be `nil`, `boolean`, `string`, a `Tag` (created by calling `h()`), or an array (even nested) of any combination of these types. Trees are returned from components and describe the structure and attributes but don't have physical presence in the buffer yet.
+
+- **Element** - An instantiated Tree that has been rendered to the buffer. Elements have an associated `extmark` that tracks their actual position and bounds in the buffer text. When you call `renderer:get_elements_at()`, you get Elements, not Trees.
+
+- **Tag** - The result of calling `h(name, attributes, children)`. Tags are a type of Tree node that represents a single element with its properties.
+
+- **Component** - A function that takes a context and returns a Tree. Components can have state and lifecycle methods, making them the building blocks for interactive UIs.
+
+- **Context (ctx)** - The persistent object passed to components that holds props, state, and lifecycle information. Unlike React hooks, the same context instance is reused across renders.
+
+The flow: `Tree → render() → Element → buffer text + extmarks`
+
 ### Core Functions
 
+- `h(name, attributes?, children?)` - Create elements
 - `Morph.new(bufnr?)` - Create a new renderer for a buffer
 - `renderer:mount(tree)` - Mount a component tree
 - `renderer:render(tree)` - Render static markup
-- `h(name, attributes?, children?)` - Create elements
+- `renderer:get_element_by_id(id)` - Find an element by its `id` attribute
+- `renderer:get_elements_at(pos, mode?)` - Get all elements at a cursor position, sorted from innermost to outermost
 
 ### Component Context
 
-- `ctx.props` - Component properties
-- `ctx.state` - Component state
-- `ctx.children` - Child elements
+Instead of React-style hooks like `useState` and `useEffect`, morph.nvim uses a **context object** (`ctx`) that persists across renders. This approach is simpler and more predictable - your component receives the same context instance on every render, maintaining state automatically.
+
+The context acts as your component's "memory" between renders:
+
+<details>
+<summary>View StatefulCounter component example</summary>
+
+```lua
+--- @param ctx morph.Ctx<{ initial: number }, { count: number, history: number[] }>
+local function StatefulCounter(ctx)
+  -- Initialize state only on first render
+  if ctx.phase == 'mount' then
+    ctx.state = { 
+      count = ctx.props.initial or 0,
+      history = {}
+    }
+  end
+  
+  local state = ctx.state
+  
+  return {
+    'Count: ', tostring(state.count), '\n',
+    'History: ', table.concat(state.history, ', '), '\n',
+    h.Keyword({
+      nmap = {
+        ['<CR>'] = function()
+          -- Update state and trigger re-render
+          ctx:update({
+            count = state.count + 1,
+            history = vim.list_extend({}, state.history, { state.count })
+          })
+          return ''
+        end
+      }
+    }, '[Press Enter to increment]')
+  }
+end
+```
+
+</details>
+
+**Key Properties:**
+
+- `ctx.props` - Component properties (read-only, updated by parent)
+- `ctx.state` - Component state (your persistent data between renders)
+- `ctx.children` - Child elements passed to this component
 - `ctx:update(new_state)` - Update state and trigger re-render
 - `ctx.phase` - Current lifecycle phase ('mount', 'update', 'unmount')
+
+**Why this approach?** No hook dependency arrays, no stale closures, no complex effect cleanup. Just straightforward state management that's easy to reason about and debug. If this simple approach doesn't meet your needs, you can easily integrate more sophisticated state management solutions (like Redux-style reducers, state machines, or reactive stores) by calling `ctx:update()` whenever your external state changes.
 
 ### Event Handlers
 
@@ -255,7 +408,15 @@ The `h` function creates virtual elements that get rendered to buffer text with 
 
 ## Why morph.nvim?
 
+Neovim is already an exceptional text editor, but morph.nvim unlocks its potential as a **full-featured TUI application host**. Instead of being limited to traditional plugin UIs, you can build rich, interactive applications that feel native to the terminal while leveraging Neovim's powerful text manipulation capabilities.
+
 Building interactive UIs in Neovim traditionally requires managing buffer content, extmarks, keymaps, and autocmds manually. morph.nvim abstracts this complexity behind a declarative, component-based API that feels familiar to web developers while being optimized for Neovim's unique capabilities.
+
+## Similar Projects
+
+- [reactive.nvim](https://github.com/rasulomaroff/reactive.nvim)
+- [nvim-react](https://github.com/s1n7ax/nvim-react)
+- ??? There's another one (a recent AI plugin) that implemented its own renderer that is similar in architecture, but it is implemented in TypeScript, and its name escapes me.
 
 ## License (MIT)
 
