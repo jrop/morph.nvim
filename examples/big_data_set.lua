@@ -3,48 +3,71 @@ local h = Morph.h
 
 local H = {}
 
---- @generic T
---- @param xs any[]
---- @param init? integer
---- @param key string
-local function max_width(xs, key, init)
-  local max_width = init or 0
-  for _, x in ipairs(xs) do
-    local w = #x[key]
-    if w > max_width then max_width = w end
+---
+--- This is the part that gets really expensive, and why this is a somewhat
+--- useful test. This `Table` component (inefficiently implemented) makes the
+--- UI stutter.
+---
+--- @param ctx morph.Ctx<{ cells: morph.Tree[][] }>
+local function Table(ctx)
+  local cells = ctx.props.cells
+  local max_widths = {}
+
+  -- Calculate max width for each column
+  for col_idx = 1, #cells[1] do
+    local max_width = 0
+    for row_idx = 1, #cells do
+      local cell = cells[row_idx][col_idx]
+      local cell_text = Morph.markup_to_string { tree = cell }
+      local width = #cell_text + 1
+      if width > max_width then max_width = width end
+    end
+    max_widths[col_idx] = max_width
   end
-  return max_width
+
+  local result = {}
+
+  for row_idx, row in ipairs(cells) do
+    if row_idx > 1 then table.insert(result, '\n') end
+
+    for col_idx, cell in ipairs(row) do
+      table.insert(result, cell)
+
+      if col_idx < #row then
+        -- Calculate padding needed for this cell
+        local cell_text = Morph.markup_to_string { tree = cell }
+        local cell_width = #cell_text
+        --- @type integer
+        local needed_padding = max_widths[col_idx] - cell_width
+
+        if needed_padding > 0 then table.insert(result, string.rep(' ', needed_padding)) end
+      end
+    end
+  end
+
+  return result
 end
 
 --------------------------------------------------------------------------------
 -- Types
 --------------------------------------------------------------------------------
 
---- @param ctx morph.Ctx<{ users: { first_name: string, last_name: string, email: string, username: string }[] }, { filter: string, max_widths: integer[] }>
+--- @param ctx morph.Ctx<{ users: { first_name: string, last_name: string, email: string, username: string }[] }, { filter: string }>
 local function Users(ctx)
-  if ctx.phase == 'mount' then
-    local users = ctx.props.users
-    ctx.state = {
-      filter = '',
-      max_widths = {
-        max_width(users, 'first_name', #'FIRST NAME'),
-        max_width(users, 'last_name', #'LAST NAME'),
-        max_width(users, 'email', #'EMAIL'),
-        max_width(users, 'username', #'USERNAME'),
-      },
-    }
-  end
+  if ctx.phase == 'mount' then ctx.state = { filter = 'e' } end
   local state = assert(ctx.state)
 
-  local table_layout = {}
+  local table_cells = {}
 
-  table.insert(table_layout, {
-    h.Constant({}, ('%-' .. tostring(state.max_widths[1]) .. 's'):format 'FIRST NAME'),
-    h.Constant({}, ('%-' .. tostring(state.max_widths[2]) .. 's'):format 'LAST NAME'),
-    h.Constant({}, ('%-' .. tostring(state.max_widths[3]) .. 's'):format 'EMAIL'),
-    h.Constant({}, ('%-' .. tostring(state.max_widths[4]) .. 's'):format 'USERNAME'),
+  -- Header row
+  table.insert(table_cells, {
+    h.Constant({}, 'FIRST NAME'),
+    h.Constant({}, 'LAST NAME'),
+    h.Constant({}, 'EMAIL'),
+    h.Constant({}, 'USERNAME'),
   })
 
+  -- Data rows
   for _, item in ipairs(ctx.props.users) do
     local passes_filter = state.filter == ''
       or item.first_name:find(state.filter, 1, true) ~= nil
@@ -52,12 +75,11 @@ local function Users(ctx)
       or item.email:find(state.filter, 1, true) ~= nil
       or item.username:find(state.filter, 1, true) ~= nil
     if passes_filter then
-      table.insert(table_layout, {
-        '\n',
-        h.Text({}, ('%-' .. tostring(state.max_widths[1]) .. 's'):format(item.first_name)),
-        h.Text({}, ('%-' .. tostring(state.max_widths[2]) .. 's'):format(item.last_name)),
-        h.String({}, ('%-' .. tostring(state.max_widths[3]) .. 's'):format(item.email)),
-        h.String({}, ('%-' .. tostring(state.max_widths[4]) .. 's'):format(item.username)),
+      table.insert(table_cells, {
+        h.Text({}, item.first_name),
+        h.Text({}, item.last_name),
+        h.String({}, item.email),
+        h.String({}, item.username),
       })
     end
   end
@@ -73,7 +95,7 @@ local function Users(ctx)
     ']',
     '\n\n',
 
-    table_layout,
+    h(Table, { cells = table_cells }),
   }
 end
 
