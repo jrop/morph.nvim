@@ -1128,4 +1128,86 @@ describe('Morph', function()
       assert.are.same(result, 'z') -- should return original key
     end)
   end)
+
+  it('should handle blank lines at the end of buffer text', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_changed_text = ''
+
+      -- Render content with blank lines at the end
+      r:render {
+        h('text', {
+          on_change = function(e) captured_changed_text = e.text end,
+        }, {
+          'line 1\n',
+          'line 2\n',
+          '\n',
+        }),
+      }
+
+      assert.are.same(get_lines(), { 'line 1', 'line 2', '', '' })
+
+      -- Test that getregion works correctly with blank lines at end
+      local elems = r:get_elements_at { 0, 1 }
+      assert.are.same(#elems, 1)
+      assert.are.same(elems[1].extmark.start, Pos00.new(0, 0))
+      assert.are.same(elems[1].extmark.stop, Pos00.new(3, 0))
+
+      -- The extmark ends on a blank line, at column 0, which has tripped up
+      -- the translated call to getregion in Extmark:_text() in the past. This
+      -- is the main reason for this test: to check this case:
+      assert.are.same(elems[1].extmark:_text(), 'line 1\nline 2\n\n')
+
+      -- Modify the text and ensure on_change fires correctly
+      vim.api.nvim_buf_set_text(0, 0, 0, 3, 0, { 'modified content' })
+      r:_on_text_changed()
+
+      assert.are.same(get_text(), 'modified content')
+      assert.are.same(captured_changed_text, 'modified content')
+    end)
+  end)
+
+  it('should handle on_change events for tags at end of line', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_changed_text = nil
+
+      -- Text structure: "Search: input_text"
+      -- The input tag is at the end of the line
+      r:render {
+        'Search: ',
+        h('text', {
+          on_change = function(e) captured_changed_text = e.text end,
+        }, 'input_text'),
+      }
+
+      assert.are.same(get_lines(), { 'Search: input_text' })
+
+      -- Delete the input text at the end of the line
+      -- This should trigger on_change with an empty string
+      vim.api.nvim_buf_set_text(0, 0, 8, 0, 18, {})
+      r:_on_text_changed()
+
+      assert.are.same(get_text(), 'Search: ')
+      assert.are.same(captured_changed_text, '')
+
+      -- Test with different end position
+      r:render {
+        'Filter: ',
+        h('text', {
+          on_change = function(e) captured_changed_text = e.text end,
+        }, 'query'),
+      }
+
+      captured_changed_text = nil
+      assert.are.same(get_lines(), { 'Filter: query' })
+
+      -- Delete just the query part
+      vim.api.nvim_buf_set_text(0, 0, 8, 0, 13, {})
+      r:_on_text_changed()
+
+      assert.are.same(get_text(), 'Filter: ')
+      assert.are.same(captured_changed_text, '')
+    end)
+  end)
 end)
