@@ -474,7 +474,7 @@ function Morph.new(bufnr)
   if bufnr == nil or bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end
 
   if vim.b[bufnr]._renderer_ns == nil then
-    vim.b[bufnr]._renderer_ns = vim.api.nvim_create_namespace('my.renderer:' .. tostring(bufnr))
+    vim.b[bufnr]._renderer_ns = vim.api.nvim_create_namespace('morph:' .. tostring(bufnr))
   end
 
   local self = setmetatable({

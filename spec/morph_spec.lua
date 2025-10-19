@@ -205,7 +205,7 @@ describe('Morph', function()
       [[    end_right_gravity = true,]],
       [[    id = 1,]],
       [[    ns_id = 623,]],
-      [[    ns_name = "my.renderer:91",]],
+      [[    ns_name = "morph:91",]],
       [[    right_gravity = false]],
       [[  } }]],
       [[]],
