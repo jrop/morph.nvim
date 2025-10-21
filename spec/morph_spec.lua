@@ -1278,4 +1278,162 @@ describe('Morph', function()
       assert.are.same(captured_changed_text, 'hello')
     end)
   end)
+
+  -- Edge case tests for extmarks at buffer boundaries
+  it('should handle extmarks at buffer boundaries correctly', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+
+      -- Test extmark starting at (0,0)
+      r:render {
+        h('text', { id = 'start-boundary' }, 'start'),
+        ' middle ',
+        h('text', { id = 'end-boundary' }, 'end'),
+      }
+
+      assert.are.same(get_lines(), { 'start middle end' })
+
+      local start_elem = r:get_element_by_id 'start-boundary'
+      assert.is_not_nil(start_elem)
+      assert.are.same(start_elem.extmark.start, Pos00.new(0, 0))
+      assert.are.same(start_elem.extmark.stop, Pos00.new(0, 5))
+
+      local end_elem = r:get_element_by_id 'end-boundary'
+      assert.is_not_nil(end_elem)
+      assert.are.same(end_elem.extmark.start, Pos00.new(0, 13))
+      assert.are.same(end_elem.extmark.stop, Pos00.new(0, 16))
+
+      -- Test extmark at very end of buffer
+      r:render {
+        'prefix ',
+        h('text', { id = 'buffer-end' }, 'at-end'),
+      }
+
+      local end_elem = r:get_element_by_id 'buffer-end'
+      assert.is_not_nil(end_elem)
+      assert.are.same(end_elem.extmark.start, Pos00.new(0, 7))
+      assert.are.same(end_elem.extmark.stop, Pos00.new(0, 13))
+    end)
+  end)
+
+  -- Edge case tests for zero-width extmarks
+  it('should handle zero-width extmarks correctly', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_events = {}
+
+      -- Create a zero-width extmark by rendering empty content
+      r:render {
+        'before',
+        h('text', {
+          id = 'zero-width',
+          on_change = function(e)
+            table.insert(captured_events, { id = 'zero-width', text = e.text })
+          end,
+        }, ''),
+        'after',
+      }
+
+      assert.are.same(get_lines(), { 'beforeafter' })
+
+      local zero_elem = r:get_element_by_id 'zero-width'
+      assert.is_not_nil(zero_elem)
+      assert.are.same(zero_elem.extmark.start, Pos00.new(0, 6))
+      assert.are.same(zero_elem.extmark.stop, Pos00.new(0, 6))
+
+      -- Test that we can still detect the zero-width extmark at its position
+      local elements = r:get_elements_at { 0, 6 }
+      assert.are.same(#elements, 1)
+      assert.are.same(elements[1].attributes.id, 'zero-width')
+
+      -- Test inserting text at the zero-width position
+      set_text(0, 6, 0, 6, { 'inserted' })
+      r:_on_text_changed()
+
+      assert.are.same(get_text(), 'beforeinsertedafter')
+      assert.are.same(#captured_events, 1)
+      assert.are.same(captured_events[1].text, 'inserted')
+    end)
+  end)
+
+  -- Edge case tests for multi-byte characters
+  it('should handle multi-byte characters correctly', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_events = {}
+
+      -- Test with emojis, CJK characters, and combining characters
+      local emoji_text = '🚀🌟'
+      local cjk_text = '你好世界'
+      local combining_text = 'é' -- e + combining acute accent
+
+      r:render {
+        h('text', {
+          id = 'emoji-tag',
+          on_change = function(e)
+            table.insert(captured_events, { id = 'emoji-tag', text = e.text })
+          end,
+        }, emoji_text),
+        ' ',
+        h('text', {
+          id = 'cjk-tag',
+          on_change = function(e) table.insert(captured_events, { id = 'cjk-tag', text = e.text }) end,
+        }, cjk_text),
+        ' ',
+        h('text', {
+          id = 'combining-tag',
+          on_change = function(e)
+            table.insert(captured_events, { id = 'combining-tag', text = e.text })
+          end,
+        }, combining_text),
+      }
+
+      local expected_text = emoji_text .. ' ' .. cjk_text .. ' ' .. combining_text
+      assert.are.same(get_text(), expected_text)
+
+      -- Test that extmark boundaries are calculated correctly for multi-byte chars
+      local emoji_elem = r:get_element_by_id 'emoji-tag'
+      local cjk_elem = r:get_element_by_id 'cjk-tag'
+      local combining_elem = r:get_element_by_id 'combining-tag'
+
+      assert.is_not_nil(emoji_elem)
+      assert.is_not_nil(cjk_elem)
+      assert.is_not_nil(combining_elem)
+
+      assert.are.same(emoji_elem.extmark:_text(), emoji_text)
+      assert.are.same(cjk_elem.extmark:_text(), cjk_text)
+      assert.are.same(combining_elem.extmark:_text(), combining_text)
+    end)
+  end)
+
+  -- Additional test for multi-byte character edge cases
+  it('should handle multi-byte character boundaries and cursor positioning', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+
+      -- Test with a mix of ASCII and multi-byte characters
+      r:render {
+        'ASCII',
+        h('text', { id = 'mixed', hl = 'Test' }, '🎯中文'),
+        'more',
+      }
+
+      assert.are.same(get_text(), 'ASCII🎯中文more')
+
+      local mixed_elem = r:get_element_by_id 'mixed'
+      assert.is_not_nil(mixed_elem)
+
+      -- Test cursor positioning at various points in the multi-byte sequence
+      local elements_at_start = r:get_elements_at { 0, 5 } -- Start of emoji
+      assert.are.same(#elements_at_start, 1)
+      assert.are.same(elements_at_start[1].attributes.id, 'mixed')
+
+      -- Test that we can handle positions that might fall in the middle of multi-byte chars
+      -- (though Neovim should handle this gracefully)
+      local elements_in_middle = r:get_elements_at { 0, 7 } -- Somewhere in the multi-byte sequence
+      if #elements_in_middle > 0 then
+        assert.are.same(elements_in_middle[1].attributes.id, 'mixed')
+      end
+    end)
+  end)
 end)
