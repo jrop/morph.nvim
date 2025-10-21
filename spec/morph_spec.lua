@@ -1167,6 +1167,31 @@ describe('Morph', function()
     end)
   end)
 
+  it('should handle 0-column position in extmark when text follows', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_changed_text = nil
+
+      -- Text structure: "Search [filter]"
+      r:render {
+        'Search [',
+        h('text', {
+          on_change = function(e) captured_changed_text = e.text end,
+        }, 'filter'),
+        ']',
+      }
+
+      assert.are.same(get_lines(), { 'Search [filter]' })
+
+      -- Insert a newline at the end of 'filter'
+      vim.api.nvim_buf_set_text(0, 0, 14, 0, 14, { '', '' })
+      r:_on_text_changed()
+
+      assert.are.same(get_lines(), { 'Search [filter', ']' })
+      assert.are.same(captured_changed_text, 'filter\n')
+    end)
+  end)
+
   it('should handle on_change events for tags at end of line', function()
     with_buf({}, function()
       local r = Morph.new(0)

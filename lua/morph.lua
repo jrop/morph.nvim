@@ -248,6 +248,16 @@ function Extmark:_text()
   local stop = self.stop
   if start == stop then return '' end
 
+  local insert_blank = false
+  if stop[2] == 0 then
+    -- set stop to end of previous line (stop[1] - 1)
+    if stop[1] > 0 then
+      insert_blank = true
+      local prev_line = vim.api.nvim_buf_get_lines(self.bufnr, stop[1] - 1, stop[1], true)[1] or ''
+      stop = Pos00.new(stop[1] - 1, #prev_line)
+    end
+  end
+
   local pos1 = { self.bufnr, start[1] + 1, start[2] + 1 }
   local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2] }
   local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
@@ -260,7 +270,8 @@ function Extmark:_text()
     }, true, {})
     error(lines)
   end
-  if type(lines) == 'string' then return lines end
+
+  if insert_blank then table.insert(lines --[[@as (string[])]], '') end
   return vim.iter(lines):join '\n'
 end
 
