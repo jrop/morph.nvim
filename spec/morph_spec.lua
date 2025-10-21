@@ -1436,4 +1436,57 @@ describe('Morph', function()
       end
     end)
   end)
+
+  it('should handle undo/redo', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+
+      local captured_changed_text = ''
+
+      --- @param ctx morph.Ctx
+      local function App(ctx)
+        return {
+          'Search: [',
+          h('text', {
+            id = 'filter',
+            on_change = function(e) captured_changed_text = e.text end,
+          }, ''),
+          ']',
+        }
+      end
+
+      r:mount(h(App))
+      local filter_elem = assert(r:get_element_by_id 'filter')
+      assert.are.same(get_text(), 'Search: []')
+      assert.are.same(filter_elem.extmark:_text(), '')
+      set_cursor { filter_elem.extmark.start[1] + 1, filter_elem.extmark.start[2] }
+
+      -- Insert text:
+      vim.api.nvim_feedkeys('ifilter', 'ntx', false)
+      r:_on_text_changed()
+      assert.are.same(captured_changed_text, 'filter')
+
+      filter_elem = assert(r:get_element_by_id 'filter')
+      assert.are.same(filter_elem.extmark:_text(), 'filter')
+      assert.are.same(get_text(), 'Search: [filter]')
+
+      -- Undo change:
+      vim.cmd.undo()
+      assert.are.same(get_text(), 'Search: []')
+      r:_on_text_changed()
+      assert.are.same(captured_changed_text, '')
+
+      filter_elem = assert(r:get_element_by_id 'filter')
+      assert.are.same(filter_elem.extmark:_text(), '')
+
+      -- Redo change:
+      vim.cmd.redo()
+      r:_on_text_changed()
+      assert.are.same(captured_changed_text, 'filter')
+
+      filter_elem = assert(r:get_element_by_id 'filter')
+      assert.are.same(filter_elem.extmark:_text(), 'filter')
+      assert.are.same(get_text(), 'Search: [filter]')
+    end)
+  end)
 end)
