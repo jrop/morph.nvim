@@ -272,7 +272,9 @@ function Extmark:_text()
     error(lines)
   end
 
-  if insert_blank then table.insert(lines --[[@as (string[])]], '') end
+  if insert_blank then
+    table.insert(lines --[[@as (string[])]], '')
+  end
   return vim.iter(lines):join '\n'
 end
 

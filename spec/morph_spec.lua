@@ -6,6 +6,17 @@ local Pos00 = Morph.Pos00
 
 local function get_lines() return vim.api.nvim_buf_get_lines(0, 0, -1, true) end
 local function get_text() return vim.iter(vim.api.nvim_buf_get_lines(0, 0, -1, true)):join '\n' end
+--- @param start_row integer
+--- @param start_col integer
+--- @param end_row integer
+--- @param end_col integer
+--- @param repl string[]
+local function set_text(start_row, start_col, end_row, end_col, repl)
+  vim.api.nvim_buf_set_text(0, start_row, start_col, end_row, end_col, repl)
+end
+local function line_count() return vim.api.nvim_buf_line_count(0) end
+--- @param pos [integer, integer]
+local function set_cursor(pos) vim.api.nvim_win_set_cursor(0, pos) end
 local function with_buf(lines, f)
   vim.go.swapfile = false
 
@@ -254,7 +265,7 @@ describe('Morph', function()
       vim.fn.setreg('"', 'bleh')
       vim.cmd [[normal! ggVGp]]
 
-      assert.are.same(vim.api.nvim_buf_line_count(0), 1)
+      assert.are.same(line_count(), 1)
       elems = r:get_elements_at { 0, 1 }
       assert.are.same(#elems, 1)
 
@@ -289,7 +300,7 @@ describe('Morph', function()
       }
 
       vim.fn.setreg('"', 'bleh')
-      vim.api.nvim_win_set_cursor(0, { 1, 9 })
+      set_cursor { 1, 9 }
       vim.cmd [[normal! vhhd]]
       -- For some reason, the autocmd does not fire in the busted environment.
       -- We'll call the handler ourselves:
@@ -630,11 +641,8 @@ describe('Morph', function()
       captured_events = {}
 
       -- Replace "inner" with "changed"
-      vim.api.nvim_buf_set_text(0, 0, 21, 0, 26, { 'changed' })
-      assert.are.same(
-        vim.api.nvim_buf_get_lines(0, 0, -1, false),
-        { 'sibling outer middle changed' }
-      )
+      set_text(0, 21, 0, 26, { 'changed' })
+      assert.are.same(get_lines(), { 'sibling outer middle changed' })
       -- Text structure:
       --           111111111122222222
       -- 0123456789012345678901234567
@@ -653,11 +661,8 @@ describe('Morph', function()
       captured_events = {}
 
       -- Replace "sibling" with "modified"
-      vim.api.nvim_buf_set_text(0, 0, 0, 0, 7, { 'modified' })
-      assert.are.same(
-        vim.api.nvim_buf_get_lines(0, 0, -1, false),
-        { 'modified outer middle inner' }
-      )
+      set_text(0, 0, 0, 7, { 'modified' })
+      assert.are.same(get_lines(), { 'modified outer middle inner' })
       -- Text structure:
       --           1111111111222222222
       -- 01234567890123456789012345678
@@ -674,8 +679,8 @@ describe('Morph', function()
       captured_events = {}
 
       -- Replace "middle" with "center"
-      vim.api.nvim_buf_set_text(0, 0, 14, 0, 20, { 'center' })
-      assert.are.same(vim.api.nvim_buf_get_lines(0, 0, -1, false), { 'sibling outer center inner' })
+      set_text(0, 14, 0, 20, { 'center' })
+      assert.are.same(get_lines(), { 'sibling outer center inner' })
       r:_on_text_changed()
 
       assert.are.same(#captured_events, 1)
@@ -869,7 +874,7 @@ describe('Morph', function()
       }
 
       -- Test keypress inside the clickable region
-      vim.api.nvim_win_set_cursor(0, { 1, 12 }) -- position in 'clickable'
+      set_cursor { 1, 12 } -- position in 'clickable'
       local result = r:_expr_map_callback('n', '<CR>')
       assert.are.same(result, '')
       assert.are.same(#captured_events, 1)
@@ -878,14 +883,14 @@ describe('Morph', function()
 
       -- Test keypress outside the clickable region (in prefix)
       captured_events = {}
-      vim.api.nvim_win_set_cursor(0, { 1, 2 }) -- position in 'prefix'
+      set_cursor { 1, 2 } -- position in 'prefix'
       local result = r:_expr_map_callback('n', '<CR>')
       assert.are.same(result, '<CR>') -- should return the original key
       assert.are.same(#captured_events, 0) -- no events captured
 
       -- Test keypress outside the clickable region (in suffix)
       captured_events = {}
-      vim.api.nvim_win_set_cursor(0, { 1, 17 }) -- position in 'suffix'
+      set_cursor { 1, 17 } -- position in 'suffix'
       local result = r:_expr_map_callback('n', '<CR>')
       assert.are.same(result, '<CR>') -- should return the original key
       assert.are.same(#captured_events, 0) -- no events captured
@@ -933,7 +938,7 @@ describe('Morph', function()
       }
 
       -- Test keypress in inner region - should trigger inner handler first
-      vim.api.nvim_win_set_cursor(0, { 1, 8 }) -- position in 'inner'
+      set_cursor { 1, 8 } -- position in 'inner'
       local result = r:_expr_map_callback('n', 'x')
       assert.are.same(result, 'inner-x')
       assert.are.same(#captured_events, 1)
@@ -941,7 +946,7 @@ describe('Morph', function()
 
       -- Test keypress in outer region but not inner
       captured_events = {}
-      vim.api.nvim_win_set_cursor(0, { 1, 2 }) -- position in 'outer '
+      set_cursor { 1, 2 } -- position in 'outer '
       local result = r:_expr_map_callback('n', 'x')
       assert.are.same(result, 'outer-x')
       assert.are.same(#captured_events, 1)
@@ -949,7 +954,7 @@ describe('Morph', function()
 
       -- Test keypress outside both regions
       captured_events = {}
-      vim.api.nvim_win_set_cursor(0, { 1, 18 }) -- position in ' end'
+      set_cursor { 1, 18 } -- position in ' end'
       local result = r:_expr_map_callback('n', 'x')
       assert.are.same(result, 'x') -- should return original key
       assert.are.same(#captured_events, 0)
@@ -993,7 +998,7 @@ describe('Morph', function()
       }
 
       -- Test bubble up behavior
-      vim.api.nvim_win_set_cursor(0, { 1, 8 }) -- position in 'inner'
+      set_cursor { 1, 8 } -- position in 'inner'
       local result = r:_expr_map_callback('n', 'b')
       assert.are.same(result, 'b')
       assert.are.same(#captured_events, 2)
@@ -1039,7 +1044,7 @@ describe('Morph', function()
       }
 
       -- Test no bubble up behavior
-      vim.api.nvim_win_set_cursor(0, { 1, 8 }) -- position in 'inner'
+      set_cursor { 1, 8 } -- position in 'inner'
       local result = r:_expr_map_callback('n', 'c')
       assert.are.same(result, 'inner-handled')
       assert.are.same(#captured_events, 1) -- only inner should be called
@@ -1073,7 +1078,7 @@ describe('Morph', function()
         }, 'text'),
       }
 
-      vim.api.nvim_win_set_cursor(0, { 1, 2 }) -- position in 'text'
+      set_cursor { 1, 2 } -- position in 'text'
 
       -- Test normal mode
       local result = r:_expr_map_callback('n', 'm')
@@ -1118,12 +1123,12 @@ describe('Morph', function()
       }
 
       -- Test keypress cancellation in the region
-      vim.api.nvim_win_set_cursor(0, { 1, 3 }) -- position in 'cancelable'
+      set_cursor { 1, 3 } -- position in 'cancelable'
       local result = r:_expr_map_callback('n', 'z')
       assert.are.same(result, '')
 
       -- Test normal keypress outside the region
-      vim.api.nvim_win_set_cursor(0, { 1, 12 }) -- position in ' normal'
+      set_cursor { 1, 12 } -- position in ' normal'
       local result = r:_expr_map_callback('n', 'z')
       assert.are.same(result, 'z') -- should return original key
     end)
@@ -1159,7 +1164,7 @@ describe('Morph', function()
       assert.are.same(elems[1].extmark:_text(), 'line 1\nline 2\n\n')
 
       -- Modify the text and ensure on_change fires correctly
-      vim.api.nvim_buf_set_text(0, 0, 0, 3, 0, { 'modified content' })
+      set_text(0, 0, 3, 0, { 'modified content' })
       r:_on_text_changed()
 
       assert.are.same(get_text(), 'modified content')
@@ -1184,7 +1189,7 @@ describe('Morph', function()
       assert.are.same(get_lines(), { 'Search [filter]' })
 
       -- Insert a newline at the end of 'filter'
-      vim.api.nvim_buf_set_text(0, 0, 14, 0, 14, { '', '' })
+      set_text(0, 14, 0, 14, { '', '' })
       r:_on_text_changed()
 
       assert.are.same(get_lines(), { 'Search [filter', ']' })
@@ -1210,7 +1215,7 @@ describe('Morph', function()
 
       -- Delete the input text at the end of the line
       -- This should trigger on_change with an empty string
-      vim.api.nvim_buf_set_text(0, 0, 8, 0, 18, {})
+      set_text(0, 8, 0, 18, {})
       r:_on_text_changed()
 
       assert.are.same(get_text(), 'Search: ')
@@ -1228,7 +1233,7 @@ describe('Morph', function()
       assert.are.same(get_lines(), { 'Filter: query' })
 
       -- Delete just the query part
-      vim.api.nvim_buf_set_text(0, 0, 8, 0, 13, {})
+      set_text(0, 8, 0, 13, {})
       r:_on_text_changed()
 
       assert.are.same(get_text(), 'Filter: ')
@@ -1261,13 +1266,13 @@ describe('Morph', function()
       assert.are.same(get_text(), 'hello')
 
       -- Delete the trailing 'o':
-      vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, {})
+      set_text(0, 4, 0, 5, {})
       assert.are.same(get_text(), 'hell')
       r:_on_text_changed()
       assert.are.same(captured_changed_text, 'hell')
 
       -- Reinsert the trailing 'o':
-      vim.api.nvim_buf_set_text(0, 0, 4, 0, 4, { 'o' })
+      set_text(0, 4, 0, 4, { 'o' })
       assert.are.same(get_text(), 'hello')
       r:_on_text_changed()
       assert.are.same(captured_changed_text, 'hello')
