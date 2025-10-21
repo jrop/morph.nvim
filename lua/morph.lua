@@ -74,6 +74,7 @@ local H = {}
 --- @field attributes morph.TagAttributes
 --- @field children morph.Tree
 --- @field private ctx? morph.Ctx
+--- @field private curr_text? string
 
 --- An element is an instantiated Tag
 --- @class morph.Element : morph.Tag
@@ -350,6 +351,9 @@ Morph.__index = Morph
 ---   on_tag?: fun(tag: morph.Tag, start0: morph.Pos00, stop0: morph.Pos00): any
 --- }
 function Morph.markup_to_lines(opts)
+  --- @type (fun(s: string))[]
+  local listeners = {}
+
   --- @type string[]
   local lines = {}
 
@@ -359,11 +363,17 @@ function Morph.markup_to_lines(opts)
   local function put(s)
     lines[curr_line1] = (lines[curr_line1] or '') .. s
     curr_col1 = #lines[curr_line1] + 1
+    for _, listener in ipairs(listeners) do
+      listener(s)
+    end
   end
   local function put_line()
     table.insert(lines, '')
     curr_line1 = curr_line1 + 1
     curr_col1 = 1
+    for _, listener in ipairs(listeners) do
+      listener '\n'
+    end
   end
 
   --- @param node morph.Tree
@@ -382,9 +392,13 @@ function Morph.markup_to_lines(opts)
         end
       end,
       tag = function(t)
+        local curr_text = ''
+        listeners[#listeners + 1] = function(s) curr_text = curr_text .. s end
         local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
         visit(t.children)
         local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+        table.remove(listeners, #listeners)
+        t.curr_text = curr_text
 
         if opts.on_tag then opts.on_tag(t, start0, stop0) end
       end,
@@ -917,10 +931,10 @@ function Morph:_on_text_changed()
       -- Just because extmarks have shifted, doesn't mean their text has changed:
       -- Lookup the old value vs the new on and check:
       local cached_tag = assert(self.text_content.curr.extmark_ids_to_tag[cached_extmark.id])
-      local cached_tag_text = Morph.markup_to_string { tree = cached_tag }
       local curr_text = live_extmark:_text()
 
-      if cached_tag_text ~= curr_text then
+      if cached_tag.curr_text ~= curr_text then
+        cached_tag.curr_text = curr_text
         table.insert(changed, { extmark = live_extmark, text = curr_text })
       end
     end

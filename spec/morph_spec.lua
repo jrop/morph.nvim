@@ -1235,4 +1235,42 @@ describe('Morph', function()
       assert.are.same(captured_changed_text, '')
     end)
   end)
+
+  it('should recognize a text-change when text changes back to original content', function()
+    with_buf({}, function()
+      local captured_changed_text = ''
+
+      -- Text:
+      -- 01234
+      -- hello
+      --- @param ctx morph.Ctx
+      local function App(ctx)
+        return {
+          h('text', {
+            id = 'the-id',
+            on_change = function(e)
+              e.bubble_up = false
+              captured_changed_text = e.text
+            end,
+          }, { 'hello' }),
+        }
+      end
+      local r = Morph.new()
+      r:mount(h(App))
+
+      assert.are.same(get_text(), 'hello')
+
+      -- Delete the trailing 'o':
+      vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, {})
+      assert.are.same(get_text(), 'hell')
+      r:_on_text_changed()
+      assert.are.same(captured_changed_text, 'hell')
+
+      -- Reinsert the trailing 'o':
+      vim.api.nvim_buf_set_text(0, 0, 4, 0, 4, { 'o' })
+      assert.are.same(get_text(), 'hello')
+      r:_on_text_changed()
+      assert.are.same(captured_changed_text, 'hello')
+    end)
+  end)
 end)
