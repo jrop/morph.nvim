@@ -6,7 +6,7 @@ Build interactive text user interfaces in Neovim with a React-like component mod
 
 ## Demo
 
-Show, don't tell: If you want to see the kinds of things you can make with Morph, see the following screencast, that demos [one of the examples](./examples/docker-containers.lua) from this repo.
+Show, don't tell: If you want to see the kinds of things you can make with **morph.nvim**, see the following screencast, that demos [one of the examples](./examples/docker-containers.lua) from this repo.
 
 [![asciicast](https://asciinema.org/a/sErPWJAgYge1DSskj5zrgNJZM.svg)](https://asciinema.org/a/sErPWJAgYge1DSskj5zrgNJZM)
 
@@ -228,36 +228,63 @@ end
 
 ## Installation
 
-Since this is not a traditional Neovim "plugin" (it is a library), plugin authors are the intended consumers. Neovim does not have a good answer for automatic management of plugin dependencies. As such, it is recommended that library authors:
+### If you are a _Plugin Author_
 
-1. Vendor morph.nvim in their plugin. Morph is implemented in a single file, so this should be relatively painless. However, there is no great way to check for updates.
-
-OR:
-
-2. Suggest to their users to add morph.nvim as a dependency in their package manager. The major con here is that breaking changes could be inadvertantly pulled in by users when they update their plugins.
-
-**Future Option:** I'm considering using an [Artifact Branch](https://www.toddway.com/2020/04/18/share-artifacts-with-an-orphan-branch.html) to publish the standalone `morph.lua` (as `init.lua`) file, which would enable cleaner git submodule integration for plugin authors who want to vendor the library.
+Neovim does not have a good answer for automatic management of plugin dependencies. As such, it is recommended that library authors vendor morph.nvim within their plugin. **morph.nvim** is implemented in a single file, so this should be relatively painless. Furthermore, `lua/morph.lua` versions are published into artifact tags `artifact-vX.Y.Z` as `init.lua` so that plugin authors can add morph as a submodule to their plugin.
 
 <details>
 <summary>Example git submodule setup (future)</summary>
 
 ```bash
 # In your plugin repository
-git submodule add -b artifact https://github.com/jrapodaca/morph.nvim.git lua/vendor/morph
-git submodule update --init --recursive
+git submodule add -- https://github.com/jrop/morph.nvim lua/my_plugin/morph
+cd lua/my_plugin/morph/
+git checkout artifact-v0.1.0 # put whatever version of morph.nvim you want to pin here
+# ... commit the submodule within your repo
 
-# This would place Morph at:
-# lua/vendor/morph/init.lua
-
-# Then in your plugin code:
-local Morph = require('vendor.morph')
+# This would place morph@v0.1.0 at:
+# lua/my_plugin/morph/init.lua
 ```
 
-This approach would allow plugin authors to:
+Then in your plugin code:
+```lua
+local Morph = require('my_plugin.morph')
+```
+
+This approach allows plugin authors to:
 - Pin to specific versions of morph.nvim
-- Get updates with `git submodule update --remote`
+- Get updates by pulling/committing new **morph.nvim** versions (i.e., the usual git submodule way)
 - Keep the dependency explicit and version-controlled
 - Avoid namespace conflicts with user-installed plugins
+
+</details>
+
+### If you are a _User_ wanting to use morph.nvim in your config
+
+<details>
+<summary>vim.pack</summary>
+
+```lua
+vim.pack.add { 'https://github.com/jrop/morph.nvim' }
+```
+
+</details>
+
+<details>
+<summary>lazy.nvim</summary>
+
+```lua
+{ 'jrop/morph.nvim' }
+```
+
+</details>
+
+<details>
+<summary>packer.nvim</summary>
+
+```lua
+use({ 'jrop/morph.nvim' })
+```
 
 </details>
 
