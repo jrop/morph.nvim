@@ -292,6 +292,7 @@ end
 --- @field children morph.Tree
 --- @field private on_change? fun(): any
 --- @field private prev_rendered_children? morph.Tree
+--- @field private _register_after_render_callback? fun(cb: function)
 local Ctx = {}
 Ctx.__index = Ctx
 
@@ -319,6 +320,13 @@ function Ctx:update(new_state)
       self.on_change()
     end
   end
+end
+
+function Ctx:refresh() return self:update(self.state) end
+
+--- @param fn function
+function Ctx:do_after_render(fn)
+  if self._register_after_render_callback then self._register_after_render_callback(fn) end
 end
 
 --------------------------------------------------------------------------------
@@ -638,6 +646,11 @@ function Morph:mount(tree)
   local function rerender()
     local H2 = {}
 
+    --- @type function[]
+    local render_effects = {}
+    --- @param cb function
+    local function register_after_render_callback(cb) table.insert(render_effects, cb) end
+
     --- @param tree morph.Tree
     function H2.unmount(tree)
       --- @param tree morph.Tree
@@ -660,6 +673,7 @@ function Morph:mount(tree)
             ctx.phase = 'unmount'
             Component(ctx)
             ctx.on_change = nil
+            ctx._register_after_render_callback = nil
           end,
         })
       end
@@ -708,6 +722,7 @@ function Morph:mount(tree)
           ctx.props = new_tag.attributes
           ctx.children = new_tag.children
           ctx.on_change = rerender
+          ctx._register_after_render_callback = register_after_render_callback
 
           new_tag.ctx = ctx
           local NewC_rendered_children = NewC(ctx)
@@ -791,6 +806,10 @@ function Morph:mount(tree)
     local simplified_tree = H2.visit_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
     self:render(simplified_tree)
+
+    for _, eff in ipairs(render_effects) do
+      eff()
+    end
   end
 
   -- Kick off initial render:

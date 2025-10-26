@@ -1489,4 +1489,46 @@ describe('Morph', function()
       assert.are.same(get_text(), 'Search: [filter]')
     end)
   end)
+
+  it('should execute do_after_render callbacks immediately after mount', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local callback_executed = false
+      local callback_execution_order = {}
+
+      --- @param ctx morph.Ctx
+      local function TestComponent(ctx)
+        if ctx.phase == 'mount' then
+          ctx:do_after_render(function()
+            callback_executed = true
+            table.insert(callback_execution_order, 'callback')
+          end)
+          table.insert(callback_execution_order, 'component-render')
+        end
+
+        return {
+          h('text', { id = 'test-text' }, 'Hello World'),
+        }
+      end
+
+      -- Mount the component
+      r:mount(h(TestComponent))
+      table.insert(callback_execution_order, 'after-mount')
+
+      -- Verify the callback was executed
+      assert.is_true(callback_executed)
+
+      -- Verify the execution order: component render, then callback, then after mount
+      assert.are.same(callback_execution_order, {
+        'component-render',
+        'callback',
+        'after-mount',
+      })
+
+      -- Verify the component was actually rendered
+      assert.are.same(get_text(), 'Hello World')
+      local test_elem = r:get_element_by_id 'test-text'
+      assert.is_not_nil(test_elem)
+    end)
+  end)
 end)

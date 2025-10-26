@@ -243,59 +243,45 @@ local function FsNode(ctx)
 
         if kind == 'dir' then
           if is_expanded then
+            -- If the directory itself is expanded, then collapse it:
             tree:set_expanded(path, false)
             to_focus = path
           else
+            -- If this directory is not expanded, then collapse our parent:
             to_focus = assert(path:parent())
             tree:set_expanded(to_focus, false)
           end
         else
+          -- This entry is a file, collapse our parent (a directory):
           to_focus = assert(path:parent())
           tree:set_expanded(to_focus, false)
         end
-        vim.schedule(ctx.props.refresh)
-
-        vim.defer_fn(function()
-          local elem = assert(ctx.document):get_element_by_id(('%s-label'):format(to_focus._path))
-          if elem then
-            local pos = elem.extmark.start
-            vim.api.nvim_win_set_cursor(0, { pos[1] + 1, pos[2] })
-          end
-        end, 50)
+        ctx.props.refresh(to_focus)
         return ''
       end,
 
       l = function(e)
         e.bubble_up = false
+        local to_focus
         if kind == 'dir' then
           tree:set_expanded(path, true)
-
-          local first_child = tree:children(path)[1]
-          if first_child then
-            vim.defer_fn(function()
-              local elem =
-                assert(ctx.document):get_element_by_id(('%s-label'):format(first_child._path))
-              if elem then
-                local pos = elem.extmark.start
-                vim.api.nvim_win_set_cursor(0, { pos[1] + 1, pos[2] })
-              end
-            end, 50)
-          end
+          to_focus = tree:children(path)[1]
         else
           -- Edit file:
           vim.notify((':edit %s'):format(vim.fs.basename(path._path)))
         end
-        vim.schedule(ctx.props.refresh)
+        ctx.props.refresh(to_focus)
         return ''
       end,
     },
   }, {
-    h('text', { key = path, hl = hl }, {
-      ('  '):rep(ctx.props.level),
-      icon,
-    }),
+    -- Indent this entry:
+    ('  '):rep(ctx.props.level),
+
+    h('text', { key = path, hl = hl }, { icon }),
     ' ',
 
+    -- Show the entry name:
     h('text', {
       id = ('%s-label'):format(path._path),
       on_change = function(e)
@@ -309,18 +295,40 @@ local function FsNode(ctx)
   })
 end
 
---- @param ctx morph.Ctx<{ root?: string }, { tree: morph.examples.Tree }>
+--- @param ctx morph.Ctx<{ root?: string }, { focused?: morph.examples.Path, tree: morph.examples.Tree }>
 --- @return morph.Tree
 local function App(ctx)
   if ctx.phase == 'mount' then
     -- Initialize:
     local root_path = Path.new(ctx.props.root or assert(vim.uv.cwd()))
     local tree = Tree.new(root_path)
-    ctx.state = { tree = tree }
+    ctx.state = { tree = tree, focused = root_path }
   end
 
   local state = assert(ctx.state)
-  local refresh = function() ctx:update(state) end
+
+  --- @param focused? morph.examples.Path
+  local refresh = function(focused)
+    if focused then state.focused = focused end
+    ctx:update(state)
+  end
+
+  if ctx.phase ~= 'unmount' then
+    if state.focused then
+      local to_focus = state.focused._path
+      -- Nil out the focused state, but don't re-render:
+      state.focused = nil
+
+      ctx:do_after_render(function()
+        local doc = assert(ctx.document)
+        local elem = doc:get_element_by_id(('%s-label'):format(to_focus))
+        if elem then
+          local pos = elem.extmark.start
+          vim.api.nvim_win_set_cursor(0, { pos[1] + 1, pos[2] })
+        end
+      end)
+    end
+  end
 
   return h(FsNode, {
     path = state.tree._root,
@@ -335,9 +343,13 @@ local function show()
   vim.bo.bufhidden = 'delete'
   vim.bo.buflisted = false
   vim.bo.buftype = 'nowrite'
-  vim.wo[0][0].list = false
+  vim.wo[0][0].list = true
+  vim.wo[0][0].listchars = 'leadmultispace:┆ '
   vim.wo[0][0].number = false
   vim.wo[0][0].relativenumber = false
+  vim.bo[0].shiftwidth = 2
+  vim.bo[0].tabstop = 2
+
   Morph.new():mount(h(App))
 end
 
