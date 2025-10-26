@@ -233,7 +233,7 @@ end
 Neovim does not have a good answer for automatic management of plugin dependencies. As such, it is recommended that library authors vendor morph.nvim within their plugin. **morph.nvim** is implemented in a single file, so this should be relatively painless. Furthermore, `lua/morph.lua` versions are published into artifact tags `artifact-vX.Y.Z` as `init.lua` so that plugin authors can add morph as a submodule to their plugin.
 
 <details>
-<summary>Example git submodule setup (future)</summary>
+<summary>Example git submodule setup</summary>
 
 ```bash
 # In your plugin repository
