@@ -643,165 +643,163 @@ end
 --- Render a component tree
 --- @param tree morph.Tree
 function Morph:mount(tree)
-  local function rerender()
-    local H2 = {}
+  local H2 = {}
 
-    --- @type function[]
-    local render_effects = {}
-    --- @param cb function
-    local function register_after_render_callback(cb) table.insert(render_effects, cb) end
+  --- @type function[]
+  local render_effects = {}
+  --- @param cb function
+  local function register_after_render_callback(cb) table.insert(render_effects, cb) end
 
+  --- @param tree morph.Tree
+  function H2.unmount(tree)
     --- @param tree morph.Tree
-    function H2.unmount(tree)
-      --- @param tree morph.Tree
-      local function visit(tree)
-        H.tree_match(tree, {
-          array = function(tags)
-            for _, tag in ipairs(tags) do
-              visit(tag)
-            end
-          end,
-          tag = function(tag) visit(tag.children) end,
-          component = function(Component, tag)
-            --- @type morph.Ctx
-            local ctx = assert(tag.ctx, 'could not find context for node')
+    local function visit(tree)
+      H.tree_match(tree, {
+        array = function(tags) H2.visit_array(tags, {}) end,
+        tag = function(tag) H2.visit_array(tag.children, {}) end,
+        component = function(Component, tag)
+          --- @type morph.Ctx
+          local ctx = assert(tag.ctx, 'could not find context for node')
 
-            -- depth-first:
-            visit(ctx.children)
+          -- depth-first:
+          H2.visit_array(ctx.prev_rendered_children, {})
 
-            -- now unmount current:
-            ctx.phase = 'unmount'
-            Component(ctx)
-            ctx.on_change = nil
-            ctx._register_after_render_callback = nil
-          end,
-        })
-      end
-
-      visit(tree)
-    end
-
-    --- @param old_tree morph.Tree
-    --- @param new_tree morph.Tree
-    --- @return morph.Tree
-    function H2.visit_tree(old_tree, new_tree)
-      local old_tree_kind = H.tree_kind(old_tree)
-      local new_tree_kind = H.tree_kind(new_tree)
-
-      local new_tree_rendered = H.tree_match(new_tree, {
-        string = function(s) return s end,
-        boolean = function(b) return b end,
-        nil_ = function() return nil end,
-
-        array = function(new_arr)
-          return H2.visit_array(old_tree --[[@as any]], new_arr)
-        end,
-        tag = function(new_tag)
-          local old_children = old_tree_kind == new_tree_kind and old_tree.children or nil
-          return H.h(
-            new_tag.name,
-            new_tag.attributes,
-            H2.visit_tree(old_children --[[@as any]], new_tag.children --[[@as any]])
-          )
+          -- now unmount current:
+          ctx.phase = 'unmount'
+          Component(ctx)
+          ctx.on_change = nil
+          ctx._register_after_render_callback = nil
         end,
 
-        component = function(NewC, new_tag)
-          --- @type { tag: morph.Tag, ctx?: morph.Ctx } | nil
-          local old_component_info = H.tree_match(
-            old_tree,
-            { component = function(_, t) return { tag = t, ctx = t.ctx } end }
-          )
-          local ctx = old_component_info and old_component_info.ctx or nil
-
-          if not ctx then
-            --- @type morph.Ctx
-            ctx = Ctx.new(self, new_tag.attributes, nil, new_tag.children)
-          else
-            ctx.phase = 'update'
-          end
-          ctx.props = new_tag.attributes
-          ctx.children = new_tag.children
-          ctx.on_change = rerender
-          ctx._register_after_render_callback = register_after_render_callback
-
-          new_tag.ctx = ctx
-          local NewC_rendered_children = NewC(ctx)
-          local result = H2.visit_tree(ctx.prev_rendered_children, NewC_rendered_children)
-          ctx.prev_rendered_children = NewC_rendered_children
-          -- As soon as we've mounted, move past the 'mount' state. This is
-          -- because Ctx will not fire `on_update` if it is still in the
-          -- 'mount' state (to avoid stack overflows).
-          ctx.phase = 'update'
-
-          return result
-        end,
+        default = function(tree) H2.visit_tree(tree, nil) end,
       })
-
-      if old_tree_kind ~= new_tree_kind then H2.unmount(old_tree) end
-
-      return new_tree_rendered
     end
 
-    --- @param old_arr morph.Node[]
-    --- @param new_arr morph.Node[]
-    --- @return morph.Node[]
-    function H2.visit_array(old_arr, new_arr)
-      -- We are going to hijack levenshtein in order to compute the
-      -- difference between elements/components. In this model, we need to
-      -- "update" all the nodes, so no nodes are equal. We will rely on
-      -- levenshtein to find the "shortest path" to conforming old => new via
-      -- the cost.of_change function. That will provide the meat of modeling
-      -- what effort it will take to morph one element into the new form.
-      -- What levenshtein gives us for free in this model is also informing
-      -- us what needs to be added (i.e., "mounted"), what needs to be
-      -- deleted ("unmounted") and what needs to be changed ("updated").
-      local changes = (
-        H.levenshtein {
-          --- @diagnostic disable-next-line: assign-type-mismatch
-          from = old_arr or {},
-          to = new_arr or {},
-          are_equal = function() return false end,
-          cost = {
-            of_change = function(node1, node2, node1_idx, node2_idx)
-              local node1_inf = H.verbose_tree_kind(node1, node1_idx)
-              local node2_inf = H.verbose_tree_kind(node2, node2_idx)
-              return node1_inf == node2_inf and 1 or 2
-            end,
-          },
-        }
-      ) --[[@as (morph.LevenshteinChange<morph.Node>[])]]
+    visit(tree)
+  end
 
-      --- @type morph.Node[]
-      local resulting_nodes = {}
+  --- @param old_tree morph.Tree
+  --- @param new_tree morph.Tree
+  --- @return morph.Tree
+  function H2.visit_tree(old_tree, new_tree)
+    local old_tree_kind = H.tree_kind(old_tree)
+    local new_tree_kind = H.tree_kind(new_tree)
 
-      for _, change in ipairs(changes) do
-        local resulting_node
-        if change.kind == 'add' then
-          -- add => mount
-          resulting_node = H2.visit_tree(nil, change.item)
-        elseif change.kind == 'delete' then
-          -- delete => unmount
-          H2.visit_tree(change.item, nil)
-        elseif change.kind == 'change' then
-          -- change is either:
-          -- - unmount, then mount
-          -- - update
-          local from_kind = H.verbose_tree_kind(change.from)
-          local to_kind = H.verbose_tree_kind(change.to)
-          if from_kind == to_kind then
-            resulting_node = H2.visit_tree(change.from, change.to)
-          else
-            -- from_kind ~= to_kind: unmount/mount
-            H2.unmount(change.from)
-            resulting_node = H2.visit_tree(nil, change.to)
-          end
+    local new_tree_rendered = H.tree_match(new_tree, {
+      string = function(s) return s end,
+      boolean = function(b) return b end,
+      nil_ = function() return nil end,
+
+      array = function(new_arr)
+        return H2.visit_array(old_tree --[[@as any]], new_arr)
+      end,
+      tag = function(new_tag)
+        local old_children = old_tree_kind == new_tree_kind and old_tree.children or nil
+        return H.h(
+          new_tag.name,
+          new_tag.attributes,
+          H2.visit_tree(old_children --[[@as any]], new_tag.children --[[@as any]])
+        )
+      end,
+
+      component = function(NewC, new_tag)
+        --- @type { tag: morph.Tag, ctx?: morph.Ctx } | nil
+        local old_component_info =
+          H.tree_match(old_tree, { component = function(_, t) return { tag = t, ctx = t.ctx } end })
+        local ctx = old_component_info and old_component_info.ctx or nil
+
+        if not ctx then
+          --- @type morph.Ctx
+          ctx = Ctx.new(self, new_tag.attributes, nil, new_tag.children)
+        else
+          ctx.phase = 'update'
         end
+        ctx.props = new_tag.attributes
+        ctx.children = new_tag.children
+        ctx.on_change = H2.rerender
+        ctx._register_after_render_callback = register_after_render_callback
 
-        if resulting_node then table.insert(resulting_nodes, 1, resulting_node) end
+        new_tag.ctx = ctx
+        local NewC_rendered_children = NewC(ctx)
+        local result = H2.visit_tree(ctx.prev_rendered_children, NewC_rendered_children)
+        ctx.prev_rendered_children = NewC_rendered_children
+        -- As soon as we've mounted, move past the 'mount' state. This is
+        -- because Ctx will not fire `on_update` if it is still in the
+        -- 'mount' state (to avoid stack overflows).
+        ctx.phase = 'update'
+
+        return result
+      end,
+    })
+
+    if old_tree_kind ~= new_tree_kind then H2.unmount(old_tree) end
+
+    return new_tree_rendered
+  end
+
+  --- @param old_arr morph.Node[]
+  --- @param new_arr morph.Node[]
+  --- @return morph.Node[]
+  function H2.visit_array(old_arr, new_arr)
+    -- We are going to hijack levenshtein in order to compute the
+    -- difference between elements/components. In this model, we need to
+    -- "update" all the nodes, so no nodes are equal. We will rely on
+    -- levenshtein to find the "shortest path" to conforming old => new via
+    -- the cost.of_change function. That will provide the meat of modeling
+    -- what effort it will take to morph one element into the new form.
+    -- What levenshtein gives us for free in this model is also informing
+    -- us what needs to be added (i.e., "mounted"), what needs to be
+    -- deleted ("unmounted") and what needs to be changed ("updated").
+    local changes = (
+      H.levenshtein {
+        --- @diagnostic disable-next-line: assign-type-mismatch
+        from = old_arr or {},
+        to = new_arr or {},
+        are_equal = function() return false end,
+        cost = {
+          of_change = function(node1, node2, node1_idx, node2_idx)
+            local node1_inf = H.verbose_tree_kind(node1, node1_idx)
+            local node2_inf = H.verbose_tree_kind(node2, node2_idx)
+            return node1_inf == node2_inf and 1 or 2
+          end,
+        },
+      }
+    ) --[[@as (morph.LevenshteinChange<morph.Node>[])]]
+
+    --- @type morph.Node[]
+    local resulting_nodes = {}
+
+    for _, change in ipairs(changes) do
+      local resulting_node
+      if change.kind == 'add' then
+        -- add => mount
+        resulting_node = H2.visit_tree(nil, change.item)
+      elseif change.kind == 'delete' then
+        -- delete => unmount
+        H2.visit_tree(change.item, nil)
+      elseif change.kind == 'change' then
+        -- change is either:
+        -- - unmount, then mount
+        -- - update
+        local from_kind = H.verbose_tree_kind(change.from)
+        local to_kind = H.verbose_tree_kind(change.to)
+        if from_kind == to_kind then
+          resulting_node = H2.visit_tree(change.from, change.to)
+        else
+          -- from_kind ~= to_kind: unmount/mount
+          H2.visit_tree(change.from, nil)
+          resulting_node = H2.visit_tree(nil, change.to)
+        end
       end
 
-      return resulting_nodes
+      if resulting_node then table.insert(resulting_nodes, 1, resulting_node) end
     end
+
+    return resulting_nodes
+  end
+
+  function H2.rerender()
+    render_effects = {}
 
     local simplified_tree = H2.visit_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
@@ -812,8 +810,16 @@ function Morph:mount(tree)
     end
   end
 
+  vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = self.bufnr,
+    callback = function()
+      -- Effectively unmount everything:
+      H2.visit_tree(self.component_tree.old, nil)
+    end,
+  })
+
   -- Kick off initial render:
-  rerender()
+  H2.rerender()
 end
 
 --- @param pos [integer, integer]|morph.Pos00

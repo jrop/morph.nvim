@@ -1531,4 +1531,202 @@ describe('Morph', function()
       assert.is_not_nil(test_elem)
     end)
   end)
+
+  it('should execute multiple do_after_render callbacks in registration order', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local execution_order = {}
+
+      --- @param ctx morph.Ctx
+      local function TestComponent(ctx)
+        if ctx.phase == 'mount' then
+          -- Register multiple callbacks
+          ctx:do_after_render(function() table.insert(execution_order, 'first-callback') end)
+
+          ctx:do_after_render(function() table.insert(execution_order, 'second-callback') end)
+
+          ctx:do_after_render(function() table.insert(execution_order, 'third-callback') end)
+        end
+
+        return {
+          h('text', { id = 'test' }, 'Multiple callbacks'),
+        }
+      end
+
+      -- Mount the component
+      r:mount(h(TestComponent))
+
+      -- Verify all callbacks were executed in the correct order
+      assert.are.same(execution_order, {
+        'first-callback',
+        'second-callback',
+        'third-callback',
+      })
+      assert.are.same(get_text(), 'Multiple callbacks')
+    end)
+  end)
+
+  it('should automatically unmount components when buffer is deleted', function()
+    local unmount_calls = {}
+    local mount_calls = {}
+
+    --- @param ctx morph.Ctx<any, { value: string }>
+    local function TestComponent(ctx)
+      if ctx.phase == 'mount' then
+        table.insert(mount_calls, ctx.props.name)
+      elseif ctx.phase == 'unmount' then
+        table.insert(unmount_calls, ctx.props.name)
+      end
+
+      return {
+        h('text', { id = ctx.props.name }, 'Component ' .. ctx.props.name),
+      }
+    end
+
+    --- @param ctx morph.Ctx<{}, { show_second: boolean }>
+    local function App(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = { show_second = true }
+      elseif ctx.phase == 'unmount' then
+        table.insert(unmount_calls, 'app')
+      end
+
+      return {
+        h(TestComponent, { name = 'first' }),
+        '\n',
+        ctx.state.show_second and h(TestComponent, { name = 'second' }) or nil,
+      }
+    end
+
+    -- Create a new buffer and mount components
+    vim.cmd.new()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local r = Morph.new(bufnr)
+    r:mount(h(App))
+
+    assert.are.same(get_lines(), { 'Component first', 'Component second' })
+    -- Verify components were mounted
+    assert.is_true(vim.tbl_contains(mount_calls, 'first'))
+    assert.is_true(vim.tbl_contains(mount_calls, 'second'))
+    assert.are.same(unmount_calls, {})
+
+    -- Delete the buffer - this should trigger automatic unmounting
+    vim.api.nvim_buf_delete(bufnr, { force = true })
+
+    -- Verify all components were unmounted
+    assert.is_true(vim.tbl_contains(unmount_calls, 'first'))
+    assert.is_true(vim.tbl_contains(unmount_calls, 'second'))
+    assert.is_true(vim.tbl_contains(unmount_calls, 'app'))
+  end)
+
+  it('should handle nested component unmounts triggered by state changes', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local unmount_calls = {}
+      local leaked_contexts = {}
+
+      --- @param ctx morph.Ctx<{ name: string }, {}>
+      local function Level3Component(ctx)
+        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level3-' .. ctx.props.name) end
+
+        return {
+          h('text', { id = 'level3-' .. ctx.props.name }, 'Level3: ' .. ctx.props.name),
+        }
+      end
+
+      --- @param ctx morph.Ctx<{ name: string }, {}>
+      local function Level2Component(ctx)
+        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level2-' .. ctx.props.name) end
+
+        return {
+          h('text', {}, {
+            'Level2: ' .. ctx.props.name,
+            '\n',
+            -- Nested within tags and arrays
+            {
+              h('text', {}, 'Container: '),
+              {
+                h(Level3Component, { name = ctx.props.name .. '-child1' }),
+                '\n',
+                h(Level3Component, { name = ctx.props.name .. '-child2' }),
+              },
+            },
+          }),
+        }
+      end
+
+      --- @param ctx morph.Ctx<{ name: string }, {}>
+      local function Level1Component(ctx)
+        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level1-' .. ctx.props.name) end
+
+        return {
+          h('text', {}, 'Level1: ' .. ctx.props.name),
+          '\n',
+          -- Nested within arrays and tags
+          {
+            h(Level2Component, { name = ctx.props.name .. '-sub' }),
+          },
+        }
+      end
+
+      --- @param ctx morph.Ctx<{}, { show_nested: boolean }>
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = { show_nested = true }
+          leaked_contexts.app = ctx
+        elseif ctx.phase == 'unmount' then
+          table.insert(unmount_calls, 'app')
+        end
+
+        return {
+          'App Root',
+          '\n',
+          ctx.state.show_nested and {
+            h(Level1Component, { name = 'main' }),
+            '\n',
+            h(Level1Component, { name = 'secondary' }),
+          } or 'No nested components',
+        }
+      end
+
+      -- Mount the nested component hierarchy
+      r:mount(h(App))
+
+      -- Verify the rendered content includes all levels
+      assert.are.same(get_lines(), {
+        'App Root',
+        'Level1: main',
+        'Level2: main-sub',
+        'Container: Level3: main-sub-child1',
+        'Level3: main-sub-child2',
+        'Level1: secondary',
+        'Level2: secondary-sub',
+        'Container: Level3: secondary-sub-child1',
+        'Level3: secondary-sub-child2',
+      })
+
+      -- Trigger state change to hide nested components
+      leaked_contexts.app:update { show_nested = false }
+
+      -- Verify all nested components were unmounted
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child1'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child2'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level2-main-sub'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level1-main'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child1'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child2'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level2-secondary-sub'))
+      assert.is_true(vim.tbl_contains(unmount_calls, 'level1-secondary'))
+
+      -- Verify the rendered content no longer includes nested components
+      assert.are.same(get_text(), 'App Root\nNo nested components')
+
+      -- Re-enable nested components to test remounting
+      unmount_calls = {}
+      leaked_contexts.app:update { show_nested = true }
+
+      -- Verify no unmounts occurred during remounting
+      assert.are.same(unmount_calls, {})
+    end)
+  end)
 end)
