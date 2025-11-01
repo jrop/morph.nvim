@@ -285,6 +285,7 @@ end
 --- @generic TProps
 --- @generic TState
 --- @class morph.Ctx<TProps, TState>
+--- @field bufnr integer
 --- @field document? morph.Morph
 --- @field phase 'mount'|'update'|'unmount'
 --- @field props TProps
@@ -297,11 +298,13 @@ local Ctx = {}
 Ctx.__index = Ctx
 
 --- @param document? morph.Morph
+--- @param bufnr? integer
 --- @param props TProps
 --- @param state? TState
 --- @param children morph.Tree
-function Ctx.new(document, props, state, children)
+function Ctx.new(bufnr, document, props, state, children)
   return setmetatable({
+    bufnr = bufnr,
     document = document,
     phase = 'mount',
     props = props,
@@ -341,13 +344,14 @@ end
 --- }
 
 --- @class morph.Morph
---- @field bufnr integer
---- @field ns integer
---- @field changedtick integer
---- @field changing boolean
---- @field textlock boolean
---- @field text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
---- @field component_tree { old: morph.Tree  }
+--- @field private bufnr integer
+--- @field private ns integer
+--- @field private changedtick integer
+--- @field private changing boolean
+--- @field private textlock boolean
+--- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
+--- @field private component_tree { old: morph.Tree  }
+--- @field private cleanup_hooks function[]
 local Morph = {}
 Morph.__index = Morph
 
@@ -413,7 +417,7 @@ function Morph.markup_to_lines(opts)
         if opts.on_tag then opts.on_tag(t, start0, stop0) end
       end,
       component = function(Component, t)
-        local ctx = Ctx.new(nil, t.attributes, nil, t.children)
+        local ctx = Ctx.new(nil, nil, t.attributes, nil, t.children)
 
         local start = Pos00.new(curr_line1 - 1, curr_col1 - 1)
         visit(Component(ctx))
@@ -527,12 +531,27 @@ function Morph.new(bufnr)
       curr = nil,
       ctx_by_node = {},
     },
+    cleanup_hooks = {},
   }, Morph)
 
-  vim.api.nvim_create_autocmd({ 'TextChanged', 'TextChangedI', 'TextChangedP' }, {
-    buffer = bufnr,
-    callback = function() self:_on_text_changed() end,
+  local text_changed_id = vim.api.nvim_create_autocmd(
+    { 'TextChanged', 'TextChangedI', 'TextChangedP' },
+    {
+      buffer = bufnr,
+      callback = function() self:_on_text_changed() end,
+    }
+  )
+  table.insert(self.cleanup_hooks, function() vim.api.nvim_del_autocmd(text_changed_id) end)
+
+  local wipeout_id = vim.api.nvim_create_autocmd('BufWipeout', {
+    buffer = self.bufnr,
+    callback = function()
+      for _, cleanup_hook in ipairs(self.cleanup_hooks) do
+        cleanup_hook()
+      end
+    end,
   })
+  table.insert(self.cleanup_hooks, function() vim.api.nvim_del_autocmd(wipeout_id) end)
 
   return self
 end
@@ -710,7 +729,7 @@ function Morph:mount(tree)
 
         if not ctx then
           --- @type morph.Ctx
-          ctx = Ctx.new(self, new_tag.attributes, nil, new_tag.children)
+          ctx = Ctx.new(self.bufnr, self, new_tag.attributes, nil, new_tag.children)
         else
           ctx.phase = 'update'
         end
@@ -810,11 +829,16 @@ function Morph:mount(tree)
     end
   end
 
-  vim.api.nvim_create_autocmd('BufWipeout', {
+  -- Don't track this autocmd in cleanup_hooks, because the prior BufWipeout
+  -- will take priority, and will delete this autocmd before it even has a
+  -- chance to run:
+  local wipeout_id
+  wipeout_id = vim.api.nvim_create_autocmd('BufWipeout', {
     buffer = self.bufnr,
     callback = function()
       -- Effectively unmount everything:
       H2.visit_tree(self.component_tree.old, nil)
+      vim.api.nvim_del_autocmd(wipeout_id)
     end,
   })
 
