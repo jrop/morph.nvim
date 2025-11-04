@@ -315,12 +315,14 @@ end
 
 --- @param new_state TState
 function Ctx:update(new_state)
+  local noop = function() end
+
   self.state = new_state
-  if self.on_change and self.phase ~= 'mount' then
+  if self.phase ~= 'mount' then
     if (self.document and self.document.textlock) or H.is_textlock() then
-      vim.schedule(function() self.on_change() end)
+      vim.schedule(function() (self.on_change or noop)() end)
     else
-      self.on_change()
+      (self.on_change or noop)()
     end
   end
 end

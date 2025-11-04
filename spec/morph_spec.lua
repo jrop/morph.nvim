@@ -1729,4 +1729,40 @@ describe('Morph', function()
       assert.are.same(unmount_calls, {})
     end)
   end)
+
+  it('should handle Ctx:update when component on_change is nil without errors', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local leaked_context = nil
+      local called = 0
+
+      --- @param ctx morph.Ctx<{}, { count: integer }>
+      local function TestComponent(ctx)
+        called = called + 1
+        if ctx.phase == 'mount' then
+          ctx.state = { count = 1 }
+          leaked_context = ctx
+          -- Explicitly set the component's on_change to nil to trigger the bug
+          ctx.on_change = nil
+        end
+
+        return {
+          h('text', { id = 'test-component' }, 'Count: ' .. ctx.state.count),
+        }
+      end
+
+      -- Mount component
+      r:mount(h(TestComponent))
+
+      assert.are.same(get_text(), 'Count: 1')
+      assert.are.same(called, 1)
+
+      -- This should not error even though ctx.on_change is nil
+      -- Before the fix, this would throw an error when trying to call self.on_change()
+      local orig_schedule = vim.schedule
+      vim.schedule = function(f) return f() end
+      assert.has_no.errors(function() leaked_context:update { count = 2 } end)
+      vim.schedule = orig_schedule
+    end)
+  end)
 end)
