@@ -297,8 +297,8 @@ end
 local Ctx = {}
 Ctx.__index = Ctx
 
---- @param document? morph.Morph
 --- @param bufnr? integer
+--- @param document? morph.Morph
 --- @param props TProps
 --- @param state? TState
 --- @param children morph.Tree
@@ -354,6 +354,7 @@ end
 --- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field private component_tree { old: morph.Tree  }
 --- @field private cleanup_hooks function[]
+--- @field private buf_watcher morph.BufWatcher
 local Morph = {}
 Morph.__index = Morph
 
@@ -437,10 +438,7 @@ function Morph.markup_to_lines(opts)
   return lines
 end
 
---- @param opts {
----   tree: morph.Tree,
----   format_tag?: fun(tag: morph.Tag): string
---- }
+--- @param opts { tree: morph.Tree }
 function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(opts), '\n') end
 
 --- @param bufnr integer
@@ -528,22 +526,15 @@ function Morph.new(bufnr)
       old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
       curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
     },
-    component_tree = {
-      old = nil,
-      curr = nil,
-      ctx_by_node = {},
-    },
+    component_tree = { old = nil },
     cleanup_hooks = {},
   }, Morph)
 
-  local text_changed_id = vim.api.nvim_create_autocmd(
-    { 'TextChanged', 'TextChangedI', 'TextChangedP' },
-    {
-      buffer = bufnr,
-      callback = function() self:_on_text_changed() end,
-    }
+  self.buf_watcher = H.buf_attach_after_autocmd(
+    bufnr,
+    function(...) self:_on_bytes_after_autocmd(...) end
   )
-  table.insert(self.cleanup_hooks, function() vim.api.nvim_del_autocmd(text_changed_id) end)
+  table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
 
   local wipeout_id = vim.api.nvim_create_autocmd('BufWipeout', {
     buffer = self.bufnr,
@@ -974,22 +965,46 @@ function Morph:_expr_map_callback(mode, lhs)
   return keypress_cancel and '' or lhs
 end
 
---- @private
-function Morph:_on_text_changed()
+function Morph:_on_bytes_after_autocmd(
+  _,
+  _,
+  _,
+  start_row0,
+  start_col0,
+  _,
+  _,
+  _,
+  _,
+  new_end_row_off,
+  new_end_col_off,
+  _
+)
+  if self.changing then return end
+
+  local end_row0 = start_row0 + new_end_row_off
+  local end_col0 = start_col0 + new_end_col_off
+
+  local max_end_row0 = vim.api.nvim_buf_line_count(self.bufnr) - 1
+  if end_row0 > max_end_row0 then end_row0 = max_end_row0 end
+
+  local max_end_col0 = #(vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or '')
+  if end_col0 > max_end_col0 then end_col0 = max_end_col0 end
+
+  local live_extmarks = Extmark._get_near_overshoot(
+    self.bufnr,
+    self.ns,
+    Pos00.new(start_row0, start_col0),
+    Pos00.new(end_row0, end_col0)
+  )
+
   --- @type { extmark: morph.Extmark, text: string }[]
   local changed = {}
-  for _, cached_extmark in ipairs(self.text_content.curr.extmarks) do
-    local live_extmark = assert(Extmark.by_id(self.bufnr, self.ns, cached_extmark.id))
-    if live_extmark.start ~= cached_extmark or live_extmark.stop ~= cached_extmark.stop then
-      -- Just because extmarks have shifted, doesn't mean their text has changed:
-      -- Lookup the old value vs the new on and check:
-      local cached_tag = assert(self.text_content.curr.extmark_ids_to_tag[cached_extmark.id])
-      local curr_text = live_extmark:_text()
-
-      if cached_tag.curr_text ~= curr_text then
-        cached_tag.curr_text = curr_text
-        table.insert(changed, { extmark = live_extmark, text = curr_text })
-      end
+  for _, live_extmark in ipairs(live_extmarks) do
+    local curr_text = live_extmark:_text()
+    local cached_tag = self.text_content.curr.extmark_ids_to_tag[live_extmark.id]
+    if cached_tag and cached_tag.curr_text ~= curr_text then
+      cached_tag.curr_text = curr_text
+      table.insert(changed, { extmark = live_extmark, text = curr_text })
     end
   end
 
@@ -1113,7 +1128,12 @@ function H.is_textlock()
 
   -- Try to change the window: if textlock is active, an error will be raised:
   local tmp_buf = vim.api.nvim_create_buf(false, true)
-  local ok, tmp_win = pcall(vim.api.nvim_open_win, tmp_buf, true, {})
+  local ok, tmp_win = pcall(
+    vim.api.nvim_open_win,
+    tmp_buf,
+    true,
+    { relative = 'editor', width = 1, height = 1, row = 1, col = 1 }
+  )
   if
     not ok
     and type(tmp_win) == 'string'
@@ -1230,6 +1250,41 @@ function H.levenshtein(opts)
   end
 
   return changes
+end
+
+--- @class morph.BufWatcher
+--- @field last_on_bytes_args unknown
+--- @field text_changed_autocmd_id integer
+--- @field fire function
+--- @field cleanup function
+
+--- This is a helper that waits to notify about changes until _after_ the
+--- TextChanged{,I,P} autocmd has fired. This is because, at the time
+--- nvim_buf_attach notifies the callback of changes, the buffer seems to be in
+--- a strange state. In my testing I saw extra blank lines during the on_bytes
+--- callback, as opposed to when the autocmd fires.
+---
+--- @param bufnr integer
+--- @param callback function
+--- @return morph.BufWatcher
+function H.buf_attach_after_autocmd(bufnr, callback)
+  local state = {}
+
+  vim.api.nvim_buf_attach(
+    bufnr,
+    false,
+    { on_bytes = function(...) state.last_on_bytes_args = { ... } end }
+  )
+
+  state.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
+    { 'TextChanged', 'TextChangedI', 'TextChangedP' },
+    { buffer = bufnr, callback = function() state.fire() end }
+  )
+
+  function state.fire() callback(unpack(state.last_on_bytes_args)) end
+  function state.cleanup() vim.api.nvim_del_autocmd(state.text_changed_autocmd_id) end
+
+  return state
 end
 
 --------------------------------------------------------------------------------

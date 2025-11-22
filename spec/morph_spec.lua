@@ -271,7 +271,7 @@ describe('Morph', function()
 
       -- For some reason, the autocmd does not fire in the busted environment.
       -- We'll call the handler ourselves:
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'bleh')
       assert.are.same(captured_changed_text, 'bleh')
@@ -279,7 +279,7 @@ describe('Morph', function()
       vim.fn.setreg('"', '')
       vim.cmd [[normal! ggdG]]
       -- We'll call the handler ourselves:
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), '')
       assert.are.same(captured_changed_text, '')
@@ -304,7 +304,7 @@ describe('Morph', function()
       vim.cmd [[normal! vhhd]]
       -- For some reason, the autocmd does not fire in the busted environment.
       -- We'll call the handler ourselves:
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'prefix:suffix')
       assert.are.same(captured_changed_text, '')
@@ -647,7 +647,7 @@ describe('Morph', function()
       --           111111111122222222
       -- 0123456789012345678901234567
       -- sibling outer middle changed
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(#captured_events, 2)
       assert.are.same(captured_events[1].id, 'inner')
@@ -667,7 +667,7 @@ describe('Morph', function()
       --           1111111111222222222
       -- 01234567890123456789012345678
       -- modified outer middle inner
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(#captured_events, 1)
       assert.are.same(captured_events[1].id, 'sibling')
@@ -681,7 +681,7 @@ describe('Morph', function()
       -- Replace "middle" with "center"
       set_text(0, 14, 0, 20, { 'center' })
       assert.are.same(get_lines(), { 'sibling outer center inner' })
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(#captured_events, 1)
       assert.are.same(captured_events[1].id, 'outer')
@@ -1165,7 +1165,7 @@ describe('Morph', function()
 
       -- Modify the text and ensure on_change fires correctly
       set_text(0, 0, 3, 0, { 'modified content' })
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'modified content')
       assert.are.same(captured_changed_text, 'modified content')
@@ -1190,7 +1190,7 @@ describe('Morph', function()
 
       -- Insert a newline at the end of 'filter'
       set_text(0, 14, 0, 14, { '', '' })
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_lines(), { 'Search [filter', ']' })
       assert.are.same(captured_changed_text, 'filter\n')
@@ -1216,7 +1216,7 @@ describe('Morph', function()
       -- Delete the input text at the end of the line
       -- This should trigger on_change with an empty string
       set_text(0, 8, 0, 18, {})
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'Search: ')
       assert.are.same(captured_changed_text, '')
@@ -1234,10 +1234,42 @@ describe('Morph', function()
 
       -- Delete just the query part
       set_text(0, 8, 0, 13, {})
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'Filter: ')
       assert.are.same(captured_changed_text, '')
+    end)
+  end)
+
+  it('should recognize a text-change when length of changed text == length of original', function()
+    with_buf({}, function()
+      local captured_changed_text = ''
+
+      -- Text:
+      -- 01234
+      -- hello
+      --- @param ctx morph.Ctx
+      local function App(ctx)
+        return {
+          h('text', {
+            id = 'the-id',
+            on_change = function(e)
+              e.bubble_up = false
+              captured_changed_text = e.text
+            end,
+          }, { 'hello' }),
+        }
+      end
+      local r = Morph.new()
+      r:mount(h(App))
+
+      assert.are.same(get_text(), 'hello')
+
+      -- Replace the trailing 'o' with 'p':
+      set_text(0, 4, 0, 5, { 'p' })
+      r.buf_watcher.fire()
+      assert.are.same(get_text(), 'hellp')
+      assert.are.same(captured_changed_text, 'hellp')
     end)
   end)
 
@@ -1268,13 +1300,13 @@ describe('Morph', function()
       -- Delete the trailing 'o':
       set_text(0, 4, 0, 5, {})
       assert.are.same(get_text(), 'hell')
-      r:_on_text_changed()
+      r.buf_watcher.fire()
       assert.are.same(captured_changed_text, 'hell')
 
       -- Reinsert the trailing 'o':
       set_text(0, 4, 0, 4, { 'o' })
       assert.are.same(get_text(), 'hello')
-      r:_on_text_changed()
+      r.buf_watcher.fire()
       assert.are.same(captured_changed_text, 'hello')
     end)
   end)
@@ -1348,7 +1380,7 @@ describe('Morph', function()
 
       -- Test inserting text at the zero-width position
       set_text(0, 6, 0, 6, { 'inserted' })
-      r:_on_text_changed()
+      r.buf_watcher.fire()
 
       assert.are.same(get_text(), 'beforeinsertedafter')
       assert.are.same(#captured_events, 1)
@@ -1463,7 +1495,7 @@ describe('Morph', function()
 
       -- Insert text:
       vim.api.nvim_feedkeys('ifilter', 'ntx', false)
-      r:_on_text_changed()
+      r.buf_watcher.fire()
       assert.are.same(captured_changed_text, 'filter')
 
       filter_elem = assert(r:get_element_by_id 'filter')
@@ -1473,7 +1505,7 @@ describe('Morph', function()
       -- Undo change:
       vim.cmd.undo()
       assert.are.same(get_text(), 'Search: []')
-      r:_on_text_changed()
+      r.buf_watcher.fire()
       assert.are.same(captured_changed_text, '')
 
       filter_elem = assert(r:get_element_by_id 'filter')
@@ -1481,7 +1513,7 @@ describe('Morph', function()
 
       -- Redo change:
       vim.cmd.redo()
-      r:_on_text_changed()
+      r.buf_watcher.fire()
       assert.are.same(captured_changed_text, 'filter')
 
       filter_elem = assert(r:get_element_by_id 'filter')

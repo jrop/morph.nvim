@@ -15,6 +15,10 @@ fmt:
 	@stylua .
 
 test:
+	@echo "## Running tests"
+	@busted --verbose
+
+test-with-coverage:
 	@rm -f luacov.*.out
 	@echo "## Running tests"
 	@busted --coverage --verbose
