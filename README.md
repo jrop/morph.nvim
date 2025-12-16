@@ -449,7 +449,7 @@ Building interactive UIs in Neovim traditionally requires managing buffer conten
 
 - [reactive.nvim](https://github.com/rasulomaroff/reactive.nvim)
 - [nvim-react](https://github.com/s1n7ax/nvim-react)
-- ??? There's another one (a recent AI plugin) that implemented its own renderer that is similar in architecture, but it is implemented in TypeScript, and its name escapes me.
+- [magenta.nvim](https://github.com/dlants/magenta.nvim) - [custom rendering engine](https://github.com/dlants/magenta.nvim/blob/main/node/tea/render.ts)
 
 ## License (MIT)
 
