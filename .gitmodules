@@ -6,3 +6,7 @@
 	path = library/luv
 	url = https://github.com/LuaCATS/luv
 	branch = main
+[submodule "nvimv"]
+	path = nvimv
+	url = https://github.com/jrop/nvimv
+	branch = main

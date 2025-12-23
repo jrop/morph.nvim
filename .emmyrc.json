@@ -10,6 +10,9 @@
     "version": "LuaJIT"
   },
   "workspace": {
+    "ignoreDir": [
+      ".prefix"
+    ],
     "library": [
       "$VIMRUNTIME",
       "library/busted",

@@ -1,0 +1,90 @@
+[tools]
+# nvimv needs jq:
+jq = "1.8.1"
+lua = "5.1.5"
+# Since we have busted configured to look for "nvim", have a "default" version
+# installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
+# but to avoid having to litter a bunch of commands with that environment
+# initialization, this just makes things simpler:
+neovim = "0.11.5"
+stylua = "2.3.1"
+
+[tools."cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust"]
+version = "tag:0.19.0"
+crate = "emmylua_check"
+
+[env]
+_.source = { path = "./scripts/env.sh", tools = true }
+
+[tasks]
+lint = "emmylua_check --ignore '.prefix/**/*.*' ."
+fmt = "stylua ."
+"fmt:check" = "stylua --check ."
+"test:prepare" = '''
+# Install Lua test dependencies (busted, etc.):
+luarocks test --prepare
+echo
+
+# Check that the nightly version of Neovim is not more than a day old:
+if find .prefix -path '**/nightly/**/nvim' -mtime -1 2>/dev/null | grep -q .; then
+  echo "Neovim Nightly is up-to-date"
+else
+  if ./nvimv/nvimv ls | grep nightly >/dev/null; then
+    ./nvimv/nvimv upgrade nightly
+  else
+    ./nvimv/nvimv install nightly
+  fi
+fi
+echo
+'''
+
+[tasks."test:version:no-prep"]
+hide = true
+usage = '''
+arg "<version>" help="The version of Neovim to test with"
+'''
+run = '''
+echo
+echo -----------------------------
+echo -----------------------------
+echo Neovim version=$usage_version
+echo -----------------------------
+echo -----------------------------
+echo
+./nvimv/nvimv install $usage_version
+eval $(./nvimv/nvimv env $usage_version)
+busted --verbose
+'''
+
+[tasks."test:version"]
+depends = ["test:prepare"]
+usage = '''
+arg "<version>" help="The version of Neovim to test with"
+'''
+run = 'mise test:version:no-prep $usage_version'
+
+[tasks."test"]
+run = 'mise test:version 0.11.5'
+
+[tasks."test:all"]
+depends = ["test:prepare"]
+run = '''
+VERSIONS="0.10.4 0.11.5 nightly"
+for v in $VERSIONS; do
+  mise test:version:no-prep $v
+done
+'''
+
+[tasks."test:coverage"]
+depends = ["test:prepare"]
+run = '''
+busted --coverage --verbose
+awk '/^Summary$/{flag=1;next} flag{print}' luacov.report.out
+'''
+
+[tasks."ci"]
+run = '''
+mise run fmt:check
+mise run lint
+mise run test:all
+'''

@@ -351,6 +351,7 @@ end
 --- @field private changedtick integer
 --- @field private changing boolean
 --- @field private textlock boolean
+--- @field private orig_kmaps table<table<string, any>?>
 --- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field private component_tree { old: morph.Tree  }
 --- @field private cleanup_hooks function[]
@@ -522,6 +523,7 @@ function Morph.new(bufnr)
     changedtick = 0,
     changing = false,
     textlock = false,
+    orig_kmaps = {},
     text_content = {
       old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
       curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
@@ -572,6 +574,13 @@ function Morph:render(tree)
   --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
   local extmarks_to_set = {}
 
+  -- Unmap all existing mappings so that new mappings are fresh:
+  for mode, maps in pairs(self.orig_kmaps) do
+    for lhs, _ in pairs(maps) do
+      self:_kunmap(mode, lhs, { buffer = self.bufnr })
+    end
+  end
+
   --- @type string[]
   local lines = Morph.markup_to_lines {
     tree = tree,
@@ -596,7 +605,7 @@ function Morph:render(tree)
           for lhs, _ in pairs(tag.attributes[mode .. 'map'] or {}) do
             -- Force creating an extmark if there are key handlers. To accurately
             -- sense the bounds of the text, we need an extmark:
-            vim.keymap.set(mode, lhs, function()
+            self:_kmap(mode, lhs, function()
               local result = self:_expr_map_callback(mode, lhs)
               -- If the handler indicates that it wants to swallow the event,
               -- we have to convert that intention into something compatible
@@ -920,6 +929,37 @@ function Morph:get_element_by_id(id)
       return vim.tbl_extend('force', {}, tag, { extmark = extmark }) --[[@as morph.Element]]
     end
   end
+end
+
+--- @private
+--- @param mode string
+--- @param lhs string
+--- @param rhs string|function
+--- @param opts vim.keymap.set.Opts
+function Morph:_kmap(mode, lhs, rhs, opts)
+  local orig = vim.fn.maparg(lhs, mode, false, true)
+  if vim.tbl_isempty(orig) then orig = nil end
+  self.orig_kmaps[mode] = self.orig_kmaps[mode] or {}
+  self.orig_kmaps[mode][lhs] = orig
+  vim.keymap.set(mode, lhs, rhs, opts)
+end
+
+--- @private
+--- @param mode string
+--- @param lhs string
+--- @param opts vim.keymap.del.Opts
+function Morph:_kunmap(mode, lhs, opts)
+  self.orig_kmaps[mode] = self.orig_kmaps[mode] or {}
+  local orig = self.orig_kmaps[mode][lhs]
+  if not orig then return end
+  self.orig_kmaps[mode][lhs] = nil
+
+  vim.keymap.del(mode, lhs, opts)
+  vim.api.nvim_buf_call(self.bufnr, function()
+    -- mapset has to manually be called in the context of the correct
+    -- buffer:
+    vim.fn.mapset(mode, false, orig)
+  end)
 end
 
 --- @private

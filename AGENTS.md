@@ -2,12 +2,11 @@
 
 ## Build/Lint/Test Commands
 
-- `make all` - Run lint, format check, and tests
-- `make lint` - Typecheck with emmylua_check
-- `make fmt` - Format code with stylua
-- `make fmt-check` - Check code formatting
-- `make test` - Run all tests with coverage (busted)
-- `make watch` - Watch for changes and run make automatically
+- `mise run ci` - Run lint, format check, and tests
+- `mise run lint` - Typecheck with emmylua_check
+- `mise run fmt` - Format code with stylua
+- `mise run fmt:check` - Check code formatting
+- `mise run test` - Run tests with busted
 
 **Single test**: Use busted directly: `busted --verbose --filter='"<FULL TEST NAME HERE>"'`
 

@@ -1,0 +1,38 @@
+[[tools."cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust"]]
+version = "tag:0.19.0"
+backend = "cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust[crate=emmylua_check]"
+
+[[tools."cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust"]]
+version = "ref:0.19.0"
+backend = "cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust[crate=emmylua_check]"
+
+[[tools.jq]]
+version = "1.8.1"
+backend = "aqua:jqlang/jq"
+"platforms.linux-arm64" = { checksum = "sha256:6bc62f25981328edd3cfcfe6fe51b073f2d7e7710d7ef7fcdac28d4e384fc3d4", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-arm64"}
+"platforms.linux-x64" = { checksum = "sha256:020468de7539ce70ef1bceaf7cde2e8c4f2ca6c3afb84642aabc5c97d9fc2a0d", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64"}
+"platforms.macos-arm64" = { checksum = "sha256:a9fe3ea2f86dfc72f6728417521ec9067b343277152b114f4e98d8cb0e263603", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-macos-arm64"}
+"platforms.macos-x64" = { checksum = "sha256:e80dbe0d2a2597e3c11c404f03337b981d74b4a8504b70586c354b7697a7c27f", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-macos-amd64"}
+"platforms.windows-x64" = { checksum = "sha256:23cb60a1354eed6bcc8d9b9735e8c7b388cd1fdcb75726b93bc299ef22dd9334", url = "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-windows-amd64.exe"}
+
+[[tools.lua]]
+version = "5.1.5"
+backend = "asdf:lua"
+
+[[tools.neovim]]
+version = "0.11.5"
+backend = "aqua:neovim/neovim"
+"platforms.linux-arm64" = { checksum = "sha256:ea4f9a31b11cc1477ff014aebb7b207684e7280f94ffa97abdab6cacd9b98519", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-arm64.tar.gz"}
+"platforms.linux-x64" = { checksum = "sha256:b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:79143d3b408f7034f90b7cf59af2276de09ef8a4c2f1a28e4c99581b249d3107", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-arm64.tar.gz"}
+"platforms.macos-x64" = { checksum = "sha256:6612760a7037ca2518e456908baf5e43101fa79819d18979fc4d4e8441d9dfa5", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-x86_64.tar.gz"}
+"platforms.windows-x64" = { checksum = "sha256:718e731326e7759cf17bbbb33f38975707a2ac85642614686b818ef5fde38f48", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-win64.zip"}
+
+[[tools.stylua]]
+version = "2.3.1"
+backend = "aqua:JohnnyMorganz/StyLua"
+"platforms.linux-arm64" = { checksum = "sha256:21908eec45ff9666d4ae72825b81faa7fc4119124ed656eb1d470cbf9ed41bc9", url = "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.3.1/stylua-linux-aarch64.zip"}
+"platforms.linux-x64" = { checksum = "sha256:1b3ca3f577e584e19a0ad2264a0ab87f4133818e35700a094416ca98251ffb4a", url = "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.3.1/stylua-linux-x86_64-musl.zip"}
+"platforms.macos-arm64" = { checksum = "sha256:e212e6c21e76c2b1d0f10f8dcf50ec3b5f03f02da7597e0679f539eb18ba0d53", url = "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.3.1/stylua-macos-aarch64.zip"}
+"platforms.macos-x64" = { checksum = "sha256:16f661951bfc984ea6e0157f9495c8192b91f9c2f3b27e6b46db95c315281e92", url = "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.3.1/stylua-macos-x86_64.zip"}
+"platforms.windows-x64" = { checksum = "sha256:70fc56d7361c20e858bd9c3b3b643e44dc2e2007b670c816ba7fb032956e3baa", url = "https://github.com/JohnnyMorganz/StyLua/releases/download/v2.3.1/stylua-windows-x86_64.zip"}
