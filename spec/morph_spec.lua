@@ -1,5 +1,7 @@
 --- @diagnostic disable: need-check-nil, undefined-field, missing-fields
 
+vim.print(tostring(vim.version()))
+
 local Morph = require 'morph'
 local h = Morph.h
 local Pos00 = Morph.Pos00
@@ -1795,6 +1797,57 @@ describe('Morph', function()
       vim.schedule = function(f) return f() end
       assert.has_no.errors(function() leaked_context:update { count = 2 } end)
       vim.schedule = orig_schedule
+    end)
+  end)
+
+  it('should cleanup bindings between renders', function()
+    with_buf({}, function()
+      local my_orig_callback = function() end
+      local my_component_callback_count = 0
+      local my_component_callback = function()
+        my_component_callback_count = my_component_callback_count + 1
+      end
+      vim.keymap.set('n', '<Leader>abc', my_orig_callback, { buffer = true })
+
+      local leaked_context
+      local function TestComponent(ctx)
+        leaked_context = ctx
+        if ctx.phase == 'mount' then ctx.state = 1 end
+
+        if ctx.state == 1 then
+          -- On first render, set a local callback:
+          return h('text', {
+            nmap = {
+              ['<Leader>abc'] = my_component_callback,
+            },
+          }, { 'Hello World!' })
+        else
+          -- On second render, do NOT set a local callback:
+          return h('text', {}, { 'Hello World (II)!' })
+        end
+      end
+
+      local r = Morph.new(0)
+      local result = r:_expr_map_callback('n', '<Leader>abc')
+      assert.are.same(result, '<Leader>abc')
+      assert.are.same(my_component_callback_count, 0)
+
+      r:mount(h(TestComponent))
+      assert.are.same(get_text(), 'Hello World!')
+      vim.print(tostring(my_orig_callback))
+      assert.are_not.same(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
+
+      result = r:_expr_map_callback('n', '<Leader>abc')
+      assert.are.same(result, nil)
+      assert.are.same(my_component_callback_count, 1)
+
+      -- Now update the state (this effectively removes the local keymap):
+      leaked_context:update(2)
+      assert.are.same(get_text(), 'Hello World (II)!')
+
+      result = r:_expr_map_callback('n', '<Leader>abc')
+      assert.are.same(result, '<Leader>abc')
+      assert.are.same(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
     end)
   end)
 end)

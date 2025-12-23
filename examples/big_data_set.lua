@@ -5984,6 +5984,7 @@ vim.cmd.vnew()
 vim.bo.buftype = 'nofile'
 vim.bo.bufhidden = 'wipe'
 vim.bo.buflisted = false
+vim.b.completion = false
 
 require('jit.p').start('vfl', '/tmp/profile')
 
