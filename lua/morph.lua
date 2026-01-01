@@ -369,28 +369,33 @@ Morph.__index = Morph
 ---   on_tag?: fun(tag: morph.Tag, start0: morph.Pos00, stop0: morph.Pos00): any
 --- }
 function Morph.markup_to_lines(opts)
-  --- @type (fun(s: string))[]
-  local listeners = {}
+  -- As we visit tags (specifically) we want to keep track of the text of that tag
+  -- and put it on the tag object, so that the text is cached.
+  --- @type { text: string[] }[]
+  local text_accumulators = {}
 
   --- @type string[]
   local lines = {}
 
   local curr_line1 = 1
   local curr_col1 = 1 -- exclusive: sits one position **beyond** the last inserted text
+
   --- @param s string
   local function put(s)
     lines[curr_line1] = (lines[curr_line1] or '') .. s
     curr_col1 = #lines[curr_line1] + 1
-    for _, listener in ipairs(listeners) do
-      listener(s)
+    for i = 1, #text_accumulators do
+      local acc = text_accumulators[i]
+      table.insert(acc.text, s)
     end
   end
   local function put_line()
     table.insert(lines, '')
     curr_line1 = curr_line1 + 1
     curr_col1 = 1
-    for _, listener in ipairs(listeners) do
-      listener '\n'
+    for i = 1, #text_accumulators do
+      local acc = text_accumulators[i]
+      table.insert(acc.text, '\n')
     end
   end
 
@@ -410,13 +415,14 @@ function Morph.markup_to_lines(opts)
         end
       end,
       tag = function(t)
-        local curr_text = ''
-        listeners[#listeners + 1] = function(s) curr_text = curr_text .. s end
+        table.insert(text_accumulators, { text = {} })
+
         local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
         visit(t.children)
         local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
-        table.remove(listeners, #listeners)
-        t.curr_text = curr_text
+
+        t.curr_text = table.concat(text_accumulators[#text_accumulators].text)
+        table.remove(text_accumulators, #text_accumulators)
 
         if opts.on_tag then opts.on_tag(t, start0, stop0) end
       end,
@@ -758,8 +764,8 @@ function Morph:mount(tree)
     return new_tree_rendered
   end
 
-  --- @param old_arr morph.Node[]
-  --- @param new_arr morph.Node[]
+  --- @param old_arr? morph.Node[]
+  --- @param new_arr? morph.Node[]
   --- @return morph.Node[]
   function H2.visit_array(old_arr, new_arr)
     -- We are going to hijack levenshtein in order to compute the
@@ -771,6 +777,33 @@ function Morph:mount(tree)
     -- What levenshtein gives us for free in this model is also informing
     -- us what needs to be added (i.e., "mounted"), what needs to be
     -- deleted ("unmounted") and what needs to be changed ("updated").
+
+    -- Pre-compute H.verbose_tree_kind for all the old/new nodes (performance
+    -- optimization):
+    local old_kinds = {}
+    local new_kinds = {}
+    local node_to_kind = {}
+    if old_arr then
+      for i = 1, #old_arr do
+        local node = old_arr[i]
+        if node ~= nil then
+          local kind = H.verbose_tree_kind(node, i)
+          old_kinds[i] = kind
+          node_to_kind[node] = kind
+        end
+      end
+    end
+    if new_arr then
+      for i = 1, #new_arr do
+        local node = new_arr[i]
+        if node ~= nil then
+          local kind = H.verbose_tree_kind(node, i)
+          new_kinds[i] = kind
+          node_to_kind[node] = kind
+        end
+      end
+    end
+
     local changes = (
       H.levenshtein {
         --- @diagnostic disable-next-line: assign-type-mismatch
@@ -778,10 +811,8 @@ function Morph:mount(tree)
         to = new_arr or {},
         are_equal = function() return false end,
         cost = {
-          of_change = function(node1, node2, node1_idx, node2_idx)
-            local node1_inf = H.verbose_tree_kind(node1, node1_idx)
-            local node2_inf = H.verbose_tree_kind(node2, node2_idx)
-            return node1_inf == node2_inf and 1 or 2
+          of_change = function(_node1, _node2, node1_idx, node2_idx)
+            return old_kinds[node1_idx] == new_kinds[node2_idx] and 1 or 2
           end,
         },
       }
@@ -802,8 +833,8 @@ function Morph:mount(tree)
         -- change is either:
         -- - unmount, then mount
         -- - update
-        local from_kind = H.verbose_tree_kind(change.from)
-        local to_kind = H.verbose_tree_kind(change.to)
+        local from_kind = node_to_kind[change.from]
+        local to_kind = node_to_kind[change.to]
         if from_kind == to_kind then
           resulting_node = H2.visit_tree(change.from, change.to)
         else
@@ -1147,24 +1178,31 @@ end
 
 --- @return string
 function H.verbose_tree_kind(tree, idx)
-  if tree == nil or tree == vim.NIL then return 'nil' end
-  if type(tree) == 'string' then return 'string' end
-  if type(tree) == 'boolean' then return 'boolean' end
-  if H.tree_is_tag_arr(tree) then return 'array' end
-  if H.tree_is_tag(tree) then
+  local tree_type = type(tree)
+  if tree == nil or tree == vim.NIL then
+    return 'nil'
+  elseif tree_type == 'string' then
+    return 'string'
+  elseif tree_type == 'boolean' then
+    return 'boolean'
+  elseif H.tree_is_tag_arr(tree) then
+    return 'array'
+  elseif H.tree_is_tag(tree) then
     if vim.is_callable(tree.name) then
       return 'component-' .. tostring(tree.name) .. '-' .. tostring(tree.attributes.key or idx)
     else
       return 'tag-' .. tree.name .. '-' .. tostring(tree.attributes.key or idx)
     end
+  else
+    error 'unknown'
   end
-  error 'unknown'
 end
 
 function H.is_textlock()
   if vim.in_fast_event() then return true end
 
   local curr_win = vim.api.nvim_get_current_win()
+  local curr_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
 
   -- Try to change the window: if textlock is active, an error will be raised:
   local tmp_buf = vim.api.nvim_create_buf(false, true)
@@ -1185,7 +1223,13 @@ function H.is_textlock()
 
   pcall(vim.api.nvim_win_close, tmp_win --[[@as integer]], true)
   pcall(vim.api.nvim_buf_delete, tmp_buf, { force = true })
+
   vim.api.nvim_set_current_win(curr_win)
+  if curr_mode == 'i' or curr_mode == 't' then
+    vim.cmd.startinsert()
+  elseif curr_mode ~= 'n' then
+    vim.cmd.normal { args = { 'gv' }, bang = true }
+  end
 
   return false
 end
@@ -1218,9 +1262,6 @@ function H.levenshtein(opts)
   local dp = {}
   for i = 0, m do
     dp[i] = {}
-    for j = 0, n do
-      dp[i][j] = 0
-    end
   end
 
   -- Fill the base cases
@@ -1235,13 +1276,12 @@ function H.levenshtein(opts)
   for i = 1, m do
     for j = 1, n do
       if opts.are_equal(opts.from[i], opts.to[j], i, j) then
-        assert(dp[i])[j] = assert(dp[i - 1])[j - 1] -- no cost if items are the same
+        dp[i][j] = dp[i - 1][j - 1] -- no cost if items are the same
       else
-        local cost_delete = assert(assert(dp[i - 1])[j]) + opts.cost.of_delete(opts.from[i], i)
-        local cost_add = assert(assert(dp[i])[j - 1]) + opts.cost.of_add(opts.to[j], j)
-        local cost_change = assert(assert(dp[i - 1])[j - 1])
-          + opts.cost.of_change(opts.from[i], opts.to[j], i, j)
-        assert(dp[i])[j] = math.min(cost_delete, cost_add, cost_change)
+        local cost_delete = dp[i - 1][j] + opts.cost.of_delete(opts.from[i], i)
+        local cost_add = dp[i][j - 1] + opts.cost.of_add(opts.to[j], j)
+        local cost_change = dp[i - 1][j - 1] + opts.cost.of_change(opts.from[i], opts.to[j], i, j)
+        dp[i][j] = math.min(cost_delete, cost_add, cost_change)
       end
     end
   end
@@ -1253,10 +1293,10 @@ function H.levenshtein(opts)
   local changes = {}
 
   while i > 0 or j > 0 do
-    local default_cost = assert(assert(dp[i])[j])
-    local cost_of_change = (i > 0 and j > 0) and assert(dp[i - 1])[j - 1] or default_cost
-    local cost_of_add = j > 0 and assert(dp[i])[j - 1] or default_cost
-    local cost_of_delete = i > 0 and assert(dp[i - 1])[j] or default_cost
+    local default_cost = dp[i][j]
+    local cost_of_change = (i > 0 and j > 0) and dp[i - 1][j - 1] or default_cost
+    local cost_of_add = j > 0 and dp[i][j - 1] or default_cost
+    local cost_of_delete = i > 0 and dp[i - 1][j] or default_cost
 
     --- @param u integer
     --- @param v integer

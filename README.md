@@ -72,7 +72,7 @@ renderer:mount(h(Counter, {}, {}))
 
 ## Key Features
 
-### 🎯 **Component-Based Architecture**
+### **Component-Based Architecture**
 Write reusable components with props, state, and lifecycle methods. Components can render other components, creating a composable hierarchy:
 
 <details>
@@ -128,10 +128,10 @@ end
 
 </details>
 
-### ⚡ **Efficient Reconciliation**
+### **Efficient Reconciliation**
 Only updates what changed, using a diffing algorithm similar to React's virtual DOM. The renderer intelligently patches only the specific text regions that have actually changed, preserving cursor position and avoiding disruptive window jumps. This means smooth, flicker-free updates even for complex UIs with frequent state changes.
 
-### 🎨 **Rich Text Styling**
+### **Rich Text Styling**
 Apply highlight groups and extmarks with simple attributes:
 
 <details>
@@ -147,7 +147,7 @@ h.ErrorMsg({
 
 </details>
 
-### 🔥 **Interactive Event Handling**
+### **Interactive Event Handling**
 Respond to keypresses with mode-specific handlers:
 
 <details>
@@ -165,7 +165,7 @@ h('text', {
 
 </details>
 
-### 📝 **Text Change Detection**
+### **Text Change Detection**
 Automatically detect when users edit text within tags:
 
 <details>
@@ -311,10 +311,6 @@ h('text', { hl = 'Comment' }, 'Hello world')
 
 -- Shorthand for highlight groups
 h.Comment({}, 'Hello world')  -- equivalent to above
-
--- Semantic element names (all treated as 'text' internally)
-h('button', { hl = 'Keyword' }, '[Click me]')
-h('header', { hl = 'Title' }, 'Section Title')
 
 -- Nested elements
 h('text', {}, {

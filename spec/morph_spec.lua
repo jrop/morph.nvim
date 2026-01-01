@@ -1850,4 +1850,127 @@ describe('Morph', function()
       assert.are.same(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
     end)
   end)
+
+  --
+  -- Mode restoration during rendering (tests is_textlock mode restoration)
+  --
+
+  it('should preserve normal mode during rendering when textlock check occurs', function()
+    with_buf({}, function()
+      -- Start in normal mode
+      vim.cmd.stopinsert()
+      local initial_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(initial_mode:sub(1, 1), 'n')
+
+      -- Trigger a render which will call is_textlock internally
+      local r = Morph.new(0)
+      r:render { h('text', {}, 'normal mode test') }
+
+      -- Verify mode is still normal after rendering
+      local final_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(final_mode:sub(1, 1), 'n')
+      assert.are.same(get_text(), 'normal mode test')
+    end)
+  end)
+
+  it('should preserve visual mode during rendering when textlock check occurs', function()
+    with_buf({ 'visual mode test' }, function()
+      -- Render first so we have content
+      local r = Morph.new(0)
+      r:render { h('text', {}, 'visual mode test content') }
+
+      -- Enter visual mode
+      set_cursor { 1, 0 }
+      vim.cmd.normal { args = { 'v' }, bang = true }
+      local initial_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(initial_mode:sub(1, 1), 'v')
+
+      -- Trigger another render which will call is_textlock internally
+      r:render { h('text', {}, 'updated visual test') }
+
+      -- Verify mode is restored to visual after rendering
+      local final_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(final_mode:sub(1, 1), 'v')
+      assert.are.same(get_text(), 'updated visual test')
+
+      -- Exit visual mode for cleanup
+      vim.cmd.normal { args = { '<Esc>' }, bang = true }
+    end)
+  end)
+
+  it('should preserve visual line mode during rendering when textlock check occurs', function()
+    with_buf({ 'line 1', 'line 2' }, function()
+      -- Render first so we have content
+      local r = Morph.new(0)
+      r:render { h('text', {}, 'line 1\nline 2') }
+
+      -- Enter visual line mode
+      set_cursor { 1, 0 }
+      vim.cmd.normal { args = { 'V' }, bang = true }
+      local initial_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(initial_mode:sub(1, 1), 'V')
+
+      -- Trigger another render which will call is_textlock internally
+      r:render { h('text', {}, 'updated line 1\nupdated line 2') }
+
+      -- Verify mode is restored to visual line after rendering
+      local final_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(final_mode:sub(1, 1), 'V')
+      assert.are.same(get_text(), 'updated line 1\nupdated line 2')
+
+      -- Exit visual mode for cleanup
+      vim.cmd.normal { args = { '<Esc>' }, bang = true }
+    end)
+  end)
+
+  it(
+    'should preserve visual mode in focused split during render in unfocused morph buffer',
+    function()
+      -- Create first buffer with morph content
+      vim.cmd.new()
+      local morph_buf = vim.api.nvim_get_current_buf()
+      vim.api.nvim_buf_set_lines(morph_buf, 0, -1, false, { '' })
+      local r = Morph.new(morph_buf)
+      r:render { h('text', {}, 'morph buffer content') }
+
+      -- Create a second split with different content
+      vim.cmd.vsplit()
+      local focus_buf = vim.api.nvim_get_current_buf()
+      local focus_win = vim.api.nvim_get_current_win()
+      vim.api.nvim_buf_set_lines(focus_buf, 0, -1, false, { 'line 1', 'line 2', 'line 3' })
+
+      -- Enter visual mode in the focused split
+      set_cursor { 1, 0 }
+      vim.cmd.normal { args = { 'v' }, bang = true }
+      local initial_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(initial_mode:sub(1, 1), 'v')
+
+      -- Verify we're in the focus window, not the morph window
+      assert.are.same(vim.api.nvim_get_current_win(), focus_win)
+      assert.are.same(vim.api.nvim_get_current_buf(), focus_buf)
+
+      -- Trigger a render in the unfocused morph buffer
+      -- This will call is_textlock which should preserve the visual mode in focus_win
+      r:render { h('text', {}, 'updated morph content') }
+
+      -- Verify visual mode is still active in the focused split
+      local final_mode = vim.api.nvim_get_mode().mode
+      assert.are.same(final_mode:sub(1, 1), 'v')
+
+      -- Verify we're still in the same window
+      assert.are.same(vim.api.nvim_get_current_win(), focus_win)
+      assert.are.same(vim.api.nvim_get_current_buf(), focus_buf)
+
+      -- Verify the morph buffer was updated correctly
+      local morph_lines = vim.api.nvim_buf_get_lines(morph_buf, 0, -1, false)
+      assert.are.same(morph_lines, { 'updated morph content' })
+
+      -- Cleanup: exit visual mode and close all windows
+      vim.cmd.normal { args = { '<Esc>' }, bang = true }
+      -- Close all windows and buffers created in this test
+      pcall(vim.api.nvim_win_close, focus_win, true)
+      pcall(vim.api.nvim_buf_delete, morph_buf, { force = true })
+      pcall(vim.api.nvim_buf_delete, focus_buf, { force = true })
+    end
+  )
 end)
