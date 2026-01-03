@@ -544,7 +544,7 @@ function Morph.new(bufnr)
   )
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
 
-  local wipeout_id = vim.api.nvim_create_autocmd('BufWipeout', {
+  local cleanup_autocmd = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
     callback = function()
       for _, cleanup_hook in ipairs(self.cleanup_hooks) do
@@ -552,7 +552,7 @@ function Morph.new(bufnr)
       end
     end,
   })
-  table.insert(self.cleanup_hooks, function() vim.api.nvim_del_autocmd(wipeout_id) end)
+  table.insert(self.cleanup_hooks, function() vim.api.nvim_del_autocmd(cleanup_autocmd) end)
 
   return self
 end
@@ -862,16 +862,16 @@ function Morph:mount(tree)
     end
   end
 
-  -- Don't track this autocmd in cleanup_hooks, because the prior BufWipeout
+  -- Don't track this autocmd in cleanup_hooks, because the prior BufDelete/BufUnload/BufWipeout
   -- will take priority, and will delete this autocmd before it even has a
   -- chance to run:
-  local wipeout_id
-  wipeout_id = vim.api.nvim_create_autocmd('BufWipeout', {
+  local unmount_autocmd_id
+  unmount_autocmd_id = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
     callback = function()
       -- Effectively unmount everything:
       H2.visit_tree(self.component_tree.old, nil)
-      vim.api.nvim_del_autocmd(wipeout_id)
+      vim.api.nvim_del_autocmd(unmount_autocmd_id)
     end,
   })
 
