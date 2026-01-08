@@ -1,5 +1,9 @@
 # morph.nvim - Agent Development Guide
 
+## General Methodology
+
+When asked to add a feature, start with adding a failing test, then the feature.
+
 ## Build/Lint/Test Commands
 
 - `mise run ci` - Run lint, format check, and tests
@@ -22,7 +26,7 @@
 
 This is why tests require manual `r.buf_watcher.fire()` calls - the current implementation uses `TextChanged` autocmd to batch `on_bytes` events, but this autocmd never fires in headless test environments.
 
-**Current workaround in tests**: Call `r.buf_watcher.fire()` manually after programmatic buffer changes to simulate the autocmd that would fire with real user input.
+**Current workaround in tests**: Call `vim.cmd.doautocmd 'TextChanged'` manually after programmatic buffer changes to simulate the autocmd that would fire with real user input.
 
 ### Buffer Event Testing
 

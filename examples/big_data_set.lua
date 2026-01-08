@@ -113,8 +113,8 @@ end
 -- /_/   \_\ .__/| .__/
 --         |_|   |_|
 
---- @param ctx morph.Ctx
-local function App(ctx)
+--- @param _ctx morph.Ctx
+local function App(_ctx)
   return h('text', {}, {
     --
     -- List of items

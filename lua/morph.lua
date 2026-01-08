@@ -43,13 +43,28 @@
 --                                       +=====:         =:
 --                                           :=::::==.
 --
+-- A React-like component library for Neovim buffers.
+--
+-- This module provides:
+--   - h()     : hyperscript for creating virtual DOM tags
+--   - Pos00   : 0-based position class for buffer coordinates
+--   - Extmark : wrapper around Neovim's extmark API
+--   - Ctx     : component context (props, state, lifecycle)
+--   - Morph   : the main class that renders components to buffers
+--
+-- The core idea: describe your UI as a tree of tags (like HTML), and Morph
+-- will efficiently update the buffer to match using Levenshtein diffing.
 
+-- Used by expr-mappings to swallow key-presses without executing anything
 function _G.MorphOpFuncNoop() end
-
-local H = {}
 
 --------------------------------------------------------------------------------
 -- Type Definitions
+--
+-- The type hierarchy flows from abstract to concrete:
+--   Tag (recipe) -> Element (instantiated tag with extmark)
+--   Node -> Tree (composable structures)
+--   Component (function that produces Trees)
 --------------------------------------------------------------------------------
 
 --- @alias morph.TagEventHandler fun(e: { tag: morph.Element, mode: string, lhs: string, bubble_up: boolean }): string
@@ -80,43 +95,292 @@ local H = {}
 --- @class morph.Element : morph.Tag
 --- @field extmark morph.Extmark
 
---- @alias morph.Node nil | boolean | string | morph.Tag
+--- @alias morph.Node nil | boolean | string | number | morph.Tag
 --- @alias morph.Tree morph.Node | morph.Node[]
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
 --------------------------------------------------------------------------------
--- h: Hyper-script Utility
+-- Tree Utilities
+--
+-- Helper functions for working with the tree structure. These are used
+-- throughout the codebase to identify node types and compute diffs.
 --------------------------------------------------------------------------------
 
-H.h = setmetatable({}, {
-  --- @param name 'text' | morph.Component
-  --- @param attributes? morph.TagAttributes
-  --- @param children? morph.Tree
-  __call = function(_, name, attributes, children)
-    return {
-      kind = 'tag',
-      name = name,
-      attributes = attributes or {},
-      children = children or {},
+--- Determine the type of a tree node.
+--- @param node morph.Tree
+--- @return 'nil'|'boolean'|'string'|'number'|'array'|'tag'|'component'
+local function tree_type(node)
+  if node == nil or node == vim.NIL then return 'nil' end
+  if type(node) == 'boolean' then return 'boolean' end
+  if type(node) == 'string' then return 'string' end
+  if type(node) == 'number' then return 'number' end
+  if type(node) == 'table' then
+    if node.kind == 'tag' then
+      return vim.is_callable(node.name) and 'component' or 'tag'
+    else
+      return 'array'
+    end
+  end
+  error('unknown tree node type: ' .. type(node))
+end
+
+--- Compute an identity key for a node, used to match old/new nodes during reconciliation.
+--- Includes the node type, component function (if any), and explicit key attribute.
+--- @param node morph.Node
+--- @param index integer fallback key if no explicit key
+--- @return string
+local function tree_identity_key(node, index)
+  local t = tree_type(node)
+  if t == 'nil' or t == 'boolean' or t == 'string' or t == 'number' or t == 'array' then
+    return t
+  elseif t == 'tag' then
+    local tag = node --[[@as morph.Tag]]
+    return 'tag-' .. tag.name .. '-' .. tostring(tag.attributes.key or index)
+  elseif t == 'component' then
+    local tag = node --[[@as morph.Tag]]
+    return 'component-' .. tostring(tag.name) .. '-' .. tostring(tag.attributes.key or index)
+  end
+  error 'unreachable'
+end
+
+--------------------------------------------------------------------------------
+-- Levenshtein Diff Algorithm
+--
+-- Used to compute the minimal set of changes needed to transform one list
+-- into another. We use this both for text diffing (lines, characters) and
+-- for component reconciliation (matching old/new nodes).
+--------------------------------------------------------------------------------
+
+--- @alias morph.LevenshteinChange<T> { kind: 'add', item: T, index: integer } | { kind: 'delete', item: T, index: integer } | { kind: 'change', from: T, to: T, index: integer }
+
+--- @class morph.LevenshteinOpts
+--- @field from any[]
+--- @field to any[]
+--- @field are_any_equal? boolean
+--- @field cost? morph.LevenshteinCost
+
+--- @class morph.LevenshteinCost
+--- @field of_add? integer
+--- @field of_delete? integer
+--- @field of_change? fun(a: any, b: any, ai: integer, bi: integer): integer
+
+--- Compute the minimal edit sequence to transform `from` into `to`.
+--- @param opts morph.LevenshteinOpts
+--- @return morph.LevenshteinChange<any>[]
+local function levenshtein(opts)
+  local are_any_equal = opts.are_any_equal == nil and true or opts.are_any_equal
+  local cost_of_add = opts.cost and opts.cost.of_add or 1
+  local cost_of_delete = opts.cost and opts.cost.of_delete or 1
+  local cost_of_change = opts.cost and opts.cost.of_change or function() return 1 end
+
+  local from, to = opts.from, opts.to
+  local m, n = #from, #to
+
+  -- Build the DP table. Each cell dp[i][j] represents the minimum cost to
+  -- transform from[1..i] into to[1..j].
+  --- @diagnostic disable-next-line: assign-type-mismatch
+  local dp = {} --- @type integer[][]
+  for i = 0, m do
+    --- @diagnostic disable-next-line: assign-type-mismatch
+    dp[i] = { [0] = i * cost_of_delete }
+  end
+  for j = 1, n do
+    --- @diagnostic disable-next-line: need-check-nil
+    dp[0][j] = j * cost_of_add
+  end
+
+  --- @diagnostic disable: need-check-nil
+  for i = 1, m do
+    for j = 1, n do
+      if are_any_equal and from[i] == to[j] then
+        dp[i][j] = dp[i - 1][j - 1]
+      else
+        dp[i][j] = math.min(
+          dp[i - 1][j] + cost_of_delete,
+          dp[i][j - 1] + cost_of_add,
+          dp[i - 1][j - 1] + cost_of_change(from[i], to[j], i, j)
+        )
+      end
+    end
+  end
+  --- @diagnostic enable: need-check-nil
+
+  -- Backtrack to extract the changes.
+  --
+  -- IMPORTANT: We must check which operation was *actually* used to reach the
+  -- current cell, not just compare previous cell values. When costs are
+  -- variable (e.g., key-based reconciliation where matching keys cost less),
+  -- the previous cell values don't tell us which path was taken - we need to
+  -- verify that prev_cell + operation_cost == current_cell.
+  --
+  -- Priority when multiple operations tie: delete > add > change.
+  -- This prefers removing items over substituting them, which produces more
+  -- intuitive results for keyed list reconciliation (e.g., removing 'b' from
+  -- ['a','b'] should delete 'b', not substitute 'b' for 'a' and delete 'a').
+  local changes = {} --- @type morph.LevenshteinChange[]
+  local i, j = m, n
+
+  while i > 0 or j > 0 do
+    --- @diagnostic disable-next-line: need-check-nil
+    local current = dp[i][j]
+
+    -- Check if delete was the operation used (move up: dp[i-1][j] + delete_cost == current)
+    --- @diagnostic disable-next-line: need-check-nil
+    local can_delete = i > 0 and dp[i - 1][j] + cost_of_delete == current
+
+    -- Check if add was the operation used (move left: dp[i][j-1] + add_cost == current)
+    --- @diagnostic disable-next-line: need-check-nil
+    local can_add = j > 0 and dp[i][j - 1] + cost_of_add == current
+
+    -- Check if change/keep was the operation used (move diagonal)
+    local can_diag = false
+    if i > 0 and j > 0 then
+      if are_any_equal and from[i] == to[j] then
+        --- @diagnostic disable-next-line: need-check-nil
+        can_diag = dp[i - 1][j - 1] == current
+      else
+        --- @diagnostic disable-next-line: need-check-nil
+        can_diag = dp[i - 1][j - 1] + cost_of_change(from[i], to[j], i, j) == current
+      end
+    end
+
+    -- Choose operation with priority: delete > add > diagonal (change/keep)
+    if can_delete then
+      table.insert(changes, { kind = 'delete', item = from[i], index = i })
+      i = i - 1
+    elseif can_add then
+      table.insert(changes, { kind = 'add', item = to[j], index = i + 1 })
+      j = j - 1
+    elseif can_diag then
+      if not are_any_equal or from[i] ~= to[j] then
+        table.insert(changes, { kind = 'change', from = from[i], to = to[j], index = i })
+      end
+      i, j = i - 1, j - 1
+    else
+      -- This should never happen with a valid DP table
+      error('levenshtein backtrack: no valid operation found at (' .. i .. ',' .. j .. ')')
+    end
+  end
+
+  return changes
+end
+
+--------------------------------------------------------------------------------
+-- Textlock Detection
+--
+-- Neovim has a "textlock" that prevents buffer/window changes during certain
+-- operations (like autocmd callbacks). We need to detect this so we can
+-- schedule state updates for later instead of applying them immediately.
+--------------------------------------------------------------------------------
+
+--- A lazily-created unlisted scratch buffer used to probe for textlock.
+--- We reuse a single buffer to avoid creating/destroying buffers on every check.
+--- @type integer?
+local textlock_probe_buf = nil
+
+--- Check if we're currently in a textlock (can't modify buffers).
+--- Uses nvim_buf_set_lines on a hidden probe buffer.
+--- @return boolean
+local function is_textlock()
+  --- @diagnostic disable-next-line: unnecessary-if
+  if vim.in_fast_event() then return true end
+
+  -- Lazily create the probe buffer. We can't create it during textlock,
+  -- but that's fine - if we're in textlock, this pcall will fail and we'll
+  -- know we're in textlock. The buffer persists for future checks.
+  if not textlock_probe_buf or not vim.api.nvim_buf_is_valid(textlock_probe_buf) then
+    local ok, buf = pcall(vim.api.nvim_create_buf, false, true)
+    if not ok then
+      -- Buffer creation failed - we're definitely in textlock
+      return true
+    end
+    textlock_probe_buf = buf --[[@as integer]]
+  end
+
+  -- Try to set lines - this will fail with E565 if textlock is active.
+  -- Setting the same content is a no-op in terms of buffer state.
+  --- @diagnostic disable-next-line: param-type-mismatch
+  local ok, err = pcall(vim.api.nvim_buf_set_lines, textlock_probe_buf, 0, -1, false, { '' })
+
+  if not ok and type(err) == 'string' and err:find 'E565' then return true end
+
+  return false
+end
+
+--------------------------------------------------------------------------------
+-- Buffer Watcher
+--
+-- Neovim's nvim_buf_attach on_bytes callback fires *during* the change,
+-- when the buffer is in an inconsistent state. We use TextChanged autocmd
+-- to delay our callback until after the change is complete.
+--------------------------------------------------------------------------------
+
+--- @class morph.BufWatcher
+--- @field last_on_bytes_args unknown[]
+--- @field text_changed_autocmd_id integer
+--- @field cleanup fun() Remove the watcher
+
+--- Create a buffer watcher that calls `callback` after text changes.
+--- @param bufnr integer
+--- @param callback function Called with on_bytes args after TextChanged fires
+--- @return morph.BufWatcher
+local function create_buf_watcher(bufnr, callback)
+  local watcher = {
+    last_on_bytes_args = {},
+  }
+
+  -- Capture on_bytes args but don't call callback yet
+  vim.api.nvim_buf_attach(bufnr, false, {
+    on_bytes = function(...) watcher.last_on_bytes_args = { ... } end,
+  })
+
+  -- Fire callback when TextChanged fires (buffer is now stable)
+  watcher.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
+    { 'TextChanged', 'TextChangedI', 'TextChangedP' },
+    {
+      buffer = bufnr,
+      callback = function() callback(unpack(watcher.last_on_bytes_args)) end,
     }
+  )
+
+  function watcher.cleanup() vim.api.nvim_del_autocmd(watcher.text_changed_autocmd_id) end
+
+  return watcher
+end
+
+--------------------------------------------------------------------------------
+-- h(): Hyperscript - Creating Virtual DOM Tags
+--
+-- Usage:
+--   h('text', { hl = 'Comment' }, { 'Hello' })  -- explicit text tag
+--   h.Comment({}, { 'Hello' })                  -- shorthand: h.<highlight>
+--   h(MyComponent, { prop = 1 }, { ... })       -- component tag
+--
+-- This is the primary way to construct your UI tree.
+--------------------------------------------------------------------------------
+
+--- @type table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>
+--- @diagnostic disable-next-line: assign-type-mismatch
+local h = setmetatable({}, {
+  -- h('text', attrs, children) - create a tag directly
+  __call = function(_, name, attributes, children)
+    return { kind = 'tag', name = name, attributes = attributes or {}, children = children or {} }
   end,
 
-  --- @param hl string
-  __index = function(_, hl)
-    --- @param attributes? morph.TagAttributes
-    --- @param children? morph.Tree
+  -- h.Comment(attrs, children) - shorthand for h('text', { hl = 'Comment', ...attrs }, children)
+  __index = function(self, highlight_group)
     return function(attributes, children)
-      return H.h(
-        'text',
-        vim.tbl_deep_extend('force', { hl = hl }, attributes or {}),
-        children or {}
-      )
+      local merged_attrs = vim.tbl_deep_extend('force', { hl = highlight_group }, attributes or {})
+      return self('text', merged_attrs, children or {})
     end
   end,
-}) --[[@as table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>]]
+})
 
 --------------------------------------------------------------------------------
--- class Pos00
+-- Pos00: Zero-Based Buffer Positions
+--
+-- Neovim's API is inconsistent about 0-based vs 1-based indexing.
+-- This class provides a consistent 0-based position type with comparison ops.
 --------------------------------------------------------------------------------
 
 --- @class morph.Pos00
@@ -125,18 +389,28 @@ H.h = setmetatable({}, {
 local Pos00 = {}
 Pos00.__index = Pos00
 
---- @param row integer
---- @param col integer
+--- @param row integer 0-based row
+--- @param col integer 0-based column
 function Pos00.new(row, col) return setmetatable({ row, col }, Pos00) end
---- @param other morph.Pos00
+
 function Pos00:__eq(other) return self[1] == other[1] and self[2] == other[2] end
---- @param other morph.Pos00
-function Pos00:__lt(other) return self[1] < other[1] or (self[1] == other[1] and self[2] < other[2]) end
---- @param other morph.Pos00
-function Pos00:__gt(other) return self[1] > other[1] or (self[1] == other[1] and self[2] > other[2]) end
+
+function Pos00:__lt(other)
+  if self[1] ~= other[1] then return self[1] < other[1] end
+  return self[2] < other[2]
+end
+
+function Pos00:__gt(other)
+  if self[1] ~= other[1] then return self[1] > other[1] end
+  return self[2] > other[2]
+end
 
 --------------------------------------------------------------------------------
--- class Extmark
+-- Extmark: Wrapper Around Neovim's Extmark API
+--
+-- Extmarks track regions of text that move as the buffer is edited.
+-- This wrapper provides a cleaner interface and handles edge cases like
+-- extmarks that extend past the end of the buffer.
 --------------------------------------------------------------------------------
 
 --- @class morph.Extmark
@@ -149,6 +423,9 @@ function Pos00:__gt(other) return self[1] > other[1] or (self[1] == other[1] and
 local Extmark = {}
 Extmark.__index = Extmark
 
+--- Create a new extmark in the buffer.
+--- Uses left gravity for start (stays put when text inserted before) and
+--- right gravity for end (expands when text inserted at end).
 --- @param bufnr integer
 --- @param ns integer
 --- @param start morph.Pos00
@@ -156,87 +433,74 @@ Extmark.__index = Extmark
 --- @param opts vim.api.keyset.set_extmark
 --- @return morph.Extmark
 function Extmark.new(bufnr, ns, start, stop, opts)
-  local id = vim.api.nvim_buf_set_extmark(
-    bufnr,
-    ns,
-    start[1],
-    start[2],
-    vim.tbl_extend('force', {
-      end_row = stop[1],
-      end_col = stop[2],
-      right_gravity = false,
-      end_right_gravity = true,
-    }, opts)
-  )
+  local extmark_opts = vim.tbl_extend('force', {
+    end_row = stop[1],
+    end_col = stop[2],
+    right_gravity = false,
+    end_right_gravity = true,
+  }, opts)
+
+  local id = vim.api.nvim_buf_set_extmark(bufnr, ns, start[1], start[2], extmark_opts)
   return setmetatable(
     { id = id, start = start, stop = stop, raw = opts, ns = ns, bufnr = bufnr },
     Extmark
   )
 end
 
---- @private
+--- Retrieve an existing extmark by its ID.
 --- @param bufnr integer
 --- @param ns integer
 --- @param id integer
---- @param start_row0 integer
---- @param start_col0 integer
---- @param details vim.api.keyset.extmark_details
---- @return morph.Extmark
-function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
-  local start = Pos00.new(start_row0, start_col0)
-  local stop = Pos00.new(start_row0, start_col0)
-  if details and details.end_row ~= nil and details.end_col ~= nil then
-    stop = Pos00.new(details.end_row --[[@as integer]], details.end_col --[[@as integer]])
-  end
-
-  local extmark = setmetatable({
-    id = id,
-    start = start,
-    stop = stop,
-    raw = details,
-    ns = ns,
-    bufnr = bufnr,
-  }, Extmark)
-
-  -- Normalize extmark ending-bounds:
-  local buf_max_line0 = math.max(0, vim.api.nvim_buf_line_count(bufnr) - 1)
-  if extmark.stop[1] > buf_max_line0 then
-    local last_line = vim.api.nvim_buf_get_lines(bufnr, buf_max_line0, buf_max_line0 + 1, true)[1]
-      or ''
-    extmark.stop = Pos00.new(buf_max_line0, last_line:len())
-  end
-  return extmark
-end
-
---- @param bufnr integer
---- @param ns integer
---- @param id integer
+--- @return morph.Extmark?
 function Extmark.by_id(bufnr, ns, id)
-  local raw_extmark = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, id, { details = true })
-  if not raw_extmark then return nil end
-  local start_row0, start_col0, details = unpack(raw_extmark)
+  local raw = vim.api.nvim_buf_get_extmark_by_id(bufnr, ns, id, { details = true })
+  if not raw then return nil end
+
+  local start_row0, start_col0, details = unpack(raw)
   return Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, assert(details))
 end
 
 --- @private
---- @param bufnr integer
---- @param ns integer
---- @param start morph.Pos00
---- @param stop morph.Pos00
+--- Construct an Extmark from raw API data, normalizing bounds that extend past buffer end.
+function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
+  local start = Pos00.new(start_row0, start_col0)
+  local stop = Pos00.new(start_row0, start_col0)
+
+  if details and details.end_row ~= nil and details.end_col ~= nil then
+    stop = Pos00.new(details.end_row --[[@as integer]], details.end_col --[[@as integer]])
+  end
+
+  local extmark = setmetatable(
+    { id = id, start = start, stop = stop, raw = details, ns = ns, bufnr = bufnr },
+    Extmark
+  )
+
+  -- Clamp extmark bounds to actual buffer size (extmarks can overshoot after deletions)
+  local last_line_idx = math.max(0, vim.api.nvim_buf_line_count(bufnr) - 1)
+  if extmark.stop[1] > last_line_idx then
+    local last_line = vim.api.nvim_buf_get_lines(bufnr, last_line_idx, last_line_idx + 1, true)[1]
+      or ''
+    extmark.stop = Pos00.new(last_line_idx, #last_line)
+  end
+
+  return extmark
+end
+
+--- @private
+--- Find all extmarks that overlap with the given region.
 --- @return morph.Extmark[]
-function Extmark._get_near_overshoot(bufnr, ns, start, stop)
+function Extmark._get_in_range(bufnr, ns, start, stop)
+  local raw_extmarks = vim.api.nvim_buf_get_extmarks(
+    bufnr,
+    ns,
+    { start[1], start[2] },
+    { stop[1], stop[2] },
+    { details = true, overlap = true }
+  )
+
   return vim
-    .iter(
-      vim.api.nvim_buf_get_extmarks(
-        bufnr,
-        ns,
-        { start[1], start[2] },
-        { stop[1], stop[2] },
-        { details = true, overlap = true }
-      )
-    )
+    .iter(raw_extmarks)
     :map(function(ext)
-      --- @type integer, integer, integer, any|nil
       local id, line0, col0, details = unpack(ext)
       return Extmark._from_raw(bufnr, ns, id, line0, col0, assert(details))
     end)
@@ -244,42 +508,49 @@ function Extmark._get_near_overshoot(bufnr, ns, start, stop)
 end
 
 --- @private
+--- Extract the text content covered by this extmark.
 function Extmark:_text()
-  local start = self.start
-  local stop = self.stop
+  local start, stop = self.start, self.stop
   if start == stop then return '' end
 
-  local insert_blank = false
-  if stop[2] == 0 then
-    -- set stop to end of previous line (stop[1] - 1)
-    if stop[1] > 0 then
-      insert_blank = true
-      local prev_line = vim.api.nvim_buf_get_lines(self.bufnr, stop[1] - 1, stop[1], true)[1] or ''
-      stop = Pos00.new(stop[1] - 1, #prev_line)
-    end
+  -- Handle edge case: if stop is at column 0, we need to include the newline
+  -- from the previous line, which getregion doesn't handle well
+  local needs_trailing_newline = false
+  if stop[2] == 0 and stop[1] > 0 then
+    needs_trailing_newline = true
+    local prev_line = vim.api.nvim_buf_get_lines(self.bufnr, stop[1] - 1, stop[1], true)[1] or ''
+    stop = Pos00.new(stop[1] - 1, #prev_line)
   end
 
+  -- Convert to 1-based positions for getregion (Neovim's API inconsistency strikes again)
   local pos1 = { self.bufnr, start[1] + 1, start[2] + 1 }
   local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2] }
+
   local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
   if not ok then
     vim.api.nvim_echo({
       { '(morph.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
-      {
-        '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }),
-      },
+      { '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }) },
     }, true, {})
     error(lines)
   end
 
-  if insert_blank then
-    table.insert(lines --[[@as (string[])]], '')
+  if needs_trailing_newline then
+    table.insert(lines --[[@as string[] ]], '')
   end
-  return vim.iter(lines):join '\n'
+  return table.concat(lines --[[@as string[] ]], '\n')
 end
 
 --------------------------------------------------------------------------------
--- class Ctx
+-- Ctx: Component Context (Props, State, Lifecycle)
+--
+-- Every component receives a Ctx that provides:
+--   - props: immutable data passed from parent
+--   - state: mutable data owned by this component
+--   - phase: 'mount' | 'update' | 'unmount' lifecycle stage
+--   - update(newState): trigger a re-render with new state
+--   - refresh(): re-render with current state
+--   - do_after_render(fn): schedule work after the render completes
 --------------------------------------------------------------------------------
 
 --- @generic TProps
@@ -313,29 +584,44 @@ function Ctx.new(bufnr, document, props, state, children)
   }, Ctx)
 end
 
+--- Update state and trigger a re-render.
+--- During 'mount' phase, this only updates state (no re-render, to avoid infinite loops).
+--- If we're in a textlock (e.g., during an on_bytes callback), the re-render is scheduled.
 --- @param new_state TState
 function Ctx:update(new_state)
-  local noop = function() end
-
   self.state = new_state
-  if self.phase ~= 'mount' then
-    if (self.document and self.document.textlock) or H.is_textlock() then
-      vim.schedule(function() (self.on_change or noop)() end)
-    else
-      (self.on_change or noop)()
-    end
+
+  -- Don't trigger re-render during mount (component is still being set up)
+  if self.phase == 'mount' then return end
+  if not self.on_change then return end
+
+  -- Textlock means we can't modify the buffer right now - schedule for later
+  local is_textlocked = (self.document and self.document.textlock) or is_textlock()
+  if is_textlocked then
+    vim.schedule(self.on_change)
+  else
+    self.on_change()
   end
 end
 
-function Ctx:refresh() return self:update(self.state) end
+--- Re-render with current state (convenience wrapper around update).
+function Ctx:refresh() self:update(self.state) end
 
+--- Schedule a callback to run after the current render completes.
+--- Useful for focus management, scrolling, etc.
 --- @param fn function
 function Ctx:do_after_render(fn)
   if self._register_after_render_callback then self._register_after_render_callback(fn) end
 end
 
 --------------------------------------------------------------------------------
--- class Morph
+-- Morph: The Main Renderer Class
+--
+-- A Morph instance is bound to a single buffer. It provides:
+--   - render(tree): render static markup to the buffer
+--   - mount(tree): render a component tree with lifecycle management
+--   - get_elements_at(pos): find elements at a cursor position
+--   - get_element_by_id(id): find an element by its id attribute
 --------------------------------------------------------------------------------
 
 --- @alias morph.MorphTextState {
@@ -351,7 +637,7 @@ end
 --- @field private changedtick integer
 --- @field private changing boolean
 --- @field private textlock boolean
---- @field private orig_kmaps table<table<string, any>?>
+--- @field private original_keymaps table<string, table<string, any>>
 --- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field private component_tree { old: morph.Tree  }
 --- @field private cleanup_hooks function[]
@@ -360,165 +646,152 @@ local Morph = {}
 Morph.__index = Morph
 
 --------------------------------------------------------------------------------
--- class Morph: Static functions
+-- Static Utilities
+--
+-- These functions work on trees without needing a Morph instance.
+-- Useful for testing or converting markup to strings.
 --------------------------------------------------------------------------------
 
--- TODO: public API Pos00
---- @param opts {
----   tree: morph.Tree,
----   on_tag?: fun(tag: morph.Tag, start0: morph.Pos00, stop0: morph.Pos00): any
---- }
+--- Convert a tree to an array of lines, optionally calling on_tag for each tag.
+--- This is the core "rendering" logic that flattens the tree into text.
+--- @param opts { tree: morph.Tree, on_tag?: fun(tag: morph.Tag, start0: morph.Pos00, stop0: morph.Pos00): any }
+--- @return string[]
 function Morph.markup_to_lines(opts)
-  -- As we visit tags (specifically) we want to keep track of the text of that tag
-  -- and put it on the tag object, so that the text is cached.
-  --- @type { text: string[] }[]
-  local text_accumulators = {}
+  local lines = {} --- @type string[]
+  local curr_line1, curr_col1 = 1, 1 -- 1-based position tracking
 
-  --- @type string[]
-  local lines = {}
+  -- Stack of text accumulators - each tag tracks its own text content
+  -- so we can cache it for on_change handlers later
+  local text_accumulators = {} --- @type { text: string[] }[]
 
-  local curr_line1 = 1
-  local curr_col1 = 1 -- exclusive: sits one position **beyond** the last inserted text
-
-  --- @param s string
-  local function put(s)
+  local function emit_text(s)
     lines[curr_line1] = (lines[curr_line1] or '') .. s
     curr_col1 = #lines[curr_line1] + 1
-    for i = 1, #text_accumulators do
-      local acc = text_accumulators[i]
+    -- Append to all active accumulators (for nested tags)
+    for _, acc in ipairs(text_accumulators) do
       table.insert(acc.text, s)
     end
   end
-  local function put_line()
+
+  local function emit_newline()
     table.insert(lines, '')
     curr_line1 = curr_line1 + 1
     curr_col1 = 1
-    for i = 1, #text_accumulators do
-      local acc = text_accumulators[i]
+    for _, acc in ipairs(text_accumulators) do
       table.insert(acc.text, '\n')
     end
   end
 
-  --- @param node morph.Tree
   local function visit(node)
-    H.tree_match(node, {
-      string = function(s_node)
-        local node_lines = vim.split(s_node, '\n')
-        for line_num, s in ipairs(node_lines) do
-          if line_num > 1 then put_line() end
-          put(s)
-        end
-      end,
-      array = function(ts)
-        for _, child in ipairs(ts) do
-          visit(child)
-        end
-      end,
-      tag = function(t)
-        table.insert(text_accumulators, { text = {} })
+    local node_type = tree_type(node)
 
-        local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
-        visit(t.children)
-        local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+    if node_type == 'string' then
+      -- Split on newlines and emit each part
+      local parts = vim.split(node --[[@as string]], '\n')
+      for i, part in ipairs(parts) do
+        if i > 1 then emit_newline() end
+        emit_text(part)
+      end
+    elseif node_type == 'number' then
+      -- Convert number to string and emit
+      emit_text(tostring(node --[[@as number]]))
+    elseif node_type == 'array' then
+      for _, child in
+        ipairs(node --[[@as morph.Node[] ]])
+      do
+        visit(child)
+      end
+    elseif node_type == 'tag' then
+      local tag = node --[[@as morph.Tag]]
+      table.insert(text_accumulators, { text = {} })
 
-        t.curr_text = table.concat(text_accumulators[#text_accumulators].text)
-        table.remove(text_accumulators, #text_accumulators)
+      local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+      visit(tag.children)
+      local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
 
-        if opts.on_tag then opts.on_tag(t, start0, stop0) end
-      end,
-      component = function(Component, t)
-        local ctx = Ctx.new(nil, nil, t.attributes, nil, t.children)
+      -- Cache the rendered text on the tag
+      local acc = table.remove(text_accumulators)
+      tag.curr_text = table.concat(acc.text)
 
-        local start = Pos00.new(curr_line1 - 1, curr_col1 - 1)
-        visit(Component(ctx))
-        local stop = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+      if opts.on_tag then opts.on_tag(tag, start0, stop0) end
+    elseif node_type == 'component' then
+      local tag = node --[[@as morph.Tag]]
+      local Component = tag.name --[[@as morph.Component]]
+      local ctx = Ctx.new(nil, nil, tag.attributes, nil, tag.children)
 
-        ctx.phase = 'unmount'
-        Component(ctx)
+      local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
+      visit(Component(ctx))
+      local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
 
-        if opts.on_tag then opts.on_tag(t, start, stop) end
-      end,
-    })
+      -- Immediately unmount (this is stateless rendering)
+      ctx.phase = 'unmount'
+      Component(ctx)
+
+      if opts.on_tag then opts.on_tag(tag, start0, stop0) end
+    end
+    -- nil/boolean nodes produce no output
   end
-  visit(opts.tree)
 
+  visit(opts.tree)
   return lines
 end
 
+--- Convert a tree to a single string (convenience wrapper).
 --- @param opts { tree: morph.Tree }
+--- @return string
 function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(opts), '\n') end
 
+--- Apply minimal edits to transform buffer content from old_lines to new_lines.
+--- Uses Levenshtein distance to find the shortest edit sequence.
 --- @param bufnr integer
---- @param old_lines string[] | nil
+--- @param old_lines string[]?
 --- @param new_lines string[]
 function Morph.patch_lines(bufnr, old_lines, new_lines)
-  --
-  -- Helpers:
-  --
+  old_lines = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-  --- @param start integer
-  --- @param end_ integer
-  --- @param strict_indexing boolean
-  --- @param replacement string[]
-  local function _set_lines(start, end_, strict_indexing, replacement)
-    vim.api.nvim_buf_set_lines(bufnr, start, end_, strict_indexing, replacement)
-  end
+  local line_changes = levenshtein { from = old_lines, to = new_lines }
 
-  --- @param start_row integer
-  --- @param start_col integer
-  --- @param end_row integer
-  --- @param end_col integer
-  --- @param replacement string[]
-  local function _set_text(start_row, start_col, end_row, end_col, replacement)
-    vim.api.nvim_buf_set_text(bufnr, start_row, start_col, end_row, end_col, replacement)
-  end
+  for _, change in ipairs(line_changes) do
+    local line0 = change.index - 1
 
-  -- Morph the text to the desired state:
-  local line_changes = (
-    H.levenshtein {
-      from = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-      to = new_lines,
-    }
-  ) --[[@as (morph.LevenshteinChange<string>[])]]
+    if change.kind == 'add' then
+      vim.api.nvim_buf_set_lines(bufnr, line0, line0, true, { change.item })
+    elseif change.kind == 'delete' then
+      vim.api.nvim_buf_set_lines(bufnr, line0, line0 + 1, true, {})
+    elseif change.kind == 'change' then
+      -- For changed lines, do character-level diffing for minimal edits
+      local char_changes = levenshtein {
+        --- @diagnostic disable-next-line: param-type-mismatch
+        from = vim.split(change.from, ''),
+        --- @diagnostic disable-next-line: param-type-mismatch
+        to = vim.split(change.to, ''),
+      }
 
-  for _, line_change in ipairs(line_changes) do
-    local line_num0 = line_change.index - 1
-
-    if line_change.kind == 'add' then
-      _set_lines(line_num0, line_num0, true, { line_change.item })
-    elseif line_change.kind == 'change' then
-      -- Compute inter-line diff, and apply:
-      local col_changes = (
-        H.levenshtein {
-          from = vim.split(line_change.from, ''),
-          to = vim.split(line_change.to, ''),
-        }
-      ) --[[@as (morph.LevenshteinChange<string>[])]]
-
-      for _, col_change in ipairs(col_changes) do
-        local col_num0 = col_change.index - 1
-        if col_change.kind == 'add' then
-          _set_text(line_num0, col_num0, line_num0, col_num0, { col_change.item })
-        elseif col_change.kind == 'change' then
-          _set_text(line_num0, col_num0, line_num0, col_num0 + 1, { col_change.to })
-        elseif col_change.kind == 'delete' then
-          _set_text(line_num0, col_num0, line_num0, col_num0 + 1, {})
-        else
-          -- No change
+      for _, char_change in ipairs(char_changes) do
+        local col0 = char_change.index - 1
+        if char_change.kind == 'add' then
+          vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0, { char_change.item })
+        elseif char_change.kind == 'delete' then
+          vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0 + 1, {})
+        elseif char_change.kind == 'change' then
+          vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0 + 1, { char_change.to })
         end
       end
-    elseif line_change.kind == 'delete' then
-      _set_lines(line_num0, line_num0 + 1, true, {})
-    else
-      -- No change
     end
   end
 end
 
---- @param bufnr integer|nil
-function Morph.new(bufnr)
-  if bufnr == nil or bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end
+--------------------------------------------------------------------------------
+-- Constructor
+--------------------------------------------------------------------------------
 
+--- Create a new Morph instance bound to a buffer.
+--- @param bufnr integer? Buffer number (nil or 0 means current buffer)
+--- @return morph.Morph
+function Morph.new(bufnr)
+  bufnr = (bufnr == nil or bufnr == 0) and vim.api.nvim_get_current_buf() or bufnr
+
+  -- Each buffer gets its own namespace for extmarks
   if vim.b[bufnr]._renderer_ns == nil then
     vim.b[bufnr]._renderer_ns = vim.api.nvim_create_namespace('morph:' .. tostring(bufnr))
   end
@@ -529,7 +802,7 @@ function Morph.new(bufnr)
     changedtick = 0,
     changing = false,
     textlock = false,
-    orig_kmaps = {},
+    original_keymaps = {},
     text_content = {
       old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
       curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
@@ -538,17 +811,26 @@ function Morph.new(bufnr)
     cleanup_hooks = {},
   }, Morph)
 
-  self.buf_watcher = H.buf_attach_after_autocmd(
-    bufnr,
-    function(...) self:_on_bytes_after_autocmd(...) end
-  )
+  -- Snapshot all buffer-local keymaps so we can restore them before each render
+  for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
+    self.original_keymaps[mode] = {}
+    --- @diagnostic disable-next-line: param-type-mismatch
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, mode)) do
+      self.original_keymaps[mode][map.lhs] = map
+    end
+  end
+
+  -- Watch for text changes so we can fire on_change handlers
+  --- @diagnostic disable-next-line: param-type-mismatch
+  self.buf_watcher = create_buf_watcher(bufnr, function(...) self:_on_bytes_after_autocmd(...) end)
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
 
+  -- Clean up when buffer is deleted
   local cleanup_autocmd = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
     callback = function()
-      for _, cleanup_hook in ipairs(self.cleanup_hooks) do
-        cleanup_hook()
+      for _, cleanup in ipairs(self.cleanup_hooks) do
+        cleanup()
       end
     end,
   })
@@ -558,12 +840,14 @@ function Morph.new(bufnr)
 end
 
 --------------------------------------------------------------------------------
--- class Morph: Instance methods
+-- Instance Methods
 --------------------------------------------------------------------------------
 
---- Render static markup
+--- Render static markup to the buffer.
+--- This is a "one-shot" render - no lifecycle, no state, just text + extmarks.
 --- @param tree morph.Tree
 function Morph:render(tree)
+  -- Detect if buffer changed externally since our last render
   local changedtick = vim.b[self.bufnr].changedtick
   if changedtick ~= self.changedtick then
     self.text_content.curr = {
@@ -571,294 +855,294 @@ function Morph:render(tree)
       lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false),
       tags_to_extmark_ids = {},
       extmark_ids_to_tag = {},
-    } --[[@as morph.MorphTextState]]
+    }
     self.changedtick = changedtick
   end
 
-  -- Extmarks have to correlate to actual text, so we have to accumulate which
-  -- ones we want to set, morph the buffer, then set the extmarks:
-  --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
-  local extmarks_to_set = {}
+  -- We need to collect extmarks during tree traversal, but can't create them
+  -- until after the buffer text is updated (extmarks need valid positions)
+  local pending_extmarks = {} --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
 
-  -- Unmap all existing mappings so that new mappings are fresh:
-  for mode, maps in pairs(self.orig_kmaps) do
-    for lhs, _ in pairs(maps) do
-      self:_kunmap(mode, lhs, { buffer = self.bufnr })
+  -- Clear all buffer-local keymaps, then restore originals
+  for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(self.bufnr, mode)) do
+      --- @diagnostic disable-next-line: param-type-mismatch
+      pcall(vim.keymap.del, mode, map.lhs, { buffer = self.bufnr })
+    end
+    for _, map in pairs(self.original_keymaps[mode] or {}) do
+      vim.fn.mapset(map)
     end
   end
 
-  --- @type string[]
+  -- Traverse the tree, collecting text lines and extmark info
   local lines = Morph.markup_to_lines {
     tree = tree,
-
     on_tag = function(tag, start, stop)
-      if tag.name == 'text' then
-        local hl = tag.attributes.hl
-        if type(hl) == 'string' then
-          tag.attributes.extmark = tag.attributes.extmark or {}
-          tag.attributes.extmark.hl_group = tag.attributes.extmark.hl_group or hl
-        end
+      if tag.name ~= 'text' then return end
 
-        table.insert(extmarks_to_set, {
-          tag = tag,
-          start = start,
-          stop = stop,
-          opts = tag.attributes.extmark or {},
-        })
+      -- Convert hl attribute to extmark highlight
+      if type(tag.attributes.hl) == 'string' then
+        tag.attributes.extmark = tag.attributes.extmark or {}
+        tag.attributes.extmark.hl_group = tag.attributes.extmark.hl_group or tag.attributes.hl
+      end
 
-        -- Set any necessary key-maps:
-        for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
-          for lhs, _ in pairs(tag.attributes[mode .. 'map'] or {}) do
-            -- Force creating an extmark if there are key handlers. To accurately
-            -- sense the bounds of the text, we need an extmark:
-            self:_kmap(mode, lhs, function()
-              local result = self:_expr_map_callback(mode, lhs)
-              -- If the handler indicates that it wants to swallow the event,
-              -- we have to convert that intention into something compatible
-              -- with expr-mappings, which don't support '<Nop>' (they try to
-              -- execute the literal characters). We'll use the 'g@' operator
-              -- to do that, forwarding the event to an operatorfunc that does
-              -- nothing:
-              if result == '' then
-                if mode == 'i' then
-                  return ''
-                else
-                  vim.go.operatorfunc = 'v:lua.MorphOpFuncNoop'
-                  return 'g@ '
-                end
-              end
-              return result
-            end, { buffer = self.bufnr, expr = true, replace_keycodes = true })
-          end
+      table.insert(pending_extmarks, {
+        tag = tag,
+        start = start,
+        stop = stop,
+        opts = tag.attributes.extmark or {},
+      })
+
+      -- Register keymaps for any mode handlers (nmap, imap, vmap, xmap, omap)
+      for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
+        local handlers = tag.attributes[mode .. 'map']
+        for lhs, _ in pairs(handlers or {}) do
+          vim.keymap.set(mode, lhs, function()
+            local result = self:_dispatch_keypress(mode, lhs)
+
+            -- Empty string means "swallow this keypress". In insert mode that's
+            -- easy, but in normal mode we need a trick: use g@ with a no-op
+            -- operator function.
+            if result == '' and mode ~= 'i' then
+              vim.go.operatorfunc = 'v:lua.MorphOpFuncNoop'
+              return 'g@ '
+            end
+            return result
+          end, { buffer = self.bufnr, expr = true, replace_keycodes = true })
         end
       end
     end,
   }
 
+  -- Update buffer text with minimal edits
+  --- @diagnostic disable-next-line: assign-type-mismatch
   self.text_content.old = self.text_content.curr
-  self.text_content.curr = {
-    lines = lines,
-    extmarks = {},
-    tags_to_extmark_ids = {},
-    extmark_ids_to_tag = {},
-  }
+  self.text_content.curr =
+    { lines = lines, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
 
-  -- Step 1: morph the buffer content:
   self.changing = true
-  Morph.patch_lines(self.bufnr, self.text_content.old.lines, self.text_content.curr.lines)
+  Morph.patch_lines(self.bufnr, self.text_content.old.lines, lines)
   self.changing = false
   self.changedtick = vim.b[self.bufnr].changedtick
 
-  -- Step 1: apply the new extmarks:
+  -- Now that text is in place, create the extmarks
   vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
-  local bookkeeping = self.text_content.curr
-  for _, extmark_to_set in ipairs(extmarks_to_set) do
-    local tag = extmark_to_set.tag
-    local extmark = Extmark.new(
-      self.bufnr,
-      self.ns,
-      extmark_to_set.start,
-      extmark_to_set.stop,
-      extmark_to_set.opts
-    )
-    bookkeeping.extmark_ids_to_tag[extmark.id] = tag
-    bookkeeping.tags_to_extmark_ids[tag] = extmark.id
-    table.insert(bookkeeping.extmarks, extmark)
+  for _, pending in ipairs(pending_extmarks) do
+    local extmark = Extmark.new(self.bufnr, self.ns, pending.start, pending.stop, pending.opts)
+    self.text_content.curr.extmark_ids_to_tag[extmark.id] = pending.tag
+    self.text_content.curr.tags_to_extmark_ids[pending.tag] = extmark.id
+    table.insert(self.text_content.curr.extmarks, extmark)
   end
 end
 
---- Render a component tree
+--- Mount a component tree with full lifecycle management.
+--- Components can have state, respond to updates, and run cleanup on unmount.
 --- @param tree morph.Tree
 function Morph:mount(tree)
-  local H2 = {}
+  -- Callbacks scheduled via ctx:do_after_render() - run after each render
+  local after_render_callbacks = {} --- @type function[]
 
-  --- @type function[]
-  local render_effects = {}
-  --- @param cb function
-  local function register_after_render_callback(cb) table.insert(render_effects, cb) end
+  local function schedule_after_render(cb) table.insert(after_render_callbacks, cb) end
 
-  --- @param tree morph.Tree
-  function H2.unmount(tree)
-    --- @param tree morph.Tree
-    local function visit(tree)
-      H.tree_match(tree, {
-        array = function(tags) H2.visit_array(tags, {}) end,
-        tag = function(tag) H2.visit_array(tag.children, {}) end,
-        component = function(Component, tag)
-          --- @type morph.Ctx
-          local ctx = assert(tag.ctx, 'could not find context for node')
+  -- Forward declarations for mutual recursion
+  --- @diagnostic disable: unused
+  local reconcile_tree, reconcile_array, reconcile_component, unmount_tree, rerender
+  --- @diagnostic enable: unused
 
-          -- depth-first:
-          H2.visit_array(ctx.prev_rendered_children, {})
+  --- Unmount a tree, calling unmount lifecycle on all components (depth-first).
+  --- @param old_tree morph.Tree
+  unmount_tree = function(old_tree)
+    local node_type = tree_type(old_tree)
 
-          -- now unmount current:
-          ctx.phase = 'unmount'
-          Component(ctx)
-          ctx.on_change = nil
-          ctx._register_after_render_callback = nil
-        end,
+    if node_type == 'array' then
+      --- @diagnostic disable-next-line: need-check-nil
+      reconcile_array(old_tree --[[@as morph.Node[] ]], {})
+    elseif node_type == 'tag' then
+      -- Tag children can be any tree type, so recurse with reconcile_tree
+      --- @diagnostic disable-next-line: need-check-nil
+      reconcile_tree((old_tree --[[@as morph.Tag]]).children, nil)
+    elseif node_type == 'component' then
+      local tag = old_tree --[[@as morph.Tag]]
+      local Component = tag.name --[[@as morph.Component]]
+      local ctx = assert(tag.ctx, 'component missing context during unmount')
 
-        default = function(tree) H2.visit_tree(tree, nil) end,
-      })
+      -- Unmount children first (depth-first) - use reconcile_tree since
+      -- prev_rendered_children can be any tree type, not just an array
+      --- @diagnostic disable-next-line: need-check-nil
+      reconcile_tree(ctx.prev_rendered_children, nil)
+
+      -- Then unmount this component
+      ctx.phase = 'unmount'
+      Component(ctx)
+      ctx.on_change = nil
+      ctx._register_after_render_callback = nil
     end
-
-    visit(tree)
+    --- @diagnostic enable: need-check-nil
   end
 
+  --- Reconcile old and new trees, handling mount/update/unmount.
+  --- Returns the rendered (simplified) tree.
   --- @param old_tree morph.Tree
   --- @param new_tree morph.Tree
   --- @return morph.Tree
-  function H2.visit_tree(old_tree, new_tree)
-    local old_tree_kind = H.tree_kind(old_tree)
-    local new_tree_kind = H.tree_kind(new_tree)
+  reconcile_tree = function(old_tree, new_tree)
+    local old_type = tree_type(old_tree)
+    local new_type = tree_type(new_tree)
 
-    local new_tree_rendered = H.tree_match(new_tree, {
-      string = function(s) return s end,
-      boolean = function(b) return b end,
-      nil_ = function() return nil end,
+    -- If type changed, unmount old tree first
+    if old_type ~= new_type then unmount_tree(old_tree) end
 
-      array = function(new_arr)
-        return H2.visit_array(old_tree --[[@as any]], new_arr)
-      end,
-      tag = function(new_tag)
-        local old_children = old_tree_kind == new_tree_kind and old_tree.children or nil
-        return H.h(
-          new_tag.name,
-          new_tag.attributes,
-          H2.visit_tree(old_children --[[@as any]], new_tag.children --[[@as any]])
-        )
-      end,
+    -- Handle each node type
+    local rendered
 
-      component = function(NewC, new_tag)
-        --- @type { tag: morph.Tag, ctx?: morph.Ctx } | nil
-        local old_component_info =
-          H.tree_match(old_tree, { component = function(_, t) return { tag = t, ctx = t.ctx } end })
-        local ctx = old_component_info and old_component_info.ctx or nil
+    if new_type == 'nil' or new_type == 'boolean' then
+      rendered = new_tree
+    elseif new_type == 'string' or new_type == 'number' then
+      rendered = new_tree
+    elseif new_type == 'array' then
+      local old_array = (old_type == 'array') and old_tree --[[@as morph.Node[]?]]
+        or nil
+      --- @diagnostic disable-next-line: need-check-nil
+      rendered = reconcile_array(old_array, new_tree --[[@as morph.Node[] ]])
+    elseif new_type == 'tag' then
+      local new_tag = new_tree --[[@as morph.Tag]]
+      local old_children = (old_type == new_type) and (old_tree --[[@as morph.Tag]]).children
+        or nil
+      --- @diagnostic disable-next-line: need-check-nil
+      rendered = h(new_tag.name, new_tag.attributes, reconcile_tree(old_children, new_tag.children))
+    elseif new_type == 'component' then
+      --- @diagnostic disable-next-line: need-check-nil
+      rendered = reconcile_component(old_tree, new_tree --[[@as morph.Tag]])
+    end
 
-        if not ctx then
-          --- @type morph.Ctx
-          ctx = Ctx.new(self.bufnr, self, new_tag.attributes, nil, new_tag.children)
-        else
-          ctx.phase = 'update'
-        end
-        ctx.props = new_tag.attributes
-        ctx.children = new_tag.children
-        ctx.on_change = H2.rerender
-        ctx._register_after_render_callback = register_after_render_callback
-
-        new_tag.ctx = ctx
-        local NewC_rendered_children = NewC(ctx)
-        local result = H2.visit_tree(ctx.prev_rendered_children, NewC_rendered_children)
-        ctx.prev_rendered_children = NewC_rendered_children
-        -- As soon as we've mounted, move past the 'mount' state. This is
-        -- because Ctx will not fire `on_update` if it is still in the
-        -- 'mount' state (to avoid stack overflows).
-        ctx.phase = 'update'
-
-        return result
-      end,
-    })
-
-    if old_tree_kind ~= new_tree_kind then H2.unmount(old_tree) end
-
-    return new_tree_rendered
+    return rendered
   end
 
-  --- @param old_arr? morph.Node[]
-  --- @param new_arr? morph.Node[]
+  --- Reconcile arrays of nodes using Levenshtein to match up old/new nodes.
+  --- This is where the "diffing" magic happens for lists.
+  --- @param old_nodes morph.Node[]?
+  --- @param new_nodes morph.Node[]?
   --- @return morph.Node[]
-  function H2.visit_array(old_arr, new_arr)
-    -- We are going to hijack levenshtein in order to compute the
-    -- difference between elements/components. In this model, we need to
-    -- "update" all the nodes, so no nodes are equal. We will rely on
-    -- levenshtein to find the "shortest path" to conforming old => new via
-    -- the cost.of_change function. That will provide the meat of modeling
-    -- what effort it will take to morph one element into the new form.
-    -- What levenshtein gives us for free in this model is also informing
-    -- us what needs to be added (i.e., "mounted"), what needs to be
-    -- deleted ("unmounted") and what needs to be changed ("updated").
+  reconcile_array = function(old_nodes, new_nodes)
+    old_nodes = old_nodes or {}
+    new_nodes = new_nodes or {}
 
-    -- Pre-compute H.verbose_tree_kind for all the old/new nodes (performance
-    -- optimization):
-    local old_kinds = {}
-    local new_kinds = {}
-    local node_to_kind = {}
-    if old_arr then
-      for i = 1, #old_arr do
-        local node = old_arr[i]
-        if node ~= nil then
-          local kind = H.verbose_tree_kind(node, i)
-          old_kinds[i] = kind
-          node_to_kind[node] = kind
-        end
+    -- Pre-compute "identity keys" for each node so we can match them up
+    -- A key combines: type + component function (if any) + explicit key attribute
+    local old_keys, new_keys = {}, {}
+    local node_key_cache = {}
+
+    for i, node in ipairs(old_nodes) do
+      if node ~= nil then
+        local key = tree_identity_key(node, i)
+        old_keys[i] = key
+        node_key_cache[node] = key
       end
     end
-    if new_arr then
-      for i = 1, #new_arr do
-        local node = new_arr[i]
-        if node ~= nil then
-          local kind = H.verbose_tree_kind(node, i)
-          new_kinds[i] = kind
-          node_to_kind[node] = kind
-        end
+    for i, node in ipairs(new_nodes) do
+      if node ~= nil then
+        local key = tree_identity_key(node, i)
+        new_keys[i] = key
+        node_key_cache[node] = key
       end
     end
 
-    local changes = (
-      H.levenshtein {
-        --- @diagnostic disable-next-line: assign-type-mismatch
-        from = old_arr or {},
-        to = new_arr or {},
-        are_equal = function() return false end,
-        cost = {
-          of_change = function(_node1, _node2, node1_idx, node2_idx)
-            return old_kinds[node1_idx] == new_kinds[node2_idx] and 1 or 2
-          end,
-        },
-      }
-    ) --[[@as (morph.LevenshteinChange<morph.Node>[])]]
+    -- Use Levenshtein to find optimal mapping from old -> new nodes.
+    -- We say no nodes are "equal" (all need reconciliation), but nodes with
+    -- matching keys have lower change cost (prefer updating over mount/unmount).
+    local changes = levenshtein {
+      from = old_nodes,
+      to = new_nodes,
+      are_any_equal = false,
+      cost = {
+        of_change = function(_, _, old_idx, new_idx)
+          return old_keys[old_idx] == new_keys[new_idx] and 1 or 2
+        end,
+      },
+    }
 
-    --- @type morph.Node[]
-    local resulting_nodes = {}
+    local result = {} --- @type morph.Node[]
 
     for _, change in ipairs(changes) do
-      local resulting_node
+      local rendered_node
+
       if change.kind == 'add' then
-        -- add => mount
-        resulting_node = H2.visit_tree(nil, change.item)
+        -- New node: mount it
+        rendered_node = reconcile_tree(nil, change.item)
       elseif change.kind == 'delete' then
-        -- delete => unmount
-        H2.visit_tree(change.item, nil)
+        -- Removed node: unmount it
+        reconcile_tree(change.item, nil)
       elseif change.kind == 'change' then
-        -- change is either:
-        -- - unmount, then mount
-        -- - update
-        local from_kind = node_to_kind[change.from]
-        local to_kind = node_to_kind[change.to]
-        if from_kind == to_kind then
-          resulting_node = H2.visit_tree(change.from, change.to)
+        -- Changed node: update if same type, otherwise unmount + mount
+        local from_key = node_key_cache[change.from]
+        local to_key = node_key_cache[change.to]
+
+        if from_key == to_key then
+          rendered_node = reconcile_tree(change.from, change.to)
         else
-          -- from_kind ~= to_kind: unmount/mount
-          H2.visit_tree(change.from, nil)
-          resulting_node = H2.visit_tree(nil, change.to)
+          reconcile_tree(change.from, nil) -- unmount old
+          rendered_node = reconcile_tree(nil, change.to) -- mount new
         end
       end
 
-      if resulting_node then table.insert(resulting_nodes, 1, resulting_node) end
+      if rendered_node then table.insert(result, 1, rendered_node) end
     end
 
-    return resulting_nodes
+    return result
   end
 
-  function H2.rerender()
-    render_effects = {}
+  --- Reconcile a component node (mount, update, or reuse existing context).
+  --- @param old_tree morph.Node[]
+  --- @param new_tag morph.Tag
+  reconcile_component = function(old_tree, new_tag)
+    local Component = new_tag.name --[[@as morph.Component]]
 
-    local simplified_tree = H2.visit_tree(self.component_tree.old, tree)
+    -- Try to reuse existing context from old tree
+    local ctx
+    local old_type = tree_type(old_tree)
+    if old_type == 'component' then
+      local old_tag = old_tree --[[@as morph.Tag]]
+      ctx = old_tag.ctx
+    end
+
+    if ctx then
+      ctx.phase = 'update'
+    else
+      ctx = Ctx.new(self.bufnr, self, new_tag.attributes, nil, new_tag.children)
+    end
+
+    -- Update context with new props/children and wire up callbacks
+    ctx.props = new_tag.attributes
+    ctx.children = new_tag.children
+    ctx.on_change = rerender
+    ctx._register_after_render_callback = schedule_after_render
+
+    -- Render the component
+    new_tag.ctx = ctx
+    --- @diagnostic disable-next-line: param-type-mismatch
+    local rendered_children = Component(ctx)
+    local result = reconcile_tree(ctx.prev_rendered_children, rendered_children)
+    ctx.prev_rendered_children = rendered_children
+
+    -- As soon as we've mounted, move past the 'mount' state. This is
+    -- because Ctx will not fire `on_update` if it is still in the
+    -- 'mount' state (to avoid stack overflows).
+    ctx.phase = 'update'
+
+    return result
+  end
+
+  --- Perform a full re-render of the component tree.
+  rerender = function()
+    after_render_callbacks = {}
+
+    local simplified_tree = reconcile_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
     self:render(simplified_tree)
 
-    for _, eff in ipairs(render_effects) do
-      eff()
+    -- Run any scheduled after-render callbacks
+    for _, callback in ipairs(after_render_callbacks) do
+      callback()
     end
   end
 
@@ -869,173 +1153,138 @@ function Morph:mount(tree)
   unmount_autocmd_id = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
     callback = function()
-      -- Effectively unmount everything:
-      H2.visit_tree(self.component_tree.old, nil)
+      reconcile_tree(self.component_tree.old, nil)
+      --- @diagnostic disable-next-line: param-type-mismatch
       vim.api.nvim_del_autocmd(unmount_autocmd_id)
     end,
   })
 
-  -- Kick off initial render:
-  H2.rerender()
+  -- Kick off initial render
+  rerender()
 end
 
---- @param pos [integer, integer]|morph.Pos00
---- @param mode string?
+--- Find all elements that contain the given position, sorted innermost to outermost.
+--- @param pos [integer, integer]|morph.Pos00 0-based position
+--- @param mode string? Vim mode ('i', 'n', etc.) - affects cursor width semantics
 --- @return morph.Element[]
 function Morph:get_elements_at(pos, mode)
   pos = Pos00.new(pos[1], pos[2])
-  if not mode then mode = vim.api.nvim_get_mode().mode end
-  mode = mode:sub(1, 1) -- we don't care about sub-modes
+  mode = (mode or vim.api.nvim_get_mode().mode):sub(1, 1)
 
-  --- @type morph.Element[]
-  local intersecting_elements = vim
-    --
-    -- The cursor (block) occupies **two** extmark spaces: one for it's left
-    -- edge, and one for it's right. We need to do our own intersection test,
-    -- because the Neovim API is over-inclusive in what it returns:
-    .iter(Extmark._get_near_overshoot(self.bufnr, self.ns, pos, pos))
-    --
-    -- First, convert the list of extmarks to Elements:
-    :map(
-      --- @param ext morph.Extmark
-      function(extmark)
-        local tag = assert(self.text_content.curr.extmark_ids_to_tag[extmark.id])
-        return vim.tbl_extend('force', {}, tag, { extmark = extmark })
-      end
-    )
-    --
-    -- Now do our own custom intersection test:
-    :filter(
-      --- @param elem morph.Element
-      function(elem)
-        local ext = elem.extmark
-        if ext.stop[1] ~= nil and ext.stop[2] ~= nil then
-          -- If we've "ciw" and "collapsed" an extmark onto the cursor,
-          -- the cursor pos will equal the extmark's start AND end. In this
-          -- case, we want to include the extmark.
-          if pos == ext.start and pos == ext.stop then return true end
+  -- Get candidate extmarks and convert to elements
+  local candidates = Extmark._get_in_range(self.bufnr, self.ns, pos, pos)
 
-          return
-            -- START: line check
-            pos[1] >= ext.start[1]
-              -- START: column check
-              and (pos[1] ~= ext.start[1] or pos[2] >= ext.start[2])
-              -- STOP: line check
-              and pos[1] <= ext.stop[1]
-              -- STOP: column check
-              and (
-                pos[1] ~= ext.stop[1]
-                or (
-                  mode == 'i'
-                    -- In insert mode, the cursor is "thin", so <= to compensate:
-                    and pos[2] <= ext.stop[2]
-                  -- In normal mode, the cursor is "wide", so < to compensate:
-                  or pos[2] < ext.stop[2]
-                )
-              )
-        else
-          return true
-        end
-      end
-    )
-    :totable()
+  local elements = {} --- @type morph.Element[]
+  for _, extmark in ipairs(candidates) do
+    local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
+    if tag and self:_position_intersects_extmark(pos, extmark, mode) then
+      table.insert(elements, vim.tbl_extend('force', {}, tag, { extmark = extmark }))
+    end
+  end
 
-  -- Sort the tags into smallest (inner) to largest (outer):
-  table.sort(intersecting_elements, function(e1, e2)
-    local x1, x2 = e1.extmark, e2.extmark
-    if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
-    return x1.start >= x2.start and x1.stop <= x2.stop
+  -- Sort innermost (smallest) to outermost (largest)
+  table.sort(elements, function(a, b)
+    local ea, eb = a.extmark, b.extmark
+    if ea.start == eb.start and ea.stop == eb.stop then return ea.id < eb.id end
+    return ea.start >= eb.start and ea.stop <= eb.stop
   end)
 
-  return intersecting_elements
+  return elements
 end
 
+--- @private
+--- Check if a position truly intersects an extmark (Neovim's API is over-inclusive).
+--- @diagnostic disable-next-line: unused
+function Morph:_position_intersects_extmark(pos, extmark, mode)
+  local start, stop = extmark.start, extmark.stop
+
+  -- Zero-width extmarks at cursor position are considered intersecting
+  if pos == start and pos == stop then return true end
+
+  -- Check row bounds
+  if pos[1] < start[1] or pos[1] > stop[1] then return false end
+
+  -- Check column bounds on start row
+  if pos[1] == start[1] and pos[2] < start[2] then return false end
+
+  -- Check column bounds on stop row
+  if pos[1] == stop[1] then
+    -- In insert mode the cursor is "thin" (between characters), so we include
+    -- the position if it's <= stop (cursor can sit "on" the boundary)
+    -- In normal mode the cursor is "wide" (occupies a character), so we only
+    -- include if strictly < stop
+    if mode == 'i' then
+      if pos[2] > stop[2] then return false end
+    else
+      if pos[2] >= stop[2] then return false end
+    end
+  end
+
+  return true
+end
+
+--- Find an element by its id attribute.
 --- @param id string
 --- @return morph.Element?
 function Morph:get_element_by_id(id)
-  for tag, _ in pairs(self.text_content.curr.tags_to_extmark_ids) do
-    local extmark_id = assert(self.text_content.curr.tags_to_extmark_ids[tag])
-    local extmark = assert(Extmark.by_id(self.bufnr, self.ns, extmark_id))
+  for tag, extmark_id in pairs(self.text_content.curr.tags_to_extmark_ids) do
     if tag.attributes.id == id then
+      local extmark = assert(Extmark.by_id(self.bufnr, self.ns, extmark_id))
       return vim.tbl_extend('force', {}, tag, { extmark = extmark }) --[[@as morph.Element]]
     end
   end
 end
 
---- @private
---- @param mode string
---- @param lhs string
---- @param rhs string|function
---- @param opts vim.keymap.set.Opts
-function Morph:_kmap(mode, lhs, rhs, opts)
-  local orig = vim.fn.maparg(lhs, mode, false, true)
-  if vim.tbl_isempty(orig) then orig = nil end
-  self.orig_kmaps[mode] = self.orig_kmaps[mode] or {}
-  self.orig_kmaps[mode][lhs] = orig
-  vim.keymap.set(mode, lhs, rhs, opts)
-end
+--------------------------------------------------------------------------------
+-- Keymap Management
+--
+-- We intercept keypresses to dispatch them to element handlers.
+-- Original keymaps are snapshotted in Morph.new() and restored before each render.
+--------------------------------------------------------------------------------
 
 --- @private
---- @param mode string
---- @param lhs string
---- @param opts vim.keymap.del.Opts
-function Morph:_kunmap(mode, lhs, opts)
-  self.orig_kmaps[mode] = self.orig_kmaps[mode] or {}
-  local orig = self.orig_kmaps[mode][lhs]
-  if not orig then return end
-  self.orig_kmaps[mode][lhs] = nil
+--- Handle a keypress by dispatching to element handlers (innermost first).
+--- Returns the key to execute, or '' to swallow the keypress.
+function Morph:_dispatch_keypress(mode, lhs)
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  --- @diagnostic disable-next-line: need-check-nil, assign-type-mismatch
+  local pos0 = { cursor[1] - 1, cursor[2] } --- @type [integer, integer]
 
-  vim.keymap.del(mode, lhs, opts)
-  vim.api.nvim_buf_call(self.bufnr, function()
-    -- mapset has to manually be called in the context of the correct
-    -- buffer:
-    vim.fn.mapset(mode, false, orig)
-  end)
-end
-
---- @private
---- @param mode string
---- @param lhs string
-function Morph:_expr_map_callback(mode, lhs)
-  -- find the tag with the smallest intersection that contains the cursor:
-  local pos0 = vim.api.nvim_win_get_cursor(0)
-  pos0[1] = (
-    pos0[1]--[[@cast -?]]
-    - 1
-  ) -- make it actually 0-based
   local elements = self:get_elements_at(pos0)
-
   if #elements == 0 then return lhs end
 
-  -- Find the first tag that is listening for this event:
-  local keypress_cancel = false
-  --- @type { bubble_up: boolean }
-  local loop_control = { bubble_up = true }
+  -- Dispatch to handlers, bubbling up until one handles it
+  local should_cancel = false
   for _, elem in ipairs(elements) do
-    if loop_control.bubble_up then
-      -- is the tag listening?
-      --- @type morph.TagEventHandler?
-      local f = vim.tbl_get(elem.attributes, mode .. 'map', lhs)
-      if vim.is_callable(f) then
-        local e = { tag = elem, mode = mode, lhs = lhs, bubble_up = true }
-        --- @diagnostic disable-next-line: need-check-nil
-        local result = f(e)
-        loop_control.bubble_up = e.bubble_up
-        if result == '' then
-          -- bubble-up to the next tag, but set cancel to true, in case there are
-          -- no more tags to bubble up to:
-          keypress_cancel = true
-        else
-          return result
-        end
+    local handler = vim.tbl_get(elem.attributes, mode .. 'map', lhs)
+    if vim.is_callable(handler) then
+      local event = { tag = elem, mode = mode, lhs = lhs, bubble_up = true }
+      local result = handler(event)
+
+      if result == '' then
+        -- Handler wants to cancel, but let event bubble in case parent handles it
+        should_cancel = true
+        --- @diagnostic disable-next-line: unnecessary-if
+        if not event.bubble_up then break end
+      else
+        return result
       end
     end
   end
 
-  -- Resort to default behavior:
-  return keypress_cancel and '' or lhs
+  return should_cancel and '' or lhs
 end
 
+--------------------------------------------------------------------------------
+-- Text Change Handling
+--
+-- When the user edits text inside an element, we detect which elements changed
+-- and fire their on_change handlers. This enables controlled input behavior.
+--------------------------------------------------------------------------------
+
+--- @private
+--- Called after TextChanged autocmd fires, with the on_bytes info.
+--- Detects which elements have changed text and fires their on_change handlers.
 function Morph:_on_bytes_after_autocmd(
   _,
   _,
@@ -1050,46 +1299,46 @@ function Morph:_on_bytes_after_autocmd(
   new_end_col_off,
   _
 )
+  -- Ignore changes we're making ourselves during render
   if self.changing then return end
 
-  local end_row0 = start_row0 + new_end_row_off
+  -- Clamp the changed region to buffer bounds
+  local end_row0 =
+    math.min(start_row0 + new_end_row_off, vim.api.nvim_buf_line_count(self.bufnr) - 1)
   local end_col0 = start_col0 + new_end_col_off
+  local last_line = vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or ''
+  if end_col0 > #last_line then end_col0 = #last_line end
 
-  local max_end_row0 = vim.api.nvim_buf_line_count(self.bufnr) - 1
-  if end_row0 > max_end_row0 then end_row0 = max_end_row0 end
-
-  local max_end_col0 = #(vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or '')
-  if end_col0 > max_end_col0 then end_col0 = max_end_col0 end
-
-  local live_extmarks = Extmark._get_near_overshoot(
+  -- Find extmarks that overlap the changed region
+  local affected_extmarks = Extmark._get_in_range(
     self.bufnr,
     self.ns,
     Pos00.new(start_row0, start_col0),
+    --- @diagnostic disable-next-line: param-type-mismatch
     Pos00.new(end_row0, end_col0)
   )
 
-  --- @type { extmark: morph.Extmark, text: string }[]
-  local changed = {}
-  for _, live_extmark in ipairs(live_extmarks) do
-    local curr_text = live_extmark:_text()
-    local cached_tag = self.text_content.curr.extmark_ids_to_tag[live_extmark.id]
-    if cached_tag and cached_tag.curr_text ~= curr_text then
-      cached_tag.curr_text = curr_text
-      table.insert(changed, { extmark = live_extmark, text = curr_text })
+  -- Check which ones actually have different text now
+  local changed_elements = {} --- @type { extmark: morph.Extmark, text: string }[]
+  for _, extmark in ipairs(affected_extmarks) do
+    local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
+    if tag then
+      local new_text = extmark:_text()
+      if tag.curr_text ~= new_text then
+        tag.curr_text = new_text
+        table.insert(changed_elements, { extmark = extmark, text = new_text })
+      end
     end
   end
 
-  -- Sort the tags into smallest (inner) to largest (outer):
-  table.sort(changed, function(a, b)
-    local x1, x2 = a.extmark, b.extmark
-    if x1.start == x2.start and x1.stop == x2.stop then return x1.id < x2.id end
-    return x1.start >= x2.start and x1.stop <= x2.stop
+  -- Sort innermost first (same as get_elements_at)
+  table.sort(changed_elements, function(a, b)
+    local ea, eb = a.extmark, b.extmark
+    if ea.start == eb.start and ea.stop == eb.stop then return ea.id < eb.id end
+    return ea.start >= eb.start and ea.stop <= eb.stop
   end)
 
-  local loop_control = {
-    bubble_up = true --[[@as boolean]],
-  }
-
+  -- Fire on_change handlers with bubbling.
   -- NOTE: Sometimes we can lose the correlation of tag <=> extmark. Don't we
   -- track all extmarks/tags in our bookkeeping? Yes: yes we do. However, we
   -- operate on the assumption that the buffer could have changed outside of
@@ -1102,277 +1351,34 @@ function Morph:_on_bytes_after_autocmd(
   -- maintaining whatever tag <=> extmark correlations exist at the beginning
   -- of this loop, and we can maintain that all the correct handlers are
   -- called (at lease, the ones we CAN guarantee).
-  local old_textlock = self.textlock
+  local prev_textlock = self.textlock
   self.textlock = true
-  for _, extmark_and_text in ipairs(changed) do
-    if loop_control.bubble_up then
-      local tag = self.text_content.curr.extmark_ids_to_tag[extmark_and_text.extmark.id]
-      local on_change = tag and tag.attributes.on_change
-      if vim.is_callable(on_change) then
-        local e = { text = extmark_and_text.text, bubble_up = true }
-        --- @diagnostic disable-next-line: need-check-nil
-        on_change(e)
-        loop_control.bubble_up = e.bubble_up
-      end
-    end
-  end
-  self.textlock = old_textlock
-end
 
---------------------------------------------------------------------------------
--- Utilities
---------------------------------------------------------------------------------
+  for _, changed in ipairs(changed_elements) do
+    local tag = self.text_content.curr.extmark_ids_to_tag[changed.extmark.id]
+    local on_change = tag and tag.attributes.on_change
 
---- @param x morph.Tree
-function H.tree_is_tag(x) return type(x) == 'table' and x.kind == 'tag' end
---- @param x morph.Tree
-function H.tree_is_tag_arr(x) return type(x) == 'table' and not H.tree_is_tag(x) end
-
---- @param tree morph.Tree
---- @param visitors {
----   nil_?: (fun(): any),
----   boolean?: (fun(b: boolean): any),
----   string?: (fun(s: string): any),
----   array?: (fun(tags: morph.Node[]): any),
----   tag?: (fun(tag: morph.Tag): any),
----   component?: (fun(component: morph.Component, tag: morph.Tag): any),
----   unknown?: fun(tag: any): any
---- }
-function H.tree_match(tree, visitors)
-  if tree == nil or tree == vim.NIL then
-    return visitors.nil_ and visitors.nil_() or nil
-  elseif type(tree) == 'boolean' then
-    return visitors.boolean and visitors.boolean(tree) or nil
-  elseif type(tree) == 'string' then
-    return visitors.string and visitors.string(tree) or nil
-  elseif H.tree_is_tag_arr(tree) then
-    return visitors.array and visitors.array(tree --[[@as any]]) or nil
-  elseif H.tree_is_tag(tree) then
-    local tag = tree --[[@as morph.Tag]]
-    if vim.is_callable(tag.name) then
-      return visitors.component and visitors.component(tag.name --[[@as function]], tag) or nil
-    else
-      return visitors.tag and visitors.tag(tree --[[@as any]]) or nil
-    end
-  else
-    return visitors.unknown and visitors.unknown(tree) or error 'unknown value: not a tag'
-  end
-end
-
---- @param tree morph.Tree
---- @return 'nil' | 'boolean' | 'string' | 'array' | 'tag' | morph.Component | 'unknown'
-function H.tree_kind(tree)
-  if tree == nil or tree == vim.NIL then return 'nil' end
-  if type(tree) == 'string' then return 'string' end
-  if type(tree) == 'boolean' then return 'boolean' end
-  if H.tree_is_tag_arr(tree) then return 'array' end
-  if H.tree_is_tag(tree) then
-    if vim.is_callable(tree.name) then
-      return tree.name --[[@as morph.Component]]
-    else
-      return 'tag'
-    end
-  end
-  return 'unknown'
-end
-
---- @return string
-function H.verbose_tree_kind(tree, idx)
-  local tree_type = type(tree)
-  if tree == nil or tree == vim.NIL then
-    return 'nil'
-  elseif tree_type == 'string' then
-    return 'string'
-  elseif tree_type == 'boolean' then
-    return 'boolean'
-  elseif H.tree_is_tag_arr(tree) then
-    return 'array'
-  elseif H.tree_is_tag(tree) then
-    if vim.is_callable(tree.name) then
-      return 'component-' .. tostring(tree.name) .. '-' .. tostring(tree.attributes.key or idx)
-    else
-      return 'tag-' .. tree.name .. '-' .. tostring(tree.attributes.key or idx)
-    end
-  else
-    error 'unknown'
-  end
-end
-
-function H.is_textlock()
-  if vim.in_fast_event() then return true end
-
-  local curr_win = vim.api.nvim_get_current_win()
-  local curr_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-
-  -- Try to change the window: if textlock is active, an error will be raised:
-  local tmp_buf = vim.api.nvim_create_buf(false, true)
-  local ok, tmp_win = pcall(
-    vim.api.nvim_open_win,
-    tmp_buf,
-    true,
-    { relative = 'editor', width = 1, height = 1, row = 1, col = 1 }
-  )
-  if
-    not ok
-    and type(tmp_win) == 'string'
-    and tmp_win:find 'E565: Not allowed to change text or change window'
-  then
-    pcall(vim.api.nvim_buf_delete, tmp_buf, { force = true })
-    return true
-  end
-
-  pcall(vim.api.nvim_win_close, tmp_win --[[@as integer]], true)
-  pcall(vim.api.nvim_buf_delete, tmp_buf, { force = true })
-
-  vim.api.nvim_set_current_win(curr_win)
-  if curr_mode == 'i' or curr_mode == 't' then
-    vim.cmd.startinsert()
-  elseif curr_mode ~= 'n' then
-    vim.cmd.normal { args = { 'gv' }, bang = true }
-  end
-
-  return false
-end
-
---- @alias morph.LevenshteinChange<T> ({ kind: 'add', item: T, index: integer } | { kind: 'delete', item: T, index: integer } | { kind: 'change', from: T, to: T, index: integer })
-
---- @private
---- @generic T
---- @param opts {
----   from: `T`[],
----   to: T[],
----   are_equal?: (fun(x: T, y: T, x_idx: integer, y_idx: integer): boolean),
----   cost?: {
----     of_delete?: (fun(x: T, idx: integer): integer),
----     of_add?: (fun(x: T, idx: integer): integer),
----     of_change?: (fun(x: T, y: T, x_idx: integer, y_idx: integer): integer)
----   }
---- }
---- @return morph.LevenshteinChange<T>[]
-function H.levenshtein(opts)
-  if not opts.are_equal then opts.are_equal = function(x, y) return x == y end end
-  if not opts.cost then opts.cost = {} end
-  if not opts.cost.of_add then opts.cost.of_add = function() return 1 end end
-  if not opts.cost.of_change then opts.cost.of_change = function() return 1 end end
-  if not opts.cost.of_delete then opts.cost.of_delete = function() return 1 end end
-
-  local m, n = #opts.from, #opts.to
-  -- Initialize the distance matrix
-  --- @type integer[][]
-  local dp = {}
-  for i = 0, m do
-    dp[i] = {}
-  end
-
-  -- Fill the base cases
-  for i = 0, m do
-    assert(dp[i])[0] = i
-  end
-  for j = 0, n do
-    assert(dp[0])[j] = j
-  end
-
-  -- Compute the Levenshtein distance dynamically
-  for i = 1, m do
-    for j = 1, n do
-      if opts.are_equal(opts.from[i], opts.to[j], i, j) then
-        dp[i][j] = dp[i - 1][j - 1] -- no cost if items are the same
-      else
-        local cost_delete = dp[i - 1][j] + opts.cost.of_delete(opts.from[i], i)
-        local cost_add = dp[i][j - 1] + opts.cost.of_add(opts.to[j], j)
-        local cost_change = dp[i - 1][j - 1] + opts.cost.of_change(opts.from[i], opts.to[j], i, j)
-        dp[i][j] = math.min(cost_delete, cost_add, cost_change)
-      end
+    if vim.is_callable(on_change) then
+      local event = { text = changed.text, bubble_up = true }
+      --- @diagnostic disable-next-line: need-check-nil
+      on_change(event)
+      --- @diagnostic disable-next-line: unnecessary-if
+      if not event.bubble_up then break end
     end
   end
 
-  -- Backtrack to find the changes
-  local i = m
-  local j = n
-  --- @type morph.LevenshteinChange[]
-  local changes = {}
-
-  while i > 0 or j > 0 do
-    local default_cost = dp[i][j]
-    local cost_of_change = (i > 0 and j > 0) and dp[i - 1][j - 1] or default_cost
-    local cost_of_add = j > 0 and dp[i][j - 1] or default_cost
-    local cost_of_delete = i > 0 and dp[i - 1][j] or default_cost
-
-    --- @param u integer
-    --- @param v integer
-    --- @param w integer
-    local function is_first_min(u, v, w) return u <= v and u <= w end
-
-    if is_first_min(cost_of_change, cost_of_add, cost_of_delete) then
-      -- potential change
-      if not opts.are_equal(opts.from[i], opts.to[j]) then
-        --- @type morph.LevenshteinChange
-        local change = { kind = 'change', from = opts.from[i], index = i, to = opts.to[j] }
-        table.insert(changes, change)
-      end
-      i = i - 1
-      j = j - 1
-    elseif is_first_min(cost_of_add, cost_of_change, cost_of_delete) then
-      -- addition
-      --- @type morph.LevenshteinChange
-      local change = { kind = 'add', item = opts.to[j], index = i + 1 }
-      table.insert(changes, change)
-      j = j - 1
-    elseif is_first_min(cost_of_delete, cost_of_change, cost_of_add) then
-      -- deletion
-      --- @type morph.LevenshteinChange
-      local change = { kind = 'delete', item = opts.from[i], index = i }
-      table.insert(changes, change)
-      i = i - 1
-    else
-      error 'unreachable'
-    end
-  end
-
-  return changes
-end
-
---- @class morph.BufWatcher
---- @field last_on_bytes_args unknown
---- @field text_changed_autocmd_id integer
---- @field fire function
---- @field cleanup function
-
---- This is a helper that waits to notify about changes until _after_ the
---- TextChanged{,I,P} autocmd has fired. This is because, at the time
---- nvim_buf_attach notifies the callback of changes, the buffer seems to be in
---- a strange state. In my testing I saw extra blank lines during the on_bytes
---- callback, as opposed to when the autocmd fires.
----
---- @param bufnr integer
---- @param callback function
---- @return morph.BufWatcher
-function H.buf_attach_after_autocmd(bufnr, callback)
-  local state = {}
-
-  vim.api.nvim_buf_attach(
-    bufnr,
-    false,
-    { on_bytes = function(...) state.last_on_bytes_args = { ... } end }
-  )
-
-  state.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
-    { 'TextChanged', 'TextChangedI', 'TextChangedP' },
-    { buffer = bufnr, callback = function() state.fire() end }
-  )
-
-  function state.fire() callback(unpack(state.last_on_bytes_args)) end
-  function state.cleanup() vim.api.nvim_del_autocmd(state.text_changed_autocmd_id) end
-
-  return state
+  self.textlock = prev_textlock
 end
 
 --------------------------------------------------------------------------------
 -- Exports
 --------------------------------------------------------------------------------
 
-local M = Morph
-Morph.h = H.h
+Morph.h = h
 Morph.Pos00 = Pos00
 
-return M
+-- Export internal functions for testing when NVIM_TEST=true
+--- @diagnostic disable-next-line: unnecessary-if
+if vim.env.NVIM_TEST then Morph._is_textlock = is_textlock end
+
+return Morph

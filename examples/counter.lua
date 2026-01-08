@@ -39,17 +39,18 @@ local function Counter(ctx)
   -- Initialize state only on first render (mount phase)
   if ctx.phase == 'mount' then ctx.state = { count = 1 } end
   local state = assert(ctx.state)
+  local count = state.count or 0
 
   return {
     'Value: ',
-    h.Number({}, tostring(state.count)), -- Display current count
+    h.Number({}, tostring(count)), -- Display current count
     ' ',
     h(Button, { -- Decrement button
       text = ' - ',
       hl = 'DiffDelete', -- Red highlight
       on_click = function()
         -- Update state and trigger re-render
-        ctx:update { count = state.count - 1 }
+        ctx:update { count = count - 1 }
       end,
     }),
     ' / ',
@@ -58,7 +59,7 @@ local function Counter(ctx)
       hl = 'DiffAdd', -- Green highlight
       on_click = function()
         -- Update state and trigger re-render
-        ctx:update { count = state.count + 1 }
+        ctx:update { count = count + 1 }
       end,
     }),
   }

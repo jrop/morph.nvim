@@ -70,10 +70,13 @@ local function BufferPortal(ctx)
   end
 
   local state = assert(ctx.state)
+  local portal_update = state.portal_update
   -- When this component updates, update the portal content
-  if ctx.phase == 'update' then assert(state.portal_update)(ctx.children) end
+  --- @diagnostic disable: unnecessary-assert, need-check-nil
+  if ctx.phase == 'update' then assert(portal_update)(ctx.children) end
   -- When unmounting, clear the portal content
-  if ctx.phase == 'unmount' then assert(state.portal_update)(nil) end
+  if ctx.phase == 'unmount' then assert(portal_update)(nil) end
+  --- @diagnostic enable: unnecessary-assert, need-check-nil
   return nil -- This component renders nothing in its own buffer
 end
 
@@ -101,21 +104,22 @@ end
 local function Counter(ctx)
   if ctx.phase == 'mount' then ctx.state = { count = 1 } end
   local state = assert(ctx.state)
+  local count = state.count or 0
 
   return {
     'Value: ',
-    h.Number({}, tostring(state.count)), -- Display current count
+    h.Number({}, tostring(count)), -- Display current count
     ' ',
     h(Button, { -- Decrement button
       text = ' - ',
       hl = 'DiffDelete', -- Red highlight
-      on_click = function() ctx:update { count = state.count - 1 } end,
+      on_click = function() ctx:update { count = count - 1 } end,
     }),
     ' / ',
     h(Button, { -- Increment button
       text = ' + ',
       hl = 'DiffAdd', -- Green highlight
-      on_click = function() ctx:update { count = state.count + 1 } end,
+      on_click = function() ctx:update { count = count + 1 } end,
     }),
   }
 end

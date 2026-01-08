@@ -1,13 +1,22 @@
---- @diagnostic disable: need-check-nil, undefined-field, missing-fields
+--- @diagnostic disable: need-check-nil, undefined-field, missing-fields, param-type-mismatch
 
 vim.print(tostring(vim.version()))
+
+-- Set NVIM_TEST to enable testing of internal functions
+vim.env.NVIM_TEST = 'true'
 
 local Morph = require 'morph'
 local h = Morph.h
 local Pos00 = Morph.Pos00
 
+--------------------------------------------------------------------------------
+-- TEST HELPERS
+--------------------------------------------------------------------------------
+
 local function get_lines() return vim.api.nvim_buf_get_lines(0, 0, -1, true) end
 local function get_text() return vim.iter(vim.api.nvim_buf_get_lines(0, 0, -1, true)):join '\n' end
+local function line_count() return vim.api.nvim_buf_line_count(0) end
+
 --- @param start_row integer
 --- @param start_col integer
 --- @param end_row integer
@@ -16,12 +25,13 @@ local function get_text() return vim.iter(vim.api.nvim_buf_get_lines(0, 0, -1, t
 local function set_text(start_row, start_col, end_row, end_col, repl)
   vim.api.nvim_buf_set_text(0, start_row, start_col, end_row, end_col, repl)
 end
-local function line_count() return vim.api.nvim_buf_line_count(0) end
+
 --- @param pos [integer, integer]
 local function set_cursor(pos) vim.api.nvim_win_set_cursor(0, pos) end
+
+--- Execute a test within a temporary buffer that is cleaned up afterward.
 local function with_buf(lines, f)
   vim.go.swapfile = false
-
   vim.cmd.new()
   vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
   local ok, result = pcall(f)
@@ -29,586 +39,493 @@ local function with_buf(lines, f)
   if not ok then error(result) end
 end
 
+--------------------------------------------------------------------------------
+-- ASSERTION HELPERS
+--------------------------------------------------------------------------------
+
+--- Assert that get_elements_at returns elements with the expected IDs (in order).
+--- @param renderer morph.Morph
+--- @param pos [integer, integer]
+--- @param expected_ids string[]
+local function assert_elements_at(renderer, pos, expected_ids)
+  local elements = renderer:get_elements_at(pos)
+  local actual_ids = vim.tbl_map(function(e) return e.attributes.id end, elements)
+  assert.are.same(expected_ids, actual_ids)
+end
+
+--- Assert that an element has the expected start and stop positions.
+--- @param renderer morph.Morph
+--- @param id string
+--- @param expected_start table
+--- @param expected_stop table
+local function assert_element_bounds(renderer, id, expected_start, expected_stop)
+  local elem = renderer:get_element_by_id(id)
+  assert.is_not_nil(elem, 'Element with id "' .. id .. '" not found')
+  assert.are.same(expected_start, elem.extmark.start)
+  assert.are.same(expected_stop, elem.extmark.stop)
+end
+
+--------------------------------------------------------------------------------
+-- REUSABLE COMPONENT FIXTURES
+--------------------------------------------------------------------------------
+
+--- Creates a component that captures its context for later inspection.
+--- @param captured_contexts table<string, morph.Ctx> Table to store contexts by id
+--- @return fun(ctx: morph.Ctx<{id: string}, {count: integer}>): morph.Tree
+local function make_counter(captured_contexts)
+  return function(ctx)
+    if ctx.phase == 'mount' then ctx.state = { phase = ctx.phase, count = 1 } end
+    local state = assert(ctx.state)
+    state.phase = ctx.phase
+    captured_contexts[ctx.props.id] = ctx
+    return { { 'Value: ', h.Number({}, tostring(state.count)) } }
+  end
+end
+
+--------------------------------------------------------------------------------
+-- TESTS
+--------------------------------------------------------------------------------
+
 describe('Morph', function()
-  it('should render text in an empty buffer', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render { 'hello', ' ', 'world' }
-      assert.are.same(get_lines(), { 'hello world' })
+  ------------------------------------------------------------------------------
+  -- BASIC RENDERING
+  ------------------------------------------------------------------------------
+
+  describe('basic rendering', function()
+    it('renders text in an empty buffer', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'hello', ' ', 'world' }
+        assert.are.same({ 'hello world' }, get_lines())
+      end)
+    end)
+
+    it('reconciles correctly across multiple renders', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'hello', ' ', 'world' }
+        assert.are.same({ 'hello world' }, get_lines())
+
+        r:render { 'goodbye', ' ', 'world' }
+        assert.are.same({ 'goodbye world' }, get_lines())
+
+        r:render { 'hello', ' ', 'universe' }
+        assert.are.same({ 'hello universe' }, get_lines())
+      end)
+    end)
+
+    it('renders h() tags with highlight groups', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { hl = 'HighlightGroup' }, 'hello '),
+          h('text', { hl = 'HighlightGroup' }, 'world'),
+        }
+        assert.are.same({ 'hello world' }, get_lines())
+      end)
+    end)
+
+    it('renders numbers as strings', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'count: ', 42 }
+        assert.are.same({ 'count: 42' }, get_lines())
+      end)
+    end)
+
+    it('renders negative and decimal numbers', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'negative: ', -5, ', decimal: ', 3.14 }
+        assert.are.same({ 'negative: -5, decimal: 3.14' }, get_lines())
+      end)
+    end)
+
+    it('renders numbers within tags', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { hl = 'Number' }, { 'Value: ', 123 }),
+        }
+        assert.are.same({ 'Value: 123' }, get_lines())
+      end)
+    end)
+
+    it('treats vim.NIL as nil (produces no output)', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'before', vim.NIL, 'after' }
+        assert.are.same({ 'beforeafter' }, get_lines())
+      end)
+    end)
+
+    it('treats boolean false and true as nil (produces no output)', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'before', false, 'after' }
+        assert.are.same({ 'beforeafter' }, get_lines())
+
+        r:render { 'start', true, 'end' }
+        assert.are.same({ 'startend' }, get_lines())
+      end)
+    end)
+
+    it('flattens deeply nested arrays', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          { { { 'deep' } } },
+          { { 'medium' } },
+          { 'shallow' },
+        }
+        assert.are.same({ 'deepmediumshallow' }, get_lines())
+      end)
+    end)
+
+    it('handles empty content gracefully', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {}
+        assert.are.same({ '' }, get_lines())
+      end)
+    end)
+
+    it('handles tree with only newlines', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { '\n\n\n' }
+        assert.are.same({ '', '', '', '' }, get_lines())
+      end)
     end)
   end)
 
-  it('should result in the correct text after repeated renders', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render { 'hello', ' ', 'world' }
-      assert.are.same(get_lines(), { 'hello world' })
+  ------------------------------------------------------------------------------
+  -- LINE MANAGEMENT
+  ------------------------------------------------------------------------------
 
-      r:render { 'goodbye', ' ', 'world' }
-      assert.are.same(get_lines(), { 'goodbye world' })
+  describe('line management', function()
+    it('adds lines when content grows', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'line 1', '\n', 'line 2' }
+        assert.are.same({ 'line 1', 'line 2' }, get_lines())
 
-      r:render { 'hello', ' ', 'universe' }
-      assert.are.same(get_lines(), { 'hello universe' })
+        r:render { 'line 1', '\n', 'line 2\n', 'line 3' }
+        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+      end)
+    end)
+
+    it('removes lines when content shrinks', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'line 1', '\nline 2', '\nline 3' }
+        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+
+        r:render { 'line 1', '\nline 3' }
+        assert.are.same({ 'line 1', 'line 3' }, get_lines())
+      end)
+    end)
+
+    it('handles multiple consecutive newlines', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'line1\n\n\nline4' }
+        assert.are.same({ 'line1', '', '', 'line4' }, get_lines())
+      end)
     end)
   end)
 
-  it('should handle tags correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        h('text', { hl = 'HighlightGroup' }, 'hello '),
-        h('text', { hl = 'HighlightGroup' }, 'world'),
-      }
-      assert.are.same(get_lines(), { 'hello world' })
-    end)
-  end)
+  ------------------------------------------------------------------------------
+  -- NESTED ELEMENTS
+  ------------------------------------------------------------------------------
 
-  it('should reconcile added lines', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render { 'line 1', '\n', 'line 2' }
-      assert.are.same(get_lines(), { 'line 1', 'line 2' })
+  describe('nested elements', function()
+    it('renders and updates nested h() tags', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', {}, { 'first line' }),
+          '\n',
+          h('text', {}, 'second line'),
+        }
+        assert.are.same({ 'first line', 'second line' }, get_lines())
 
-      -- Add a new line:
-      r:render { 'line 1', '\n', 'line 2\n', 'line 3' }
-      assert.are.same(get_lines(), { 'line 1', 'line 2', 'line 3' })
-    end)
-  end)
-
-  it('should reconcile deleted lines', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render { 'line 1', '\nline 2', '\nline 3' }
-      assert.are.same(get_lines(), { 'line 1', 'line 2', 'line 3' })
-
-      -- Remove a line:
-      r:render { 'line 1', '\nline 3' }
-      assert.are.same(get_lines(), { 'line 1', 'line 3' })
-    end)
-  end)
-
-  it('should handle multiple nested elements', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        h('text', {}, {
-          'first line',
-        }),
-        '\n',
-        h('text', {}, 'second line'),
-      }
-      assert.are.same(get_lines(), { 'first line', 'second line' })
-
-      r:render {
-        h('text', {}, 'updated first line'),
-        '\n',
-        h('text', {}, 'third line'),
-      }
-      assert.are.same(get_lines(), { 'updated first line', 'third line' })
-    end)
-  end)
-
-  --
-  -- get_elements_at
-  --
-
-  it('should return no extmarks for an empty buffer', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local pos_infos = r:get_elements_at { 0, 0 }
-      assert.are.same(pos_infos, {})
-    end)
-  end)
-
-  it('should return correct tags for a given position', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      -- Text:
-      -- 00000000001
-      -- 01234567890
-      -- Hello World
-      r:render {
-        h('text', { hl = 'HighlightGroup1' }, 'Hello'),
-        h('text', { hl = 'HighlightGroup2' }, ' World'),
-      }
-
-      local tags = r:get_elements_at { 0, 2 }
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.hl, 'HighlightGroup1')
-      assert.are.same(tags[1].extmark.start, Pos00.new(0, 0))
-      assert.are.same(tags[1].extmark.stop, Pos00.new(0, 5))
-      tags = r:get_elements_at { 0, 4 }
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.hl, 'HighlightGroup1')
-      assert.are.same(tags[1].extmark.start, Pos00.new(0, 0))
-      assert.are.same(tags[1].extmark.stop, Pos00.new(0, 5))
-
-      tags = r:get_elements_at { 0, 5 }
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.hl, 'HighlightGroup2')
-      assert.are.same(tags[1].extmark.start, Pos00.new(0, 5))
-      assert.are.same(tags[1].extmark.stop, Pos00.new(0, 11))
-
-      -- In insert mode, bounds are eagerly included:
-      tags = r:get_elements_at({ 0, 5 }, 'i')
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.hl, 'HighlightGroup1')
-      assert.are.same(tags[2].attributes.hl, 'HighlightGroup2')
-    end)
-  end)
-
-  it('should return correct tags for elements enclosing empty lines', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      -- Text:
-      --   012345
-      -- 0 Header
-      -- 1
-      -- 2
-
-      local tag, start0, stop0
-      local lines = Morph.markup_to_lines {
-        on_tag = function(_tag, _start0, _stop0)
-          tag = _tag
-          start0 = _start0
-          stop0 = _stop0
-        end,
-        tree = h('text', {}, { 'Header\n\n' }),
-      }
-      assert.are.same(lines, { 'Header', '', '' })
-
-      r:render(h('text', {}, { 'Header\n\n' }))
-
-      local tags = r:get_elements_at { 0, 2 }
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].extmark.start, Pos00.new(0, 0))
-      assert.are.same(tags[1].extmark.stop, Pos00.new(2, 0))
-    end)
-  end)
-
-  it('should return multiple extmarks for overlapping text', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        h('text', { hl = 'HighlightGroup1' }, {
-          'Hello',
-          h(
-            'text',
-            { hl = 'HighlightGroup2', extmark = { hl_group = 'HighlightGroup2' } },
-            ' World'
-          ),
-        }),
-      }
-
-      local tags = r:get_elements_at { 0, 5 }
-
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.hl, 'HighlightGroup2')
-      assert.are.same(tags[2].attributes.hl, 'HighlightGroup1')
-    end)
-  end)
-
-  it('repeated patch_lines calls should not change the buffer content', function()
-    local lines = {
-      [[{ {]],
-      [[    bounds = {]],
-      [[      start1 = { 1, 1 },]],
-      [[      stop1 = { 4, 1 }]],
-      [[    },]],
-      [[    end_right_gravity = true,]],
-      [[    id = 1,]],
-      [[    ns_id = 623,]],
-      [[    ns_name = "morph:91",]],
-      [[    right_gravity = false]],
-      [[  } }]],
-      [[]],
-    }
-    with_buf(lines, function()
-      Morph.patch_lines(0, nil, lines)
-      assert.are.same(get_lines(), lines)
-
-      Morph.patch_lines(0, lines, lines)
-      assert.are.same(get_lines(), lines)
-
-      Morph.patch_lines(0, lines, lines)
-      assert.are.same(get_lines(), lines)
-    end)
-  end)
-
-  it('should fire text-changed events', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = ''
-
-      -- Text:
-      --   01234
-      -- 0 one
-      -- 1 two
-      -- 2 three
-      -- 3
-      r:render {
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, {
-          'one\n',
-          'two\n',
-          'three\n',
-        }),
-      }
-
-      local elems = r:get_elements_at { 0, 1 }
-      assert.are.same(#elems, 1)
-      assert.are.same(elems[1].extmark.start, Pos00.new(0, 0))
-      assert.are.same(elems[1].extmark.stop, Pos00.new(3, 0))
-
-      -- New text:
-      --   1234
-      -- 0 bleh
-      vim.fn.setreg('"', 'bleh')
-      vim.cmd [[normal! ggVGp]]
-
-      assert.are.same(line_count(), 1)
-      elems = r:get_elements_at { 0, 1 }
-      assert.are.same(#elems, 1)
-
-      -- For some reason, the autocmd does not fire in the busted environment.
-      -- We'll call the handler ourselves:
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'bleh')
-      assert.are.same(captured_changed_text, 'bleh')
-
-      vim.fn.setreg('"', '')
-      vim.cmd [[normal! ggdG]]
-      -- We'll call the handler ourselves:
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), '')
-      assert.are.same(captured_changed_text, '')
+        r:render {
+          h('text', {}, 'updated first line'),
+          '\n',
+          h('text', {}, 'third line'),
+        }
+        assert.are.same({ 'updated first line', 'third line' }, get_lines())
+      end)
     end)
 
-    with_buf({}, function()
-      local r = Morph.new(0)
-      --- @type string?
-      local captured_changed_text = nil
-      r:render {
-        'prefix:',
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, {
-          'one',
-        }),
-        'suffix',
-      }
-
-      vim.fn.setreg('"', 'bleh')
-      set_cursor { 1, 9 }
-      vim.cmd [[normal! vhhd]]
-      -- For some reason, the autocmd does not fire in the busted environment.
-      -- We'll call the handler ourselves:
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'prefix:suffix')
-      assert.are.same(captured_changed_text, '')
-    end)
-  end)
-
-  it('should find tags by position', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        'pre',
-        h('text', {
-          id = 'outer',
-        }, {
-          'inner-pre',
-          h('text', {
-            id = 'inner',
-          }, {
-            'inner-text',
+    it('renders h.HighlightGroup shorthand with nested children', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h.Comment({}, {
+            'comment start ',
+            h.String({}, 'string'),
+            ' comment end',
           }),
-          'inner-post',
-        }),
-        'post',
-      }
+        }
+        assert.are.same('comment start string comment end', get_text())
 
-      local tags = r:get_elements_at { 0, 11 }
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.id, 'outer')
+        local comment_elem = r:get_elements_at { 0, 0 }
+        assert.are.same(1, #comment_elem)
+        assert.are.same('Comment', comment_elem[1].attributes.hl)
 
-      tags = r:get_elements_at { 0, 12 }
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.id, 'inner')
-      assert.are.same(tags[2].attributes.id, 'outer')
+        local string_elem = r:get_elements_at { 0, 14 }
+        assert.are.same(2, #string_elem)
+        assert.are.same('String', string_elem[1].attributes.hl)
+        assert.are.same('Comment', string_elem[2].attributes.hl)
+      end)
     end)
   end)
 
-  it('should return tags sorted from innermost to outermost', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      -- Text:
-      -- startmiddleinnermostafterend
-      r:render {
-        h('text', { id = 'level1', hl = 'Level1' }, {
-          'start',
-          h('text', { id = 'level2', hl = 'Level2' }, {
-            'middle',
-            h('text', { id = 'level3', hl = 'Level3' }, {
-              'innermost',
+  ------------------------------------------------------------------------------
+  -- PATCH_LINES
+  ------------------------------------------------------------------------------
+
+  describe('patch_lines', function()
+    it('is idempotent when content unchanged', function()
+      local lines = {
+        [[{ {]],
+        [[    bounds = {]],
+        [[      start1 = { 1, 1 },]],
+        [[      stop1 = { 4, 1 }]],
+        [[    },]],
+        [[    end_right_gravity = true,]],
+        [[    id = 1,]],
+        [[    ns_id = 623,]],
+        [[    ns_name = "morph:91",]],
+        [[    right_gravity = false]],
+        [[  } }]],
+        [[]],
+      }
+      with_buf(lines, function()
+        Morph.patch_lines(0, nil, lines)
+        assert.are.same(lines, get_lines())
+
+        Morph.patch_lines(0, lines, lines)
+        assert.are.same(lines, get_lines())
+
+        Morph.patch_lines(0, lines, lines)
+        assert.are.same(lines, get_lines())
+      end)
+    end)
+
+    it('handles complete content replacement', function()
+      with_buf({ 'old line 1', 'old line 2', 'old line 3' }, function()
+        Morph.patch_lines(0, { 'old line 1', 'old line 2', 'old line 3' }, { 'new content' })
+        assert.are.same({ 'new content' }, get_lines())
+      end)
+    end)
+
+    it('handles expanding content', function()
+      with_buf({ 'single' }, function()
+        Morph.patch_lines(0, { 'single' }, { 'line 1', 'line 2', 'line 3', 'line 4' })
+        assert.are.same({ 'line 1', 'line 2', 'line 3', 'line 4' }, get_lines())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- GET_ELEMENTS_AT
+  --
+  -- Tests for querying elements at cursor positions. Elements are returned
+  -- sorted from innermost to outermost.
+  ------------------------------------------------------------------------------
+
+  describe('get_elements_at', function()
+    it('returns empty array for empty buffer', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local pos_infos = r:get_elements_at { 0, 0 }
+        assert.are.same({}, pos_infos)
+      end)
+    end)
+
+    it('returns empty array for position beyond buffer end', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { h('text', { id = 'tag' }, 'short') }
+
+        local elems = r:get_elements_at { 0, 100 }
+        assert.are.same(0, #elems)
+
+        elems = r:get_elements_at { 10, 0 }
+        assert.are.same(0, #elems)
+      end)
+    end)
+
+    it('returns correct element for position within bounds', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --   00000000001
+        --   01234567890
+        --   Hello World
+        r:render {
+          h('text', { hl = 'HighlightGroup1' }, 'Hello'),
+          h('text', { hl = 'HighlightGroup2' }, ' World'),
+        }
+
+        local tags = r:get_elements_at { 0, 2 }
+        assert.are.same(1, #tags)
+        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
+        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
+        assert.are.same(Pos00.new(0, 5), tags[1].extmark.stop)
+
+        tags = r:get_elements_at { 0, 4 }
+        assert.are.same(1, #tags)
+        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
+        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
+        assert.are.same(Pos00.new(0, 5), tags[1].extmark.stop)
+
+        tags = r:get_elements_at { 0, 5 }
+        assert.are.same(1, #tags)
+        assert.are.same('HighlightGroup2', tags[1].attributes.hl)
+        assert.are.same(Pos00.new(0, 5), tags[1].extmark.start)
+        assert.are.same(Pos00.new(0, 11), tags[1].extmark.stop)
+      end)
+    end)
+
+    it('includes both adjacent elements in insert mode', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --   00000000001
+        --   01234567890
+        --   Hello World
+        r:render {
+          h('text', { hl = 'HighlightGroup1' }, 'Hello'),
+          h('text', { hl = 'HighlightGroup2' }, ' World'),
+        }
+
+        local tags = r:get_elements_at({ 0, 5 }, 'i')
+        assert.are.same(2, #tags)
+        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
+        assert.are.same('HighlightGroup2', tags[2].attributes.hl)
+      end)
+    end)
+
+    it('returns elements enclosing empty lines', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --   012345
+        -- 0 Header
+        -- 1
+        -- 2
+
+        local tag, start0, stop0
+        local lines = Morph.markup_to_lines {
+          on_tag = function(_tag, _start0, _stop0)
+            tag = _tag
+            start0 = _start0
+            stop0 = _stop0
+          end,
+          tree = h('text', {}, { 'Header\n\n' }),
+        }
+        assert.are.same({ 'Header', '', '' }, lines)
+
+        r:render(h('text', {}, { 'Header\n\n' }))
+
+        local tags = r:get_elements_at { 0, 2 }
+        assert.are.same(1, #tags)
+        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
+        assert.are.same(Pos00.new(2, 0), tags[1].extmark.stop)
+      end)
+    end)
+
+    it('returns multiple elements for overlapping text (innermost first)', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { hl = 'HighlightGroup1' }, {
+            'Hello',
+            h(
+              'text',
+              { hl = 'HighlightGroup2', extmark = { hl_group = 'HighlightGroup2' } },
+              ' World'
+            ),
+          }),
+        }
+
+        local tags = r:get_elements_at { 0, 5 }
+        assert.are.same(2, #tags)
+        assert.are.same('HighlightGroup2', tags[1].attributes.hl)
+        assert.are.same('HighlightGroup1', tags[2].attributes.hl)
+      end)
+    end)
+
+    it('returns elements sorted innermost to outermost for nested tags', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --   00000000001111111111222222222
+        --   0123456789012345678901234567890
+        --   startmiddleinnermostafterend
+        r:render {
+          h('text', { id = 'level1', hl = 'Level1' }, {
+            'start',
+            h('text', { id = 'level2', hl = 'Level2' }, {
+              'middle',
+              h('text', { id = 'level3', hl = 'Level3' }, { 'innermost' }),
+              'after',
             }),
-            'after',
+            'end',
           }),
-          'end',
-        }),
-      }
+        }
 
-      -- Test position in the innermost tag
-      local tags = r:get_elements_at { 0, 11 } -- position in 'innermost'
-      assert.are.same(#tags, 3)
-      assert.are.same(tags[1].attributes.id, 'level3') -- innermost first
-      assert.are.same(tags[2].attributes.id, 'level2')
-      assert.are.same(tags[3].attributes.id, 'level1') -- outermost last
+        -- Position in 'innermost' -> all three levels
+        assert_elements_at(r, { 0, 11 }, { 'level3', 'level2', 'level1' })
 
-      -- Test position in middle level
-      local tags = r:get_elements_at { 0, 7 } -- position in 'middle'
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.id, 'level2') -- innermost first
-      assert.are.same(tags[2].attributes.id, 'level1') -- outermost last
+        -- Position in 'middle' -> two levels
+        assert_elements_at(r, { 0, 7 }, { 'level2', 'level1' })
 
-      -- Test position in outermost level only
-      local tags = r:get_elements_at { 0, 2 } -- position in 'start'
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.id, 'level1')
+        -- Position in 'start' -> outermost only
+        assert_elements_at(r, { 0, 2 }, { 'level1' })
+      end)
     end)
-  end)
 
-  it('should return correct extmark positions for complex nested structures', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      -- Text:
-      --    00000000001111111111
-      --    0123456789_123456789
-      -- 0: Section 1: important
-      -- 1: Section 2: critical
-      r:render {
-        h('text', { id = 'container', hl = 'Container' }, {
-          h('text', { id = 'section1', hl = 'Section' }, {
-            'Section 1: ',
-            h('text', { id = 'highlight1', hl = 'Highlight' }, 'important'),
+    it('excludes sibling elements (only returns ancestors)', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --   0123456789012345678901234567890
+        --   preinner-preinner-textinner-postpost
+        r:render {
+          'pre',
+          h('text', { id = 'outer' }, {
+            'inner-pre',
+            h('text', { id = 'inner' }, { 'inner-text' }),
+            'inner-post',
           }),
-          '\n',
-          h('text', { id = 'section2', hl = 'Section' }, {
-            'Section 2: ',
-            h('text', { id = 'highlight2', hl = 'Highlight' }, 'critical'),
-          }),
-        }),
-      }
+          'post',
+        }
 
-      -- Test extmark positions:
-      local extmarks = r:get_elements_at { 0, 15 } -- position in 'important'
-      assert.are.same(#extmarks, 3)
-      assert.are.same(extmarks[1].attributes.id, 'highlight1') -- innermost first
-      assert.are.same(extmarks[2].attributes.id, 'section1')
-      assert.are.same(extmarks[3].attributes.id, 'container') -- outermost last
+        local tags = r:get_elements_at { 0, 11 }
+        assert.are.same(1, #tags)
+        assert.are.same('outer', tags[1].attributes.id)
 
-      -- Verify extmark bounds
-      assert.are.same(extmarks[1].extmark.start, Pos00.new(0, 11)) -- highlight1 start
-      assert.are.same(extmarks[1].extmark.stop, Pos00.new(0, 20)) -- highlight1 stop
-      assert.are.same(extmarks[2].extmark.start, Pos00.new(0, 0)) -- section1 start
-      assert.are.same(extmarks[2].extmark.stop, Pos00.new(0, 20)) -- section1 stop
-      assert.are.same(extmarks[3].extmark.start, Pos00.new(0, 0)) -- container start
-      assert.are.same(extmarks[3].extmark.stop, Pos00.new(1, 19)) -- container stop
-
-      -- Test position in second highlight (after newline)
-      extmarks = r:get_elements_at { 1, 15 } -- position in 'critical'
-      assert.are.same(#extmarks, 3)
-      assert.are.same(extmarks[1].attributes.id, 'highlight2')
-      assert.are.same(extmarks[2].attributes.id, 'section2')
-      assert.are.same(extmarks[3].attributes.id, 'container')
-
-      -- Test position in section text but not in highlight
-      extmarks = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
-      assert.are.same(#extmarks, 2)
-      assert.are.same(extmarks[1].attributes.id, 'section1')
-      assert.are.same(extmarks[2].attributes.id, 'container')
+        tags = r:get_elements_at { 0, 12 }
+        assert.are.same(2, #tags)
+        assert.are.same('inner', tags[1].attributes.id)
+        assert.are.same('outer', tags[2].attributes.id)
+      end)
     end)
-  end)
 
-  it('should handle complex nested structures with multiple siblings', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      -- Text:
-      --    00000000001111111111
-      --    0123456789_123456789
-      -- 0: Section 1: important
-      -- 1: Section 2: critical
-      r:render {
-        h('text', { id = 'container', hl = 'Container' }, {
-          h('text', { id = 'section1', hl = 'Section' }, {
-            'Section 1: ',
-            h('text', { id = 'highlight1', hl = 'Highlight' }, 'important'),
-          }),
-          '\n',
-          h('text', { id = 'section2', hl = 'Section' }, {
-            'Section 2: ',
-            h('text', { id = 'highlight2', hl = 'Highlight' }, 'critical'),
-          }),
-        }),
-      }
+    it('does not return sibling elements in complex nested structures', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_events = {}
 
-      --- @param id string
-      local function get_tag_bounds(id)
-        local tag = r:get_element_by_id(id)
-        return tag and { start = tag.extmark.start, stop = tag.extmark.stop }
-      end
-
-      -- Test positions:
-      assert.are.same(get_tag_bounds 'container', {
-        start = Pos00.new(0, 0),
-        stop = Pos00.new(1, 19),
-      })
-      assert.are.same(get_tag_bounds 'section1', {
-        start = Pos00.new(0, 0),
-        stop = Pos00.new(0, 20),
-      })
-      assert.are.same(get_tag_bounds 'highlight1', {
-        start = Pos00.new(0, 11),
-        stop = Pos00.new(0, 20),
-      })
-      assert.are.same(get_tag_bounds 'section2', {
-        start = Pos00.new(1, 0),
-        stop = Pos00.new(1, 19),
-      })
-      assert.are.same(get_tag_bounds 'highlight2', {
-        start = Pos00.new(1, 11),
-        stop = Pos00.new(1, 19),
-      })
-
-      local tags = r:get_elements_at { 0, 15 } -- position in 'important'
-      assert.are.same(#tags, 3)
-      assert.are.same(tags[1].attributes.id, 'highlight1')
-      assert.are.same(tags[2].attributes.id, 'section1')
-      assert.are.same(tags[3].attributes.id, 'container')
-
-      -- Test position in second highlight (after newline)
-      local tags = r:get_elements_at { 1, 15 } -- position in 'critical'
-      assert.are.same(#tags, 3)
-      assert.are.same(tags[1].attributes.id, 'highlight2')
-      assert.are.same(tags[2].attributes.id, 'section2')
-      assert.are.same(tags[3].attributes.id, 'container')
-
-      -- Test position in section text but not in highlight
-      local tags = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.id, 'section1')
-      assert.are.same(tags[2].attributes.id, 'container')
-    end)
-  end)
-
-  it('should handle tags with same boundaries correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        h('text', { id = 'outer', hl = 'Outer' }, {
-          h('text', { id = 'inner', hl = 'Inner' }, {
-            'same-bounds',
-          }),
-        }),
-      }
-
-      -- Both tags have the same text bounds, should return both sorted by nesting
-      local tags = r:get_elements_at { 0, 5 } -- position in 'same-bounds'
-      assert.are.same(#tags, 2)
-      assert.are.same(tags[1].attributes.id, 'inner') -- innermost first
-      assert.are.same(tags[2].attributes.id, 'outer') -- outermost last
-    end)
-  end)
-
-  it('should handle empty tags and edge cases', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        'prefix',
-        h('text', { id = 'empty', hl = 'Empty' }, {}),
-        h('text', { id = 'normal', hl = 'Normal' }, 'content'),
-        'suffix',
-      }
-
-      -- Test position in normal tag
-      local tags = r:get_elements_at { 0, 8 } -- position in 'content'
-      assert.are.same(#tags, 1)
-      assert.are.same(tags[1].attributes.id, 'normal')
-
-      -- Test position at boundary between prefix and empty tag
-      local tags = r:get_elements_at { 0, 6 } -- position at start of empty tag
-      -- Empty tags might not create extmarks, so this tests the boundary behavior
-      assert.is_true(#tags >= 0) -- Should not error, may return 0 or more tags
-    end)
-  end)
-
-  it('get_elements_at should not get siblings', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
-
-      -- Text structure:
-      --           1111111111222222
-      -- 01234567890123456789012345
-      -- sibling outer middle inner
-      r:render {
-        h('text', {
-          id = 'sibling',
-          on_change = function(e) table.insert(captured_events, { id = 'sibling', text = e.text }) end,
-        }, 'sibling'),
-        ' ',
-        h('text', {
-          id = 'outer',
-          on_change = function(e) table.insert(captured_events, { id = 'outer', text = e.text }) end,
-        }, {
-          'outer ',
-          h('text', {
-            id = 'middle',
-          }, {
-            'middle ',
-            h('text', {
-              id = 'inner',
-              on_change = function(e)
-                table.insert(captured_events, { id = 'inner', text = e.text })
-              end,
-            }, 'inner'),
-          }),
-        }),
-      }
-
-      local elems = r:get_elements_at { 0, 23 }
-      assert.are.same(#elems, 3)
-      -- Should return inner, middle, and outer (innermost to outermost)
-      assert.are.same(elems[1].attributes.id, 'inner')
-      assert.are.same(elems[2].attributes.id, 'middle')
-      assert.are.same(elems[3].attributes.id, 'outer')
-
-      -- Test position in sibling - should only return sibling
-      local sibling_elems = r:get_elements_at { 0, 3 }
-      assert.are.same(#sibling_elems, 1)
-      assert.are.same(sibling_elems[1].attributes.id, 'sibling')
-
-      -- Test position in outer but not in nested elements
-      local outer_elems = r:get_elements_at { 0, 9 }
-      assert.are.same(#outer_elems, 1)
-      assert.are.same(outer_elems[1].attributes.id, 'outer')
-    end)
-  end)
-
-  it('should fire on_change handlers from inner to outer and not affect siblings', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
-
-      -- Text structure:
-      --           1111111111222222
-      -- 01234567890123456789012345
-      -- sibling outer middle inner
-      local function reset_render()
+        -- Text:
+        --   0         1         2
+        --   0123456789012345678901234567890
+        --   sibling outer middle inner
         r:render {
           h('text', {
             id = 'sibling',
@@ -622,9 +539,7 @@ describe('Morph', function()
             on_change = function(e) table.insert(captured_events, { id = 'outer', text = e.text }) end,
           }, {
             'outer ',
-            h('text', {
-              id = 'middle',
-            }, {
+            h('text', { id = 'middle' }, {
               'middle ',
               h('text', {
                 id = 'inner',
@@ -635,1342 +550,2221 @@ describe('Morph', function()
             }),
           }),
         }
-      end
-      reset_render()
 
-      -- Test 1: Change text in the innermost element
-      -- This should fire inner handler first, then outer handler
-      captured_events = {}
+        -- Position in 'inner' -> inner, middle, outer (not sibling)
+        assert_elements_at(r, { 0, 23 }, { 'inner', 'middle', 'outer' })
 
-      -- Replace "inner" with "changed"
-      set_text(0, 21, 0, 26, { 'changed' })
-      assert.are.same(get_lines(), { 'sibling outer middle changed' })
-      -- Text structure:
-      --           111111111122222222
-      -- 0123456789012345678901234567
-      -- sibling outer middle changed
-      r.buf_watcher.fire()
+        -- Position in 'sibling' -> sibling only
+        assert_elements_at(r, { 0, 3 }, { 'sibling' })
 
-      assert.are.same(#captured_events, 2)
-      assert.are.same(captured_events[1].id, 'inner')
-      assert.are.same(captured_events[1].text, 'changed')
-      assert.are.same(captured_events[2].id, 'outer')
-      assert.are.same(captured_events[2].text, 'outer middle changed')
-
-      -- Test 2: Change text in the sibling element
-      -- This should only fire the sibling handler, not any of the nested ones
-      reset_render()
-      captured_events = {}
-
-      -- Replace "sibling" with "modified"
-      set_text(0, 0, 0, 7, { 'modified' })
-      assert.are.same(get_lines(), { 'modified outer middle inner' })
-      -- Text structure:
-      --           1111111111222222222
-      -- 01234567890123456789012345678
-      -- modified outer middle inner
-      r.buf_watcher.fire()
-
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].id, 'sibling')
-      assert.are.same(captured_events[1].text, 'modified')
-
-      -- Test 3: Change text in the middle element (which has no handler)
-      -- This should only fire the outer handler
-      reset_render()
-      captured_events = {}
-
-      -- Replace "middle" with "center"
-      set_text(0, 14, 0, 20, { 'center' })
-      assert.are.same(get_lines(), { 'sibling outer center inner' })
-      r.buf_watcher.fire()
-
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].id, 'outer')
-      assert.are.same(captured_events[1].text, 'outer center inner')
+        -- Position in 'outer ' text -> outer only
+        assert_elements_at(r, { 0, 9 }, { 'outer' })
+      end)
     end)
-  end)
 
-  it('should find tags by id', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      r:render {
-        h('text', {
-          id = 'outer',
-        }, {
-          'inner-pre',
-          h('text', {
-            id = 'inner',
-          }, {
-            'inner-text',
+    it('handles tags with same boundaries (both returned, inner first)', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { id = 'outer', hl = 'Outer' }, {
+            h('text', { id = 'inner', hl = 'Inner' }, { 'same-bounds' }),
           }),
-          'inner-post',
-        }),
-        'post',
-      }
-
-      --- @param id string
-      local function get_tag_bounds(id)
-        local tag = r:get_element_by_id(id)
-        return tag and { start = tag.extmark.start, stop = tag.extmark.stop }
-      end
-
-      local bounds = get_tag_bounds 'outer'
-      assert.are.same(bounds, { start = Pos00.new(0, 0), stop = Pos00.new(0, 29) })
-
-      bounds = get_tag_bounds 'inner'
-      assert.are.same(bounds, { start = Pos00.new(0, 9), stop = Pos00.new(0, 19) })
-    end)
-  end)
-
-  it('should handle components in markup_to_lines', function()
-    local mount_calls = {}
-    local unmount_calls = {}
-
-    --- @param ctx morph.Ctx<{ name: string }, { value: string }>
-    local function TestComponent(ctx)
-      if ctx.phase == 'mount' then
-        ctx.state = { value = 'Hello ' .. ctx.props.name }
-        table.insert(mount_calls, ctx.props.name)
-      elseif ctx.phase == 'unmount' then
-        table.insert(unmount_calls, ctx.props.name)
-      end
-
-      return {
-        h('text', { hl = 'TestHL' }, ctx.state.value),
-        '!',
-      }
-    end
-
-    local tree = {
-      'Prefix: ',
-      h(TestComponent, { name = 'World' }, {}),
-      ' Suffix',
-    }
-
-    local lines = Morph.markup_to_lines { tree = tree }
-
-    -- Check that the text is correct
-    assert.are.same(lines, { 'Prefix: Hello World! Suffix' })
-
-    -- Check that component was mounted and then unmounted
-    assert.are.same(mount_calls, { 'World' })
-    assert.are.same(unmount_calls, { 'World' })
-  end)
-
-  it('should mount and rerender components', function()
-    with_buf({}, function()
-      --- @type any
-      local leaked_ctx = { app = {}, c1 = {}, c2 = {} }
-
-      --- @param ctx morph.Ctx<{ id: string }, { phase: string, count: integer }>
-      local function Counter(ctx)
-        if ctx.phase == 'mount' then ctx.state = { phase = ctx.phase, count = 1 } end
-        local state = assert(ctx.state)
-        state.phase = ctx.phase
-        leaked_ctx[ctx.props.id] = ctx
-
-        return {
-          { 'Value: ', h.Number({}, tostring(state.count)) },
         }
-      end
 
-      --- @param ctx morph.Ctx<{}, { toggle1: boolean, show2: boolean }>
-      function App(ctx)
-        if ctx.phase == 'mount' then ctx.state = { toggle1 = false, show2 = true } end
-        local state = assert(ctx.state)
-        leaked_ctx.app = ctx
+        local tags = r:get_elements_at { 0, 5 }
+        assert.are.same(2, #tags)
+        assert.are.same('inner', tags[1].attributes.id)
+        assert.are.same('outer', tags[2].attributes.id)
+      end)
+    end)
 
-        return {
-          state.toggle1 and 'Toggle1' or h(Counter, { id = 'c1' }, {}),
-          '\n',
+    it('handles empty tags at boundaries', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          'prefix',
+          h('text', { id = 'empty', hl = 'Empty' }, {}),
+          h('text', { id = 'normal', hl = 'Normal' }, 'content'),
+          'suffix',
+        }
 
-          state.show2 and {
+        local tags = r:get_elements_at { 0, 8 }
+        assert.are.same(1, #tags)
+        assert.are.same('normal', tags[1].attributes.id)
+
+        tags = r:get_elements_at { 0, 6 }
+        assert.is_true(#tags >= 0) -- Should not error
+      end)
+    end)
+
+    it('returns correct extmark positions for complex nested structures', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --    00000000001111111111
+        --    0123456789_123456789
+        -- 0: Section 1: important
+        -- 1: Section 2: critical
+        r:render {
+          h('text', { id = 'container', hl = 'Container' }, {
+            h('text', { id = 'section1', hl = 'Section' }, {
+              'Section 1: ',
+              h('text', { id = 'highlight1', hl = 'Highlight' }, 'important'),
+            }),
             '\n',
-            h(Counter, { id = 'c2' }, {}),
-          },
+            h('text', { id = 'section2', hl = 'Section' }, {
+              'Section 2: ',
+              h('text', { id = 'highlight2', hl = 'Highlight' }, 'critical'),
+            }),
+          }),
         }
-      end
 
-      local renderer = Morph.new()
-      renderer:mount(h(App, {}, {}))
+        -- Test extmark positions:
+        local extmarks = r:get_elements_at { 0, 15 } -- position in 'important'
+        assert.are.same(3, #extmarks)
+        assert.are.same('highlight1', extmarks[1].attributes.id) -- innermost first
+        assert.are.same('section1', extmarks[2].attributes.id)
+        assert.are.same('container', extmarks[3].attributes.id) -- outermost last
 
-      assert.are.same(get_lines(), {
-        'Value: 1',
-        '',
-        'Value: 1',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'mount')
-      assert.are.same(leaked_ctx.c2.state.phase, 'mount')
-      leaked_ctx.app:update { toggle1 = true, show2 = true }
-      assert.are.same(get_lines(), {
-        'Toggle1',
-        '',
-        'Value: 1',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'unmount')
-      assert.are.same(leaked_ctx.c2.state.phase, 'update')
+        -- Verify extmark bounds
+        assert.are.same(Pos00.new(0, 11), extmarks[1].extmark.start) -- highlight1 start
+        assert.are.same(Pos00.new(0, 20), extmarks[1].extmark.stop) -- highlight1 stop
+        assert.are.same(Pos00.new(0, 0), extmarks[2].extmark.start) -- section1 start
+        assert.are.same(Pos00.new(0, 20), extmarks[2].extmark.stop) -- section1 stop
+        assert.are.same(Pos00.new(0, 0), extmarks[3].extmark.start) -- container start
+        assert.are.same(Pos00.new(1, 19), extmarks[3].extmark.stop) -- container stop
 
-      leaked_ctx.app:update { toggle1 = true, show2 = false }
-      assert.are.same(get_lines(), {
-        'Toggle1',
-        '',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'unmount')
-      assert.are.same(leaked_ctx.c2.state.phase, 'unmount')
+        -- Test position in second highlight (after newline)
+        extmarks = r:get_elements_at { 1, 15 } -- position in 'critical'
+        assert.are.same(3, #extmarks)
+        assert.are.same('highlight2', extmarks[1].attributes.id)
+        assert.are.same('section2', extmarks[2].attributes.id)
+        assert.are.same('container', extmarks[3].attributes.id)
 
-      leaked_ctx.app:update { toggle1 = false, show2 = true }
-      assert.are.same(get_lines(), {
-        'Value: 1',
-        '',
-        'Value: 1',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'mount')
-      assert.are.same(leaked_ctx.c2.state.phase, 'mount')
+        -- Test position in section text but not in highlight
+        extmarks = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
+        assert.are.same(2, #extmarks)
+        assert.are.same('section1', extmarks[1].attributes.id)
+        assert.are.same('container', extmarks[2].attributes.id)
+      end)
+    end)
 
-      leaked_ctx.c1:update { count = 2 }
-      assert.are.same(get_lines(), {
-        'Value: 2',
-        '',
-        'Value: 1',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'update')
-      assert.are.same(leaked_ctx.c2.state.phase, 'update')
+    it('handles complex nested structures with multiple siblings', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        -- Text:
+        --    00000000001111111111
+        --    0123456789_123456789
+        -- 0: Section 1: important
+        -- 1: Section 2: critical
+        r:render {
+          h('text', { id = 'container', hl = 'Container' }, {
+            h('text', { id = 'section1', hl = 'Section' }, {
+              'Section 1: ',
+              h('text', { id = 'highlight1', hl = 'Highlight' }, 'important'),
+            }),
+            '\n',
+            h('text', { id = 'section2', hl = 'Section' }, {
+              'Section 2: ',
+              h('text', { id = 'highlight2', hl = 'Highlight' }, 'critical'),
+            }),
+          }),
+        }
 
-      leaked_ctx.c2:update { count = 3 }
-      assert.are.same(get_lines(), {
-        'Value: 2',
-        '',
-        'Value: 3',
-      })
-      assert.are.same(leaked_ctx.c1.state.phase, 'update')
-      assert.are.same(leaked_ctx.c2.state.phase, 'update')
+        --- @param id string
+        local function get_tag_bounds(id)
+          local tag = r:get_element_by_id(id)
+          return tag and { start = tag.extmark.start, stop = tag.extmark.stop }
+        end
+
+        -- Test positions via get_element_by_id:
+        assert.are.same(
+          { start = Pos00.new(0, 0), stop = Pos00.new(1, 19) },
+          get_tag_bounds 'container'
+        )
+        assert.are.same(
+          { start = Pos00.new(0, 0), stop = Pos00.new(0, 20) },
+          get_tag_bounds 'section1'
+        )
+        assert.are.same(
+          { start = Pos00.new(0, 11), stop = Pos00.new(0, 20) },
+          get_tag_bounds 'highlight1'
+        )
+        assert.are.same(
+          { start = Pos00.new(1, 0), stop = Pos00.new(1, 19) },
+          get_tag_bounds 'section2'
+        )
+        assert.are.same(
+          { start = Pos00.new(1, 11), stop = Pos00.new(1, 19) },
+          get_tag_bounds 'highlight2'
+        )
+
+        local tags = r:get_elements_at { 0, 15 } -- position in 'important'
+        assert.are.same(3, #tags)
+        assert.are.same('highlight1', tags[1].attributes.id)
+        assert.are.same('section1', tags[2].attributes.id)
+        assert.are.same('container', tags[3].attributes.id)
+
+        -- Test position in second highlight (after newline)
+        tags = r:get_elements_at { 1, 15 } -- position in 'critical'
+        assert.are.same(3, #tags)
+        assert.are.same('highlight2', tags[1].attributes.id)
+        assert.are.same('section2', tags[2].attributes.id)
+        assert.are.same('container', tags[3].attributes.id)
+
+        -- Test position in section text but not in highlight
+        tags = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
+        assert.are.same(2, #tags)
+        assert.are.same('section1', tags[1].attributes.id)
+        assert.are.same('container', tags[2].attributes.id)
+      end)
     end)
   end)
 
-  --
-  -- _expr_map_callback tests
-  --
+  ------------------------------------------------------------------------------
+  -- GET_ELEMENT_BY_ID
+  ------------------------------------------------------------------------------
 
-  it('should handle key-presses only in defined regions', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
+  describe('get_element_by_id', function()
+    it('finds element by id', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { id = 'outer' }, {
+            'inner-pre',
+            h('text', { id = 'inner' }, { 'inner-text' }),
+            'inner-post',
+          }),
+          'post',
+        }
 
-      -- Text
-      -- 00000000011111111112222
-      -- 01345678901234567890123
-      -- prefix clickable suffix
-      r:render {
-        'prefix ',
-        h('text', {
-          id = 'clickable',
-          nmap = {
-            ['<CR>'] = function(e)
-              table.insert(captured_events, { tag_id = e.tag.attributes.id, key = e.lhs })
-              return ''
-            end,
-          },
-        }, 'clickable'),
-        ' suffix',
-      }
+        assert_element_bounds(r, 'outer', Pos00.new(0, 0), Pos00.new(0, 29))
+        assert_element_bounds(r, 'inner', Pos00.new(0, 9), Pos00.new(0, 19))
+      end)
+    end)
 
-      -- Test keypress inside the clickable region
-      set_cursor { 1, 12 } -- position in 'clickable'
-      local result = r:_expr_map_callback('n', '<CR>')
-      assert.are.same(result, '')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].tag_id, 'clickable')
-      assert.are.same(captured_events[1].key, '<CR>')
+    it('returns nil for non-existent id', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { h('text', { id = 'exists' }, 'content') }
 
-      -- Test keypress outside the clickable region (in prefix)
-      captured_events = {}
-      set_cursor { 1, 2 } -- position in 'prefix'
-      local result = r:_expr_map_callback('n', '<CR>')
-      assert.are.same(result, '<CR>') -- should return the original key
-      assert.are.same(#captured_events, 0) -- no events captured
-
-      -- Test keypress outside the clickable region (in suffix)
-      captured_events = {}
-      set_cursor { 1, 17 } -- position in 'suffix'
-      local result = r:_expr_map_callback('n', '<CR>')
-      assert.are.same(result, '<CR>') -- should return the original key
-      assert.are.same(#captured_events, 0) -- no events captured
+        assert.is_not_nil(r:get_element_by_id 'exists')
+        assert.is_nil(r:get_element_by_id 'does-not-exist')
+      end)
     end)
   end)
 
-  it('should handle multiple overlapping regions with different key-maps', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
+  ------------------------------------------------------------------------------
+  -- EXTMARK EDGE CASES
+  ------------------------------------------------------------------------------
 
-      -- Text
-      -- 00000000001111111111
-      -- 01234567890123456789
-      -- outer inner text end
-      r:render {
-        h('text', {
-          id = 'outer',
-          nmap = {
-            ['x'] = function(e)
-              table.insert(
-                captured_events,
-                { tag_id = e.tag.attributes.id, key = e.lhs, bubble = e.bubble_up }
-              )
-              return 'outer-x'
-            end,
-          },
-        }, {
-          'outer ',
+  describe('extmark edge cases', function()
+    it('handles extmarks at buffer boundaries', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { id = 'start-boundary' }, 'start'),
+          ' middle ',
+          h('text', { id = 'end-boundary' }, 'end'),
+        }
+
+        assert.are.same({ 'start middle end' }, get_lines())
+        assert_element_bounds(r, 'start-boundary', Pos00.new(0, 0), Pos00.new(0, 5))
+        assert_element_bounds(r, 'end-boundary', Pos00.new(0, 13), Pos00.new(0, 16))
+
+        r:render {
+          'prefix ',
+          h('text', { id = 'buffer-end' }, 'at-end'),
+        }
+
+        assert_element_bounds(r, 'buffer-end', Pos00.new(0, 7), Pos00.new(0, 13))
+      end)
+    end)
+
+    it('handles zero-width extmarks', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_events = {}
+
+        r:render {
+          'before',
           h('text', {
-            id = 'inner',
-            nmap = {
-              ['x'] = function(e)
-                table.insert(
-                  captured_events,
-                  { tag_id = e.tag.attributes.id, key = e.lhs, bubble = e.bubble_up }
-                )
-                return 'inner-x'
+            id = 'zero-width',
+            on_change = function(e)
+              table.insert(captured_events, { id = 'zero-width', text = e.text })
+            end,
+          }, ''),
+          'after',
+        }
+
+        assert.are.same({ 'beforeafter' }, get_lines())
+
+        local zero_elem = r:get_element_by_id 'zero-width'
+        assert.is_not_nil(zero_elem)
+        assert.are.same(Pos00.new(0, 6), zero_elem.extmark.start)
+        assert.are.same(Pos00.new(0, 6), zero_elem.extmark.stop)
+
+        -- Can detect zero-width extmark at its position
+        local elements = r:get_elements_at { 0, 6 }
+        assert.are.same(1, #elements)
+        assert.are.same('zero-width', elements[1].attributes.id)
+
+        -- Inserting text triggers on_change
+        set_text(0, 6, 0, 6, { 'inserted' })
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('beforeinsertedafter', get_text())
+        assert.are.same(1, #captured_events)
+        assert.are.same('inserted', captured_events[1].text)
+      end)
+    end)
+
+    it('handles extmark spanning multiple lines', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          h('text', { id = 'multiline' }, {
+            'line 1\n',
+            'line 2\n',
+            'line 3',
+          }),
+        }
+
+        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+
+        local elem = r:get_element_by_id 'multiline'
+        assert.is_not_nil(elem)
+        assert.are.same(Pos00.new(0, 0), elem.extmark.start)
+        assert.are.same(Pos00.new(2, 6), elem.extmark.stop)
+        assert.are.same('line 1\nline 2\nline 3', elem.extmark:_text())
+      end)
+    end)
+
+    it('handles blank lines at end of buffer text', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = ''
+
+        r:render {
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, {
+            'line 1\n',
+            'line 2\n',
+            '\n',
+          }),
+        }
+
+        assert.are.same({ 'line 1', 'line 2', '', '' }, get_lines())
+
+        local elems = r:get_elements_at { 0, 1 }
+        assert.are.same(1, #elems)
+        assert.are.same(Pos00.new(0, 0), elems[1].extmark.start)
+        assert.are.same(Pos00.new(3, 0), elems[1].extmark.stop)
+
+        -- extmark:_text() handles blank lines at end correctly
+        assert.are.same('line 1\nline 2\n\n', elems[1].extmark:_text())
+
+        set_text(0, 0, 3, 0, { 'modified content' })
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('modified content', get_text())
+        assert.are.same('modified content', captured_changed_text)
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- MULTI-BYTE CHARACTER HANDLING
+  ------------------------------------------------------------------------------
+
+  describe('multi-byte characters', function()
+    it('calculates correct extmark boundaries for emojis, CJK, and combining chars', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+
+        local emoji_text = '🚀🌟'
+        local cjk_text = '你好世界'
+        local combining_text = 'é' -- e + combining acute accent
+
+        r:render {
+          h('text', { id = 'emoji-tag' }, emoji_text),
+          ' ',
+          h('text', { id = 'cjk-tag' }, cjk_text),
+          ' ',
+          h('text', { id = 'combining-tag' }, combining_text),
+        }
+
+        local expected_text = emoji_text .. ' ' .. cjk_text .. ' ' .. combining_text
+        assert.are.same(expected_text, get_text())
+
+        local emoji_elem = r:get_element_by_id 'emoji-tag'
+        local cjk_elem = r:get_element_by_id 'cjk-tag'
+        local combining_elem = r:get_element_by_id 'combining-tag'
+
+        assert.is_not_nil(emoji_elem)
+        assert.is_not_nil(cjk_elem)
+        assert.is_not_nil(combining_elem)
+
+        assert.are.same(emoji_text, emoji_elem.extmark:_text())
+        assert.are.same(cjk_text, cjk_elem.extmark:_text())
+        assert.are.same(combining_text, combining_elem.extmark:_text())
+      end)
+    end)
+
+    it('handles cursor positioning in multi-byte sequences', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+
+        r:render {
+          'ASCII',
+          h('text', { id = 'mixed', hl = 'Test' }, '🎯中文'),
+          'more',
+        }
+
+        assert.are.same('ASCII🎯中文more', get_text())
+
+        local mixed_elem = r:get_element_by_id 'mixed'
+        assert.is_not_nil(mixed_elem)
+
+        local elements_at_start = r:get_elements_at { 0, 5 }
+        assert.are.same(1, #elements_at_start)
+        assert.are.same('mixed', elements_at_start[1].attributes.id)
+
+        local elements_in_middle = r:get_elements_at { 0, 7 }
+        if #elements_in_middle > 0 then
+          assert.are.same('mixed', elements_in_middle[1].attributes.id)
+        end
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- ON_CHANGE EVENTS
+  --
+  -- Tests for text change detection and event bubbling.
+  ------------------------------------------------------------------------------
+
+  describe('on_change events', function()
+    it('fires when text is replaced', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = ''
+
+        -- Text:
+        --   01234
+        -- 0 one
+        -- 1 two
+        -- 2 three
+        -- 3
+        r:render {
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, {
+            'one\n',
+            'two\n',
+            'three\n',
+          }),
+        }
+
+        local elems = r:get_elements_at { 0, 1 }
+        assert.are.same(1, #elems)
+        assert.are.same(Pos00.new(0, 0), elems[1].extmark.start)
+        assert.are.same(Pos00.new(3, 0), elems[1].extmark.stop)
+
+        vim.fn.setreg('"', 'bleh')
+        vim.cmd [[normal! ggVGp]]
+
+        assert.are.same(1, line_count())
+        elems = r:get_elements_at { 0, 1 }
+        assert.are.same(1, #elems)
+
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('bleh', get_text())
+        assert.are.same('bleh', captured_changed_text)
+
+        vim.fn.setreg('"', '')
+        vim.cmd [[normal! ggdG]]
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('', get_text())
+        assert.are.same('', captured_changed_text)
+      end)
+    end)
+
+    it('fires when text is deleted', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        --- @type string?
+        local captured_changed_text = nil
+        r:render {
+          'prefix:',
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, { 'one' }),
+          'suffix',
+        }
+
+        vim.fn.setreg('"', 'bleh')
+        set_cursor { 1, 9 }
+        vim.cmd [[normal! vhhd]]
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('prefix:suffix', get_text())
+        assert.are.same('', captured_changed_text)
+      end)
+    end)
+
+    it('fires when newline is inserted', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = nil
+
+        r:render {
+          'Search [',
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, 'filter'),
+          ']',
+        }
+
+        assert.are.same({ 'Search [filter]' }, get_lines())
+
+        set_text(0, 14, 0, 14, { '', '' })
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same({ 'Search [filter', ']' }, get_lines())
+        assert.are.same('filter\n', captured_changed_text)
+      end)
+    end)
+
+    it('fires with empty string when tag text is deleted entirely', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = nil
+
+        -- Text structure: "Search: input_text"
+        -- The input tag is at the end of the line
+        r:render {
+          'Search: ',
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, 'input_text'),
+        }
+
+        assert.are.same({ 'Search: input_text' }, get_lines())
+
+        -- Delete the input text at the end of the line
+        -- This should trigger on_change with an empty string
+        set_text(0, 8, 0, 18, {})
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('Search: ', get_text())
+        assert.are.same('', captured_changed_text)
+
+        -- Test with different end position
+        r:render {
+          'Filter: ',
+          h('text', {
+            on_change = function(e) captured_changed_text = e.text end,
+          }, 'query'),
+        }
+
+        captured_changed_text = nil
+        assert.are.same({ 'Filter: query' }, get_lines())
+
+        -- Delete just the query part
+        set_text(0, 8, 0, 13, {})
+        vim.cmd.doautocmd 'TextChanged'
+
+        assert.are.same('Filter: ', get_text())
+        assert.are.same('', captured_changed_text)
+      end)
+    end)
+
+    it('detects change when new text has same length as original', function()
+      with_buf({}, function()
+        local captured_changed_text = ''
+
+        --- @param _ctx morph.Ctx
+        local function App(_ctx)
+          return {
+            h('text', {
+              id = 'the-id',
+              on_change = function(e)
+                e.bubble_up = false
+                captured_changed_text = e.text
               end,
-            },
-          }, 'inner'),
-          ' text',
-        }),
-        ' end',
-      }
+            }, { 'hello' }),
+          }
+        end
+        local r = Morph.new()
+        r:mount(h(App))
 
-      -- Test keypress in inner region - should trigger inner handler first
-      set_cursor { 1, 8 } -- position in 'inner'
-      local result = r:_expr_map_callback('n', 'x')
-      assert.are.same(result, 'inner-x')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].tag_id, 'inner')
+        assert.are.same('hello', get_text())
 
-      -- Test keypress in outer region but not inner
-      captured_events = {}
-      set_cursor { 1, 2 } -- position in 'outer '
-      local result = r:_expr_map_callback('n', 'x')
-      assert.are.same(result, 'outer-x')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].tag_id, 'outer')
+        set_text(0, 4, 0, 5, { 'p' })
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('hellp', get_text())
+        assert.are.same('hellp', captured_changed_text)
+      end)
+    end)
 
-      -- Test keypress outside both regions
-      captured_events = {}
-      set_cursor { 1, 18 } -- position in ' end'
-      local result = r:_expr_map_callback('n', 'x')
-      assert.are.same(result, 'x') -- should return original key
-      assert.are.same(#captured_events, 0)
+    it('detects change when text changes back to original content', function()
+      with_buf({}, function()
+        local captured_changed_text = ''
+
+        --- @param _ctx morph.Ctx
+        local function App2(_ctx)
+          return {
+            h('text', {
+              id = 'the-id',
+              on_change = function(e)
+                e.bubble_up = false
+                captured_changed_text = e.text
+              end,
+            }, { 'hello' }),
+          }
+        end
+        local r = Morph.new()
+        r:mount(h(App2))
+
+        assert.are.same('hello', get_text())
+
+        set_text(0, 4, 0, 5, {})
+        assert.are.same('hell', get_text())
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('hell', captured_changed_text)
+
+        set_text(0, 4, 0, 4, { 'o' })
+        assert.are.same('hello', get_text())
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('hello', captured_changed_text)
+      end)
+    end)
+
+    describe('event bubbling', function()
+      it('fires handlers from inner to outer, not affecting siblings', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local captured_events = {}
+
+          -- Text:
+          --   0         1         2
+          --   0123456789012345678901234567890
+          --   sibling outer middle inner
+          local function reset_render()
+            r:render {
+              h('text', {
+                id = 'sibling',
+                on_change = function(e)
+                  table.insert(captured_events, { id = 'sibling', text = e.text })
+                end,
+              }, 'sibling'),
+              ' ',
+              h('text', {
+                id = 'outer',
+                on_change = function(e)
+                  table.insert(captured_events, { id = 'outer', text = e.text })
+                end,
+              }, {
+                'outer ',
+                h('text', { id = 'middle' }, {
+                  'middle ',
+                  h('text', {
+                    id = 'inner',
+                    on_change = function(e)
+                      table.insert(captured_events, { id = 'inner', text = e.text })
+                    end,
+                  }, 'inner'),
+                }),
+              }),
+            }
+          end
+          reset_render()
+
+          -- Change innermost element -> fires inner then outer
+          captured_events = {}
+          set_text(0, 21, 0, 26, { 'changed' })
+          assert.are.same({ 'sibling outer middle changed' }, get_lines())
+          vim.cmd.doautocmd 'TextChanged'
+
+          assert.are.same(2, #captured_events)
+          assert.are.same('inner', captured_events[1].id)
+          assert.are.same('changed', captured_events[1].text)
+          assert.are.same('outer', captured_events[2].id)
+          assert.are.same('outer middle changed', captured_events[2].text)
+
+          -- Change sibling -> only sibling handler fires
+          reset_render()
+          captured_events = {}
+          set_text(0, 0, 0, 7, { 'modified' })
+          assert.are.same({ 'modified outer middle inner' }, get_lines())
+          vim.cmd.doautocmd 'TextChanged'
+
+          assert.are.same(1, #captured_events)
+          assert.are.same('sibling', captured_events[1].id)
+          assert.are.same('modified', captured_events[1].text)
+
+          -- Change middle (no handler) -> only outer handler fires
+          reset_render()
+          captured_events = {}
+          set_text(0, 14, 0, 20, { 'center' })
+          assert.are.same({ 'sibling outer center inner' }, get_lines())
+          vim.cmd.doautocmd 'TextChanged'
+
+          assert.are.same(1, #captured_events)
+          assert.are.same('outer', captured_events[1].id)
+          assert.are.same('outer center inner', captured_events[1].text)
+        end)
+      end)
+
+      it('bubbles through multiple nested levels', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local events = {}
+
+          r:render {
+            h('text', {
+              id = 'level1',
+              on_change = function(e) table.insert(events, { level = 1, text = e.text }) end,
+            }, {
+              h('text', {
+                id = 'level2',
+                on_change = function(e) table.insert(events, { level = 2, text = e.text }) end,
+              }, {
+                h('text', {
+                  id = 'level3',
+                  on_change = function(e) table.insert(events, { level = 3, text = e.text }) end,
+                }, 'inner'),
+              }),
+            }),
+          }
+
+          set_text(0, 0, 0, 5, { 'changed' })
+          vim.cmd.doautocmd 'TextChanged'
+
+          assert.are.same(3, #events)
+          assert.are.same(3, events[1].level)
+          assert.are.same(2, events[2].level)
+          assert.are.same(1, events[3].level)
+        end)
+      end)
+
+      it('stops bubbling when bubble_up is set to false', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local events = {}
+
+          r:render {
+            h('text', {
+              id = 'outer',
+              on_change = function(e) table.insert(events, { id = 'outer', text = e.text }) end,
+            }, {
+              h('text', {
+                id = 'inner',
+                on_change = function(e)
+                  table.insert(events, { id = 'inner', text = e.text })
+                  e.bubble_up = false
+                end,
+              }, 'text'),
+            }),
+          }
+
+          set_text(0, 0, 0, 4, { 'new' })
+          vim.cmd.doautocmd 'TextChanged'
+
+          assert.are.same(1, #events)
+          assert.are.same('inner', events[1].id)
+        end)
+      end)
     end)
   end)
 
-  it('should handle bubble_up behavior correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
+  ------------------------------------------------------------------------------
+  -- KEYPRESS DISPATCH
+  --
+  -- Tests for _dispatch_keypress routing keypresses to element handlers.
+  ------------------------------------------------------------------------------
 
-      -- Text:
-      -- 000000000011111
-      -- 012345678901234
-      -- start inner end
-      -- --------------- outer
-      --       -----     inner
-      r:render {
-        h('text', {
-          id = 'outer',
-          nmap = {
-            ['b'] = function(e)
-              table.insert(captured_events, { tag_id = e.tag.attributes.id, key = e.lhs })
-              return 'b'
-            end,
-          },
-        }, {
-          'start ',
+  describe('keypress dispatch', function()
+    it('returns original key when no elements at cursor', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'plain text without handlers' }
+
+        set_cursor { 1, 5 }
+        local result = r:_dispatch_keypress('n', '<CR>')
+        assert.are.same('<CR>', result)
+      end)
+    end)
+
+    it('only triggers handlers in defined regions', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_events = {}
+
+        -- Text:
+        --   0         1         2
+        --   01345678901234567890123
+        --   prefix clickable suffix
+        r:render {
+          'prefix ',
           h('text', {
-            id = 'inner',
+            id = 'clickable',
             nmap = {
-              ['b'] = function(e)
+              ['<CR>'] = function(e)
                 table.insert(captured_events, { tag_id = e.tag.attributes.id, key = e.lhs })
-                e.bubble_up = true -- allow bubbling to outer
                 return ''
               end,
             },
-          }, 'inner'),
-          ' end',
-        }),
-      }
+          }, 'clickable'),
+          ' suffix',
+        }
 
-      -- Test bubble up behavior
-      set_cursor { 1, 8 } -- position in 'inner'
-      local result = r:_expr_map_callback('n', 'b')
-      assert.are.same(result, 'b')
-      assert.are.same(#captured_events, 2)
-      assert.are.same(captured_events[1].tag_id, 'inner')
-      assert.are.same(captured_events[2].tag_id, 'outer')
+        -- Inside clickable region
+        set_cursor { 1, 12 }
+        local result = r:_dispatch_keypress('n', '<CR>')
+        assert.are.same('', result)
+        assert.are.same(1, #captured_events)
+        assert.are.same('clickable', captured_events[1].tag_id)
+        assert.are.same('<CR>', captured_events[1].key)
+
+        -- In prefix (outside)
+        captured_events = {}
+        set_cursor { 1, 2 }
+        result = r:_dispatch_keypress('n', '<CR>')
+        assert.are.same('<CR>', result)
+        assert.are.same(0, #captured_events)
+
+        -- In suffix (outside)
+        captured_events = {}
+        set_cursor { 1, 17 }
+        result = r:_dispatch_keypress('n', '<CR>')
+        assert.are.same('<CR>', result)
+        assert.are.same(0, #captured_events)
+      end)
     end)
-  end)
 
-  it('should handle no bubble_up behavior correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
+    it('triggers innermost handler first for overlapping regions', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_events = {}
 
-      -- Text:
-      -- 000000000011111
-      -- 012345678901234
-      -- start inner end
-      -- --------------- outer
-      --       -----     inner
-      r:render {
-        h('text', {
-          id = 'outer',
-          nmap = {
-            ['c'] = function(e)
-              table.insert(captured_events, { tag_id = e.tag.attributes.id, key = e.lhs })
-              return 'outer-handled'
-            end,
-          },
-        }, {
-          'start ',
+        -- Text:
+        --   0         1
+        --   01234567890123456789
+        --   outer inner text end
+        r:render {
           h('text', {
-            id = 'inner',
+            id = 'outer',
             nmap = {
-              ['c'] = function(e)
-                table.insert(captured_events, { tag_id = e.tag.attributes.id, key = e.lhs })
-                e.bubble_up = false -- prevent bubbling
-                return 'inner-handled'
+              ['x'] = function(e)
+                table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                return 'outer-x'
               end,
             },
-          }, 'inner'),
-          ' end',
-        }),
-      }
-
-      -- Test no bubble up behavior
-      set_cursor { 1, 8 } -- position in 'inner'
-      local result = r:_expr_map_callback('n', 'c')
-      assert.are.same(result, 'inner-handled')
-      assert.are.same(#captured_events, 1) -- only inner should be called
-      assert.are.same(captured_events[1].tag_id, 'inner')
-    end)
-  end)
-
-  it('should handle different modes correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
-
-      -- Text:
-      -- 0123
-      -- text
-      r:render {
-        h('text', {
-          id = 'multi-mode',
-          nmap = {
-            ['m'] = function(e)
-              table.insert(captured_events, { tag_id = e.tag.attributes.id, mode = e.mode })
-              return 'normal-mode'
-            end,
-          },
-          imap = {
-            ['m'] = function(e)
-              table.insert(captured_events, { tag_id = e.tag.attributes.id, mode = e.mode })
-              return 'insert-mode'
-            end,
-          },
-        }, 'text'),
-      }
-
-      set_cursor { 1, 2 } -- position in 'text'
-
-      -- Test normal mode
-      local result = r:_expr_map_callback('n', 'm')
-      assert.are.same(result, 'normal-mode')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].mode, 'n')
-
-      -- Test insert mode
-      captured_events = {}
-      local result = r:_expr_map_callback('i', 'm')
-      assert.are.same(result, 'insert-mode')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].mode, 'i')
-
-      -- Test mode that has no handler
-      captured_events = {}
-      local result = r:_expr_map_callback('v', 'm')
-      assert.are.same(result, 'm') -- should return original key
-      assert.are.same(#captured_events, 0)
-    end)
-  end)
-
-  it('should handle empty keypress cancellation', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-
-      -- Text:
-      -- 00000000001111111
-      -- 01234567890123456
-      -- cancelable normal
-      -- ----------        #cancel-key
-      r:render {
-        h('text', {
-          id = 'cancel-key',
-          nmap = {
-            ['z'] = function()
-              return '' -- cancel the keypress
-            end,
-          },
-        }, 'cancelable'),
-        ' normal',
-      }
-
-      -- Test keypress cancellation in the region
-      set_cursor { 1, 3 } -- position in 'cancelable'
-      local result = r:_expr_map_callback('n', 'z')
-      assert.are.same(result, '')
-
-      -- Test normal keypress outside the region
-      set_cursor { 1, 12 } -- position in ' normal'
-      local result = r:_expr_map_callback('n', 'z')
-      assert.are.same(result, 'z') -- should return original key
-    end)
-  end)
-
-  it('should handle blank lines at the end of buffer text', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = ''
-
-      -- Render content with blank lines at the end
-      r:render {
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, {
-          'line 1\n',
-          'line 2\n',
-          '\n',
-        }),
-      }
-
-      assert.are.same(get_lines(), { 'line 1', 'line 2', '', '' })
-
-      -- Test that getregion works correctly with blank lines at end
-      local elems = r:get_elements_at { 0, 1 }
-      assert.are.same(#elems, 1)
-      assert.are.same(elems[1].extmark.start, Pos00.new(0, 0))
-      assert.are.same(elems[1].extmark.stop, Pos00.new(3, 0))
-
-      -- The extmark ends on a blank line, at column 0, which has tripped up
-      -- the translated call to getregion in Extmark:_text() in the past. This
-      -- is the main reason for this test: to check this case:
-      assert.are.same(elems[1].extmark:_text(), 'line 1\nline 2\n\n')
-
-      -- Modify the text and ensure on_change fires correctly
-      set_text(0, 0, 3, 0, { 'modified content' })
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'modified content')
-      assert.are.same(captured_changed_text, 'modified content')
-    end)
-  end)
-
-  it('should handle 0-column position in extmark when text follows', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = nil
-
-      -- Text structure: "Search [filter]"
-      r:render {
-        'Search [',
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, 'filter'),
-        ']',
-      }
-
-      assert.are.same(get_lines(), { 'Search [filter]' })
-
-      -- Insert a newline at the end of 'filter'
-      set_text(0, 14, 0, 14, { '', '' })
-      r.buf_watcher.fire()
-
-      assert.are.same(get_lines(), { 'Search [filter', ']' })
-      assert.are.same(captured_changed_text, 'filter\n')
-    end)
-  end)
-
-  it('should handle on_change events for tags at end of line', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = nil
-
-      -- Text structure: "Search: input_text"
-      -- The input tag is at the end of the line
-      r:render {
-        'Search: ',
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, 'input_text'),
-      }
-
-      assert.are.same(get_lines(), { 'Search: input_text' })
-
-      -- Delete the input text at the end of the line
-      -- This should trigger on_change with an empty string
-      set_text(0, 8, 0, 18, {})
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'Search: ')
-      assert.are.same(captured_changed_text, '')
-
-      -- Test with different end position
-      r:render {
-        'Filter: ',
-        h('text', {
-          on_change = function(e) captured_changed_text = e.text end,
-        }, 'query'),
-      }
-
-      captured_changed_text = nil
-      assert.are.same(get_lines(), { 'Filter: query' })
-
-      -- Delete just the query part
-      set_text(0, 8, 0, 13, {})
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'Filter: ')
-      assert.are.same(captured_changed_text, '')
-    end)
-  end)
-
-  it('should recognize a text-change when length of changed text == length of original', function()
-    with_buf({}, function()
-      local captured_changed_text = ''
-
-      -- Text:
-      -- 01234
-      -- hello
-      --- @param ctx morph.Ctx
-      local function App(ctx)
-        return {
-          h('text', {
-            id = 'the-id',
-            on_change = function(e)
-              e.bubble_up = false
-              captured_changed_text = e.text
-            end,
-          }, { 'hello' }),
-        }
-      end
-      local r = Morph.new()
-      r:mount(h(App))
-
-      assert.are.same(get_text(), 'hello')
-
-      -- Replace the trailing 'o' with 'p':
-      set_text(0, 4, 0, 5, { 'p' })
-      r.buf_watcher.fire()
-      assert.are.same(get_text(), 'hellp')
-      assert.are.same(captured_changed_text, 'hellp')
-    end)
-  end)
-
-  it('should recognize a text-change when text changes back to original content', function()
-    with_buf({}, function()
-      local captured_changed_text = ''
-
-      -- Text:
-      -- 01234
-      -- hello
-      --- @param ctx morph.Ctx
-      local function App(ctx)
-        return {
-          h('text', {
-            id = 'the-id',
-            on_change = function(e)
-              e.bubble_up = false
-              captured_changed_text = e.text
-            end,
-          }, { 'hello' }),
-        }
-      end
-      local r = Morph.new()
-      r:mount(h(App))
-
-      assert.are.same(get_text(), 'hello')
-
-      -- Delete the trailing 'o':
-      set_text(0, 4, 0, 5, {})
-      assert.are.same(get_text(), 'hell')
-      r.buf_watcher.fire()
-      assert.are.same(captured_changed_text, 'hell')
-
-      -- Reinsert the trailing 'o':
-      set_text(0, 4, 0, 4, { 'o' })
-      assert.are.same(get_text(), 'hello')
-      r.buf_watcher.fire()
-      assert.are.same(captured_changed_text, 'hello')
-    end)
-  end)
-
-  -- Edge case tests for extmarks at buffer boundaries
-  it('should handle extmarks at buffer boundaries correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-
-      -- Test extmark starting at (0,0)
-      r:render {
-        h('text', { id = 'start-boundary' }, 'start'),
-        ' middle ',
-        h('text', { id = 'end-boundary' }, 'end'),
-      }
-
-      assert.are.same(get_lines(), { 'start middle end' })
-
-      local start_elem = r:get_element_by_id 'start-boundary'
-      assert.is_not_nil(start_elem)
-      assert.are.same(start_elem.extmark.start, Pos00.new(0, 0))
-      assert.are.same(start_elem.extmark.stop, Pos00.new(0, 5))
-
-      local end_elem = r:get_element_by_id 'end-boundary'
-      assert.is_not_nil(end_elem)
-      assert.are.same(end_elem.extmark.start, Pos00.new(0, 13))
-      assert.are.same(end_elem.extmark.stop, Pos00.new(0, 16))
-
-      -- Test extmark at very end of buffer
-      r:render {
-        'prefix ',
-        h('text', { id = 'buffer-end' }, 'at-end'),
-      }
-
-      local end_elem = r:get_element_by_id 'buffer-end'
-      assert.is_not_nil(end_elem)
-      assert.are.same(end_elem.extmark.start, Pos00.new(0, 7))
-      assert.are.same(end_elem.extmark.stop, Pos00.new(0, 13))
-    end)
-  end)
-
-  -- Edge case tests for zero-width extmarks
-  it('should handle zero-width extmarks correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
-
-      -- Create a zero-width extmark by rendering empty content
-      r:render {
-        'before',
-        h('text', {
-          id = 'zero-width',
-          on_change = function(e)
-            table.insert(captured_events, { id = 'zero-width', text = e.text })
-          end,
-        }, ''),
-        'after',
-      }
-
-      assert.are.same(get_lines(), { 'beforeafter' })
-
-      local zero_elem = r:get_element_by_id 'zero-width'
-      assert.is_not_nil(zero_elem)
-      assert.are.same(zero_elem.extmark.start, Pos00.new(0, 6))
-      assert.are.same(zero_elem.extmark.stop, Pos00.new(0, 6))
-
-      -- Test that we can still detect the zero-width extmark at its position
-      local elements = r:get_elements_at { 0, 6 }
-      assert.are.same(#elements, 1)
-      assert.are.same(elements[1].attributes.id, 'zero-width')
-
-      -- Test inserting text at the zero-width position
-      set_text(0, 6, 0, 6, { 'inserted' })
-      r.buf_watcher.fire()
-
-      assert.are.same(get_text(), 'beforeinsertedafter')
-      assert.are.same(#captured_events, 1)
-      assert.are.same(captured_events[1].text, 'inserted')
-    end)
-  end)
-
-  -- Edge case tests for multi-byte characters
-  it('should handle multi-byte characters correctly', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_events = {}
-
-      -- Test with emojis, CJK characters, and combining characters
-      local emoji_text = '🚀🌟'
-      local cjk_text = '你好世界'
-      local combining_text = 'é' -- e + combining acute accent
-
-      r:render {
-        h('text', {
-          id = 'emoji-tag',
-          on_change = function(e)
-            table.insert(captured_events, { id = 'emoji-tag', text = e.text })
-          end,
-        }, emoji_text),
-        ' ',
-        h('text', {
-          id = 'cjk-tag',
-          on_change = function(e) table.insert(captured_events, { id = 'cjk-tag', text = e.text }) end,
-        }, cjk_text),
-        ' ',
-        h('text', {
-          id = 'combining-tag',
-          on_change = function(e)
-            table.insert(captured_events, { id = 'combining-tag', text = e.text })
-          end,
-        }, combining_text),
-      }
-
-      local expected_text = emoji_text .. ' ' .. cjk_text .. ' ' .. combining_text
-      assert.are.same(get_text(), expected_text)
-
-      -- Test that extmark boundaries are calculated correctly for multi-byte chars
-      local emoji_elem = r:get_element_by_id 'emoji-tag'
-      local cjk_elem = r:get_element_by_id 'cjk-tag'
-      local combining_elem = r:get_element_by_id 'combining-tag'
-
-      assert.is_not_nil(emoji_elem)
-      assert.is_not_nil(cjk_elem)
-      assert.is_not_nil(combining_elem)
-
-      assert.are.same(emoji_elem.extmark:_text(), emoji_text)
-      assert.are.same(cjk_elem.extmark:_text(), cjk_text)
-      assert.are.same(combining_elem.extmark:_text(), combining_text)
-    end)
-  end)
-
-  -- Additional test for multi-byte character edge cases
-  it('should handle multi-byte character boundaries and cursor positioning', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-
-      -- Test with a mix of ASCII and multi-byte characters
-      r:render {
-        'ASCII',
-        h('text', { id = 'mixed', hl = 'Test' }, '🎯中文'),
-        'more',
-      }
-
-      assert.are.same(get_text(), 'ASCII🎯中文more')
-
-      local mixed_elem = r:get_element_by_id 'mixed'
-      assert.is_not_nil(mixed_elem)
-
-      -- Test cursor positioning at various points in the multi-byte sequence
-      local elements_at_start = r:get_elements_at { 0, 5 } -- Start of emoji
-      assert.are.same(#elements_at_start, 1)
-      assert.are.same(elements_at_start[1].attributes.id, 'mixed')
-
-      -- Test that we can handle positions that might fall in the middle of multi-byte chars
-      -- (though Neovim should handle this gracefully)
-      local elements_in_middle = r:get_elements_at { 0, 7 } -- Somewhere in the multi-byte sequence
-      if #elements_in_middle > 0 then
-        assert.are.same(elements_in_middle[1].attributes.id, 'mixed')
-      end
-    end)
-  end)
-
-  it('should handle undo/redo', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-
-      local captured_changed_text = ''
-
-      --- @param ctx morph.Ctx
-      local function App(ctx)
-        return {
-          'Search: [',
-          h('text', {
-            id = 'filter',
-            on_change = function(e) captured_changed_text = e.text end,
-          }, ''),
-          ']',
-        }
-      end
-
-      r:mount(h(App))
-      local filter_elem = assert(r:get_element_by_id 'filter')
-      assert.are.same(get_text(), 'Search: []')
-      assert.are.same(filter_elem.extmark:_text(), '')
-      set_cursor { filter_elem.extmark.start[1] + 1, filter_elem.extmark.start[2] }
-
-      -- Insert text:
-      vim.api.nvim_feedkeys('ifilter', 'ntx', false)
-      r.buf_watcher.fire()
-      assert.are.same(captured_changed_text, 'filter')
-
-      filter_elem = assert(r:get_element_by_id 'filter')
-      assert.are.same(filter_elem.extmark:_text(), 'filter')
-      assert.are.same(get_text(), 'Search: [filter]')
-
-      -- Undo change:
-      vim.cmd.undo()
-      assert.are.same(get_text(), 'Search: []')
-      r.buf_watcher.fire()
-      assert.are.same(captured_changed_text, '')
-
-      filter_elem = assert(r:get_element_by_id 'filter')
-      assert.are.same(filter_elem.extmark:_text(), '')
-
-      -- Redo change:
-      vim.cmd.redo()
-      r.buf_watcher.fire()
-      assert.are.same(captured_changed_text, 'filter')
-
-      filter_elem = assert(r:get_element_by_id 'filter')
-      assert.are.same(filter_elem.extmark:_text(), 'filter')
-      assert.are.same(get_text(), 'Search: [filter]')
-    end)
-  end)
-
-  it('should execute do_after_render callbacks immediately after mount', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local callback_executed = false
-      local callback_execution_order = {}
-
-      --- @param ctx morph.Ctx
-      local function TestComponent(ctx)
-        if ctx.phase == 'mount' then
-          ctx:do_after_render(function()
-            callback_executed = true
-            table.insert(callback_execution_order, 'callback')
-          end)
-          table.insert(callback_execution_order, 'component-render')
-        end
-
-        return {
-          h('text', { id = 'test-text' }, 'Hello World'),
-        }
-      end
-
-      -- Mount the component
-      r:mount(h(TestComponent))
-      table.insert(callback_execution_order, 'after-mount')
-
-      -- Verify the callback was executed
-      assert.is_true(callback_executed)
-
-      -- Verify the execution order: component render, then callback, then after mount
-      assert.are.same(callback_execution_order, {
-        'component-render',
-        'callback',
-        'after-mount',
-      })
-
-      -- Verify the component was actually rendered
-      assert.are.same(get_text(), 'Hello World')
-      local test_elem = r:get_element_by_id 'test-text'
-      assert.is_not_nil(test_elem)
-    end)
-  end)
-
-  it('should execute multiple do_after_render callbacks in registration order', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local execution_order = {}
-
-      --- @param ctx morph.Ctx
-      local function TestComponent(ctx)
-        if ctx.phase == 'mount' then
-          -- Register multiple callbacks
-          ctx:do_after_render(function() table.insert(execution_order, 'first-callback') end)
-
-          ctx:do_after_render(function() table.insert(execution_order, 'second-callback') end)
-
-          ctx:do_after_render(function() table.insert(execution_order, 'third-callback') end)
-        end
-
-        return {
-          h('text', { id = 'test' }, 'Multiple callbacks'),
-        }
-      end
-
-      -- Mount the component
-      r:mount(h(TestComponent))
-
-      -- Verify all callbacks were executed in the correct order
-      assert.are.same(execution_order, {
-        'first-callback',
-        'second-callback',
-        'third-callback',
-      })
-      assert.are.same(get_text(), 'Multiple callbacks')
-    end)
-  end)
-
-  it('should automatically unmount components when buffer is deleted', function()
-    local unmount_calls = {}
-    local mount_calls = {}
-
-    --- @param ctx morph.Ctx<any, { value: string }>
-    local function TestComponent(ctx)
-      if ctx.phase == 'mount' then
-        table.insert(mount_calls, ctx.props.name)
-      elseif ctx.phase == 'unmount' then
-        table.insert(unmount_calls, ctx.props.name)
-      end
-
-      return {
-        h('text', { id = ctx.props.name }, 'Component ' .. ctx.props.name),
-      }
-    end
-
-    --- @param ctx morph.Ctx<{}, { show_second: boolean }>
-    local function App(ctx)
-      if ctx.phase == 'mount' then
-        ctx.state = { show_second = true }
-      elseif ctx.phase == 'unmount' then
-        table.insert(unmount_calls, 'app')
-      end
-
-      return {
-        h(TestComponent, { name = 'first' }),
-        '\n',
-        ctx.state.show_second and h(TestComponent, { name = 'second' }) or nil,
-      }
-    end
-
-    -- Create a new buffer and mount components
-    vim.cmd.new()
-    local bufnr = vim.api.nvim_get_current_buf()
-    local r = Morph.new(bufnr)
-    r:mount(h(App))
-
-    assert.are.same(get_lines(), { 'Component first', 'Component second' })
-    -- Verify components were mounted
-    assert.is_true(vim.tbl_contains(mount_calls, 'first'))
-    assert.is_true(vim.tbl_contains(mount_calls, 'second'))
-    assert.are.same(unmount_calls, {})
-
-    -- Delete the buffer - this should trigger automatic unmounting
-    vim.api.nvim_buf_delete(bufnr, { force = true })
-
-    -- Verify all components were unmounted
-    assert.is_true(vim.tbl_contains(unmount_calls, 'first'))
-    assert.is_true(vim.tbl_contains(unmount_calls, 'second'))
-    assert.is_true(vim.tbl_contains(unmount_calls, 'app'))
-  end)
-
-  it('should handle nested component unmounts triggered by state changes', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local unmount_calls = {}
-      local leaked_contexts = {}
-
-      --- @param ctx morph.Ctx<{ name: string }, {}>
-      local function Level3Component(ctx)
-        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level3-' .. ctx.props.name) end
-
-        return {
-          h('text', { id = 'level3-' .. ctx.props.name }, 'Level3: ' .. ctx.props.name),
-        }
-      end
-
-      --- @param ctx morph.Ctx<{ name: string }, {}>
-      local function Level2Component(ctx)
-        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level2-' .. ctx.props.name) end
-
-        return {
-          h('text', {}, {
-            'Level2: ' .. ctx.props.name,
-            '\n',
-            -- Nested within tags and arrays
-            {
-              h('text', {}, 'Container: '),
-              {
-                h(Level3Component, { name = ctx.props.name .. '-child1' }),
-                '\n',
-                h(Level3Component, { name = ctx.props.name .. '-child2' }),
+          }, {
+            'outer ',
+            h('text', {
+              id = 'inner',
+              nmap = {
+                ['x'] = function(e)
+                  table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                  return 'inner-x'
+                end,
               },
-            },
+            }, 'inner'),
+            ' text',
           }),
+          ' end',
         }
-      end
 
-      --- @param ctx morph.Ctx<{ name: string }, {}>
-      local function Level1Component(ctx)
-        if ctx.phase == 'unmount' then table.insert(unmount_calls, 'level1-' .. ctx.props.name) end
+        -- In inner region
+        set_cursor { 1, 8 }
+        local result = r:_dispatch_keypress('n', 'x')
+        assert.are.same('inner-x', result)
+        assert.are.same(1, #captured_events)
+        assert.are.same('inner', captured_events[1].tag_id)
 
-        return {
-          h('text', {}, 'Level1: ' .. ctx.props.name),
-          '\n',
-          -- Nested within arrays and tags
-          {
-            h(Level2Component, { name = ctx.props.name .. '-sub' }),
-          },
+        -- In outer region but not inner
+        captured_events = {}
+        set_cursor { 1, 2 }
+        result = r:_dispatch_keypress('n', 'x')
+        assert.are.same('outer-x', result)
+        assert.are.same(1, #captured_events)
+        assert.are.same('outer', captured_events[1].tag_id)
+
+        -- Outside both regions
+        captured_events = {}
+        set_cursor { 1, 18 }
+        result = r:_dispatch_keypress('n', 'x')
+        assert.are.same('x', result)
+        assert.are.same(0, #captured_events)
+      end)
+    end)
+
+    describe('event bubbling', function()
+      it('bubbles to outer when bubble_up is true', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local captured_events = {}
+
+          -- Text:
+          --   0         1
+          --   012345678901234
+          --   start inner end
+          r:render {
+            h('text', {
+              id = 'outer',
+              nmap = {
+                ['b'] = function(e)
+                  table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                  return 'b'
+                end,
+              },
+            }, {
+              'start ',
+              h('text', {
+                id = 'inner',
+                nmap = {
+                  ['b'] = function(e)
+                    table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                    e.bubble_up = true
+                    return ''
+                  end,
+                },
+              }, 'inner'),
+              ' end',
+            }),
+          }
+
+          set_cursor { 1, 8 }
+          local result = r:_dispatch_keypress('n', 'b')
+          assert.are.same('b', result)
+          assert.are.same(2, #captured_events)
+          assert.are.same('inner', captured_events[1].tag_id)
+          assert.are.same('outer', captured_events[2].tag_id)
+        end)
+      end)
+
+      it('stops at inner when bubble_up is false', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local captured_events = {}
+
+          r:render {
+            h('text', {
+              id = 'outer',
+              nmap = {
+                ['c'] = function(e)
+                  table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                  return 'outer-handled'
+                end,
+              },
+            }, {
+              'start ',
+              h('text', {
+                id = 'inner',
+                nmap = {
+                  ['c'] = function(e)
+                    table.insert(captured_events, { tag_id = e.tag.attributes.id })
+                    e.bubble_up = false
+                    return 'inner-handled'
+                  end,
+                },
+              }, 'inner'),
+              ' end',
+            }),
+          }
+
+          set_cursor { 1, 8 }
+          local result = r:_dispatch_keypress('n', 'c')
+          assert.are.same('inner-handled', result)
+          assert.are.same(1, #captured_events)
+          assert.are.same('inner', captured_events[1].tag_id)
+        end)
+      end)
+    end)
+
+    describe('mode-specific handlers', function()
+      it('uses nmap for normal mode and imap for insert mode', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local captured_events = {}
+
+          r:render {
+            h('text', {
+              id = 'multi-mode',
+              nmap = {
+                ['m'] = function(e)
+                  table.insert(captured_events, { mode = e.mode })
+                  return 'normal-mode'
+                end,
+              },
+              imap = {
+                ['m'] = function(e)
+                  table.insert(captured_events, { mode = e.mode })
+                  return 'insert-mode'
+                end,
+              },
+            }, 'text'),
+          }
+
+          set_cursor { 1, 2 }
+
+          local result = r:_dispatch_keypress('n', 'm')
+          assert.are.same('normal-mode', result)
+          assert.are.same(1, #captured_events)
+          assert.are.same('n', captured_events[1].mode)
+
+          captured_events = {}
+          result = r:_dispatch_keypress('i', 'm')
+          assert.are.same('insert-mode', result)
+          assert.are.same(1, #captured_events)
+          assert.are.same('i', captured_events[1].mode)
+
+          -- Mode with no handler returns original key
+          captured_events = {}
+          result = r:_dispatch_keypress('v', 'm')
+          assert.are.same('m', result)
+          assert.are.same(0, #captured_events)
+        end)
+      end)
+    end)
+
+    it('cancels keypress when handler returns empty string', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+
+        -- Text:
+        --   0         1
+        --   01234567890123456
+        --   cancelable normal
+        r:render {
+          h('text', {
+            id = 'cancel-key',
+            nmap = { ['z'] = function() return '' end },
+          }, 'cancelable'),
+          ' normal',
         }
-      end
 
-      --- @param ctx morph.Ctx<{}, { show_nested: boolean }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { show_nested = true }
-          leaked_contexts.app = ctx
-        elseif ctx.phase == 'unmount' then
-          table.insert(unmount_calls, 'app')
-        end
+        set_cursor { 1, 3 }
+        local result = r:_dispatch_keypress('n', 'z')
+        assert.are.same('', result)
 
-        return {
-          'App Root',
-          '\n',
-          ctx.state.show_nested and {
-            h(Level1Component, { name = 'main' }),
-            '\n',
-            h(Level1Component, { name = 'secondary' }),
-          } or 'No nested components',
-        }
-      end
-
-      -- Mount the nested component hierarchy
-      r:mount(h(App))
-
-      -- Verify the rendered content includes all levels
-      assert.are.same(get_lines(), {
-        'App Root',
-        'Level1: main',
-        'Level2: main-sub',
-        'Container: Level3: main-sub-child1',
-        'Level3: main-sub-child2',
-        'Level1: secondary',
-        'Level2: secondary-sub',
-        'Container: Level3: secondary-sub-child1',
-        'Level3: secondary-sub-child2',
-      })
-
-      -- Trigger state change to hide nested components
-      leaked_contexts.app:update { show_nested = false }
-
-      -- Verify all nested components were unmounted
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child1'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child2'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level2-main-sub'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level1-main'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child1'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child2'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level2-secondary-sub'))
-      assert.is_true(vim.tbl_contains(unmount_calls, 'level1-secondary'))
-
-      -- Verify the rendered content no longer includes nested components
-      assert.are.same(get_text(), 'App Root\nNo nested components')
-
-      -- Re-enable nested components to test remounting
-      unmount_calls = {}
-      leaked_contexts.app:update { show_nested = true }
-
-      -- Verify no unmounts occurred during remounting
-      assert.are.same(unmount_calls, {})
+        set_cursor { 1, 12 }
+        result = r:_dispatch_keypress('n', 'z')
+        assert.are.same('z', result)
+      end)
     end)
   end)
 
-  it('should handle Ctx:update when component on_change is nil without errors', function()
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local leaked_context = nil
-      local called = 0
+  ------------------------------------------------------------------------------
+  -- KEYMAP MANAGEMENT
+  ------------------------------------------------------------------------------
 
-      --- @param ctx morph.Ctx<{}, { count: integer }>
-      local function TestComponent(ctx)
-        called = called + 1
-        if ctx.phase == 'mount' then
-          ctx.state = { count = 1 }
+  describe('keymap management', function()
+    it('cleans up keymaps without error when no original mapping existed', function()
+      with_buf({}, function()
+        local leaked_context
+        local function TestComponent(ctx)
           leaked_context = ctx
-          -- Explicitly set the component's on_change to nil to trigger the bug
-          ctx.on_change = nil
+          if ctx.phase == 'mount' then ctx.state = 1 end
+
+          if ctx.state == 1 then
+            return h('text', {
+              nmap = { ['<Leader>nonexistent'] = function() return '' end },
+            }, { 'with keymap' })
+          else
+            return h('text', {}, { 'without keymap' })
+          end
         end
 
-        return {
-          h('text', { id = 'test-component' }, 'Count: ' .. ctx.state.count),
+        local r = Morph.new(0)
+        r:mount(h(TestComponent))
+        assert.are.same('with keymap', get_text())
+
+        local mapping = vim.fn.maparg('<Leader>nonexistent', 'n', false, true)
+        assert.is_false(vim.tbl_isempty(mapping))
+
+        assert.has_no.errors(function() leaked_context:update(2) end)
+        assert.are.same('without keymap', get_text())
+
+        mapping = vim.fn.maparg('<Leader>nonexistent', 'n', false, true)
+        assert.is_true(vim.tbl_isempty(mapping))
+      end)
+    end)
+
+    it('restores original keymaps when component unmounts', function()
+      with_buf({}, function()
+        local my_orig_callback = function() end
+        local my_component_callback_count = 0
+        local my_component_callback = function()
+          my_component_callback_count = my_component_callback_count + 1
+        end
+        vim.keymap.set('n', '<Leader>abc', my_orig_callback, { buffer = true })
+
+        local leaked_context
+        local function TestComponent(ctx)
+          leaked_context = ctx
+          if ctx.phase == 'mount' then ctx.state = 1 end
+
+          if ctx.state == 1 then
+            return h('text', {
+              nmap = { ['<Leader>abc'] = my_component_callback },
+            }, { 'Hello World!' })
+          else
+            return h('text', {}, { 'Hello World (II)!' })
+          end
+        end
+
+        local r = Morph.new(0)
+        local result = r:_dispatch_keypress('n', '<Leader>abc')
+        assert.are.same('<Leader>abc', result)
+        assert.are.same(0, my_component_callback_count)
+
+        r:mount(h(TestComponent))
+        assert.are.same('Hello World!', get_text())
+        assert.are_not.same(
+          my_orig_callback,
+          vim.fn.maparg('<Leader>abc', 'n', false, true).callback
+        )
+
+        result = r:_dispatch_keypress('n', '<Leader>abc')
+        assert.are.same(nil, result)
+        assert.are.same(1, my_component_callback_count)
+
+        leaked_context:update(2)
+        assert.are.same('Hello World (II)!', get_text())
+
+        result = r:_dispatch_keypress('n', '<Leader>abc')
+        assert.are.same('<Leader>abc', result)
+        assert.are.same(my_orig_callback, vim.fn.maparg('<Leader>abc', 'n', false, true).callback)
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- UNDO/REDO
+  ------------------------------------------------------------------------------
+
+  describe('undo/redo', function()
+    it('tracks extmarks correctly through undo/redo', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = ''
+
+        --- @param _ctx morph.Ctx
+        local function App(_ctx)
+          return {
+            'Search: [',
+            h('text', {
+              id = 'filter',
+              on_change = function(e) captured_changed_text = e.text end,
+            }, ''),
+            ']',
+          }
+        end
+
+        r:mount(h(App))
+        local filter_elem = assert(r:get_element_by_id 'filter')
+        assert.are.same('Search: []', get_text())
+        assert.are.same('', filter_elem.extmark:_text())
+        set_cursor { filter_elem.extmark.start[1] + 1, filter_elem.extmark.start[2] }
+
+        vim.api.nvim_feedkeys('ifilter', 'ntx', false)
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('filter', captured_changed_text)
+
+        filter_elem = assert(r:get_element_by_id 'filter')
+        assert.are.same('filter', filter_elem.extmark:_text())
+        assert.are.same('Search: [filter]', get_text())
+
+        vim.cmd.undo()
+        assert.are.same('Search: []', get_text())
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('', captured_changed_text)
+
+        filter_elem = assert(r:get_element_by_id 'filter')
+        assert.are.same('', filter_elem.extmark:_text())
+
+        vim.cmd.redo()
+        vim.cmd.doautocmd 'TextChanged'
+        assert.are.same('filter', captured_changed_text)
+
+        filter_elem = assert(r:get_element_by_id 'filter')
+        assert.are.same('filter', filter_elem.extmark:_text())
+        assert.are.same('Search: [filter]', get_text())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- COMPONENT LIFECYCLE
+  ------------------------------------------------------------------------------
+
+  describe('component lifecycle', function()
+    describe('mount phase', function()
+      it('calls component with phase=mount on first render', function()
+        local mount_calls = {}
+        local unmount_calls = {}
+
+        --- @param ctx morph.Ctx<{ name: string }, { value: string }>
+        local function TestComponent(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { value = 'Hello ' .. ctx.props.name }
+            table.insert(mount_calls, ctx.props.name)
+          elseif ctx.phase == 'unmount' then
+            table.insert(unmount_calls, ctx.props.name)
+          end
+          return {
+            h('text', { hl = 'TestHL' }, ctx.state.value),
+            '!',
+          }
+        end
+
+        local tree = {
+          'Prefix: ',
+          h(TestComponent, { name = 'World' }, {}),
+          ' Suffix',
         }
-      end
 
-      -- Mount component
-      r:mount(h(TestComponent))
+        local lines = Morph.markup_to_lines { tree = tree }
+        assert.are.same({ 'Prefix: Hello World! Suffix' }, lines)
+        assert.are.same({ 'World' }, mount_calls)
+        assert.are.same({ 'World' }, unmount_calls)
+      end)
 
-      assert.are.same(get_text(), 'Count: 1')
-      assert.are.same(called, 1)
+      it('executes do_after_render callbacks immediately after mount', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local callback_executed = false
+          local callback_execution_order = {}
 
-      -- This should not error even though ctx.on_change is nil
-      -- Before the fix, this would throw an error when trying to call self.on_change()
-      local orig_schedule = vim.schedule
-      vim.schedule = function(f) return f() end
-      assert.has_no.errors(function() leaked_context:update { count = 2 } end)
-      vim.schedule = orig_schedule
+          --- @param ctx morph.Ctx
+          local function TestComponent(ctx)
+            if ctx.phase == 'mount' then
+              ctx:do_after_render(function()
+                callback_executed = true
+                table.insert(callback_execution_order, 'callback')
+              end)
+              table.insert(callback_execution_order, 'component-render')
+            end
+            return { h('text', { id = 'test-text' }, 'Hello World') }
+          end
+
+          r:mount(h(TestComponent))
+          table.insert(callback_execution_order, 'after-mount')
+
+          assert.is_true(callback_executed)
+          assert.are.same({
+            'component-render',
+            'callback',
+            'after-mount',
+          }, callback_execution_order)
+          assert.are.same('Hello World', get_text())
+        end)
+      end)
+
+      it('executes multiple do_after_render callbacks in registration order', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local execution_order = {}
+
+          --- @param ctx morph.Ctx
+          local function TestComponent(ctx)
+            if ctx.phase == 'mount' then
+              ctx:do_after_render(function() table.insert(execution_order, 'first') end)
+              ctx:do_after_render(function() table.insert(execution_order, 'second') end)
+              ctx:do_after_render(function() table.insert(execution_order, 'third') end)
+            end
+            return { h('text', { id = 'test' }, 'Multiple callbacks') }
+          end
+
+          r:mount(h(TestComponent))
+
+          assert.are.same({ 'first', 'second', 'third' }, execution_order)
+        end)
+      end)
+
+      it('does not re-render when update called during mount phase', function()
+        with_buf({}, function()
+          local render_count = 0
+
+          --- @param ctx morph.Ctx<{}, { value: number }>
+          local function TestComponent(ctx)
+            render_count = render_count + 1
+            if ctx.phase == 'mount' then
+              ctx.state = { value = 1 }
+              ctx:update { value = 2 }
+            end
+            return { 'Value: ' .. ctx.state.value }
+          end
+
+          local r = Morph.new(0)
+          r:mount(h(TestComponent))
+
+          assert.are.same(1, render_count)
+          assert.are.same('Value: 2', get_text())
+        end)
+      end)
     end)
-  end)
 
-  it('should cleanup bindings between renders', function()
-    with_buf({}, function()
-      local my_orig_callback = function() end
-      local my_component_callback_count = 0
-      local my_component_callback = function()
-        my_component_callback_count = my_component_callback_count + 1
-      end
-      vim.keymap.set('n', '<Leader>abc', my_orig_callback, { buffer = true })
+    describe('update phase', function()
+      it('re-renders components when state changes', function()
+        with_buf({}, function()
+          --- @diagnostic disable-next-line: assign-type-mismatch
+          local leaked_ctx = { app = {}, c1 = {}, c2 = {} } --- @type table<string, morph.Ctx>
+          local Counter = make_counter(leaked_ctx)
 
-      local leaked_context
-      local function TestComponent(ctx)
-        leaked_context = ctx
-        if ctx.phase == 'mount' then ctx.state = 1 end
+          --- @param ctx morph.Ctx<{}, { toggle1: boolean, show2: boolean }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then ctx.state = { toggle1 = false, show2 = true } end
+            leaked_ctx.app = ctx
+            return {
+              ctx.state.toggle1 and 'Toggle1' or h(Counter, { id = 'c1' }, {}),
+              '\n',
+              ctx.state.show2 and { '\n', h(Counter, { id = 'c2' }, {}) },
+            }
+          end
 
-        if ctx.state == 1 then
-          -- On first render, set a local callback:
-          return h('text', {
-            nmap = {
-              ['<Leader>abc'] = my_component_callback,
-            },
-          }, { 'Hello World!' })
-        else
-          -- On second render, do NOT set a local callback:
-          return h('text', {}, { 'Hello World (II)!' })
+          local renderer = Morph.new()
+          renderer:mount(h(App, {}, {}))
+
+          assert.are.same({ 'Value: 1', '', 'Value: 1' }, get_lines())
+          assert.are.same('mount', leaked_ctx.c1.state.phase)
+          assert.are.same('mount', leaked_ctx.c2.state.phase)
+
+          leaked_ctx.app:update { toggle1 = true, show2 = true }
+          assert.are.same({ 'Toggle1', '', 'Value: 1' }, get_lines())
+          assert.are.same('unmount', leaked_ctx.c1.state.phase)
+          assert.are.same('update', leaked_ctx.c2.state.phase)
+
+          leaked_ctx.app:update { toggle1 = true, show2 = false }
+          assert.are.same({ 'Toggle1', '' }, get_lines())
+          assert.are.same('unmount', leaked_ctx.c1.state.phase)
+          assert.are.same('unmount', leaked_ctx.c2.state.phase)
+
+          leaked_ctx.app:update { toggle1 = false, show2 = true }
+          assert.are.same({ 'Value: 1', '', 'Value: 1' }, get_lines())
+          assert.are.same('mount', leaked_ctx.c1.state.phase)
+          assert.are.same('mount', leaked_ctx.c2.state.phase)
+
+          leaked_ctx.c1:update { count = 2 }
+          assert.are.same({ 'Value: 2', '', 'Value: 1' }, get_lines())
+          assert.are.same('update', leaked_ctx.c1.state.phase)
+          assert.are.same('update', leaked_ctx.c2.state.phase)
+
+          leaked_ctx.c2:update { count = 3 }
+          assert.are.same({ 'Value: 2', '', 'Value: 3' }, get_lines())
+          assert.are.same('update', leaked_ctx.c1.state.phase)
+          assert.are.same('update', leaked_ctx.c2.state.phase)
+        end)
+      end)
+
+      it('persists child state across parent re-renders', function()
+        with_buf({}, function()
+          local child_ctx_ref
+
+          --- @param ctx morph.Ctx<{}, { count: number }>
+          local function Child(ctx)
+            if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+            child_ctx_ref = ctx
+            return { 'Count: ' .. ctx.state.count }
+          end
+
+          local parent_ctx_ref
+          --- @param ctx morph.Ctx<{}, { label: string }>
+          local function Parent(ctx)
+            if ctx.phase == 'mount' then ctx.state = { label = 'A' } end
+            parent_ctx_ref = ctx
+            return {
+              'Label: ' .. ctx.state.label .. '\n',
+              h(Child),
+            }
+          end
+
+          local r = Morph.new(0)
+          r:mount(h(Parent))
+
+          assert.are.same('Label: A\nCount: 0', get_text())
+
+          child_ctx_ref:update { count = 5 }
+          assert.are.same('Label: A\nCount: 5', get_text())
+
+          parent_ctx_ref:update { label = 'B' }
+          assert.are.same('Label: B\nCount: 5', get_text())
+        end)
+      end)
+
+      it('handles Ctx:update when on_change is nil without errors', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local leaked_context = nil
+          local called = 0
+
+          --- @param ctx morph.Ctx<{}, { count: integer }>
+          local function TestComponent(ctx)
+            called = called + 1
+            if ctx.phase == 'mount' then
+              ctx.state = { count = 1 }
+              leaked_context = ctx
+              ctx.on_change = nil
+            end
+            return { h('text', { id = 'test-component' }, 'Count: ' .. ctx.state.count) }
+          end
+
+          r:mount(h(TestComponent))
+          assert.are.same('Count: 1', get_text())
+          assert.are.same(1, called)
+
+          local orig_schedule = vim.schedule
+          vim.schedule = function(f) return f() end
+          assert.has_no.errors(function() leaked_context:update { count = 2 } end)
+          vim.schedule = orig_schedule
+        end)
+      end)
+
+      it('handles state update via do_after_render', function()
+        with_buf({}, function()
+          local render_count = 0
+
+          --- @param ctx morph.Ctx<{}, { initialized: boolean }>
+          local function TestComponent(ctx)
+            render_count = render_count + 1
+            if ctx.phase == 'mount' then
+              ctx.state = { initialized = false }
+              ctx:do_after_render(function()
+                --- @diagnostic disable-next-line: unnecessary-if
+                if not ctx.state.initialized then ctx:update { initialized = true } end
+              end)
+            end
+            return { ctx.state.initialized and 'ready' or 'loading' }
+          end
+
+          local r = Morph.new(0)
+          local orig_schedule = vim.schedule
+          vim.schedule = function(f) f() end
+
+          r:mount(h(TestComponent))
+
+          vim.schedule = orig_schedule
+
+          assert.are.same(2, render_count)
+          assert.are.same('ready', get_text())
+        end)
+      end)
+    end)
+
+    describe('unmount phase', function()
+      it('unmounts components when buffer is deleted', function()
+        local unmount_calls = {}
+        local mount_calls = {}
+
+        --- @param ctx morph.Ctx<any, { value: string }>
+        local function TestComponent(ctx)
+          if ctx.phase == 'mount' then
+            table.insert(mount_calls, ctx.props.name)
+          elseif ctx.phase == 'unmount' then
+            table.insert(unmount_calls, ctx.props.name)
+          end
+          return { h('text', { id = ctx.props.name }, 'Component ' .. ctx.props.name) }
         end
+
+        --- @param ctx morph.Ctx<{}, { show_second: boolean }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { show_second = true }
+          elseif ctx.phase == 'unmount' then
+            table.insert(unmount_calls, 'app')
+          end
+          return {
+            h(TestComponent, { name = 'first' }),
+            '\n',
+            ctx.state.show_second and h(TestComponent, { name = 'second' }) or nil,
+          }
+        end
+
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local r = Morph.new(bufnr)
+        r:mount(h(App))
+
+        assert.are.same({ 'Component first', 'Component second' }, get_lines())
+        assert.is_true(vim.tbl_contains(mount_calls, 'first'))
+        assert.is_true(vim.tbl_contains(mount_calls, 'second'))
+        assert.are.same({}, unmount_calls)
+
+        vim.api.nvim_buf_delete(bufnr, { force = true })
+
+        assert.is_true(vim.tbl_contains(unmount_calls, 'first'))
+        assert.is_true(vim.tbl_contains(unmount_calls, 'second'))
+        assert.is_true(vim.tbl_contains(unmount_calls, 'app'))
+      end)
+
+      it('unmounts deeply nested components on state change', function()
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local unmount_calls = {}
+          local leaked_contexts = {}
+
+          --- @param ctx morph.Ctx<{ name: string }, {}>
+          local function Level3Component(ctx)
+            if ctx.phase == 'unmount' then
+              table.insert(unmount_calls, 'level3-' .. ctx.props.name)
+            end
+            return { h('text', { id = 'level3-' .. ctx.props.name }, 'Level3: ' .. ctx.props.name) }
+          end
+
+          --- @param ctx morph.Ctx<{ name: string }, {}>
+          local function Level2Component(ctx)
+            if ctx.phase == 'unmount' then
+              table.insert(unmount_calls, 'level2-' .. ctx.props.name)
+            end
+            return {
+              h('text', {}, {
+                'Level2: ' .. ctx.props.name,
+                '\n',
+                {
+                  h('text', {}, 'Container: '),
+                  {
+                    h(Level3Component, { name = ctx.props.name .. '-child1' }),
+                    '\n',
+                    h(Level3Component, { name = ctx.props.name .. '-child2' }),
+                  },
+                },
+              }),
+            }
+          end
+
+          --- @param ctx morph.Ctx<{ name: string }, {}>
+          local function Level1Component(ctx)
+            if ctx.phase == 'unmount' then
+              table.insert(unmount_calls, 'level1-' .. ctx.props.name)
+            end
+            return {
+              h('text', {}, 'Level1: ' .. ctx.props.name),
+              '\n',
+              { h(Level2Component, { name = ctx.props.name .. '-sub' }) },
+            }
+          end
+
+          --- @param ctx morph.Ctx<{}, { show_nested: boolean }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then
+              ctx.state = { show_nested = true }
+              leaked_contexts.app = ctx
+            elseif ctx.phase == 'unmount' then
+              table.insert(unmount_calls, 'app')
+            end
+            return {
+              'App Root',
+              '\n',
+              ctx.state.show_nested and {
+                h(Level1Component, { name = 'main' }),
+                '\n',
+                h(Level1Component, { name = 'secondary' }),
+              } or 'No nested components',
+            }
+          end
+
+          r:mount(h(App))
+
+          assert.are.same({
+            'App Root',
+            'Level1: main',
+            'Level2: main-sub',
+            'Container: Level3: main-sub-child1',
+            'Level3: main-sub-child2',
+            'Level1: secondary',
+            'Level2: secondary-sub',
+            'Container: Level3: secondary-sub-child1',
+            'Level3: secondary-sub-child2',
+          }, get_lines())
+
+          leaked_contexts.app:update { show_nested = false }
+
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child1'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child2'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level2-main-sub'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level1-main'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child1'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child2'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level2-secondary-sub'))
+          assert.is_true(vim.tbl_contains(unmount_calls, 'level1-secondary'))
+
+          assert.are.same('App Root\nNo nested components', get_text())
+
+          unmount_calls = {}
+          leaked_contexts.app:update { show_nested = true }
+          assert.are.same({}, unmount_calls)
+        end)
+      end)
+    end)
+
+    describe('lifecycle transitions', function()
+      it('never has illegal transitions (mount->update->unmount only)', function()
+        with_buf({}, function()
+          local lifecycle_history = {}
+          local illegal_transitions = {}
+
+          local legal_transitions = {
+            mount = { update = true, unmount = true },
+            update = { update = true, unmount = true },
+          }
+
+          local TrackedComponent = function(ctx)
+            local id = ctx.props.id
+            lifecycle_history[id] = lifecycle_history[id] or {}
+            local history = lifecycle_history[id]
+
+            if #history > 0 then
+              local prev = history[#history]
+              local curr = ctx.phase
+              if not (legal_transitions[prev] and legal_transitions[prev][curr]) then
+                table.insert(illegal_transitions, string.format('%s: %s -> %s', id, prev, curr))
+              end
+            end
+
+            table.insert(history, ctx.phase)
+            return { id }
+          end
+
+          local leaked_ctx
+          --- @param ctx morph.Ctx<{}, { items: string[] }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then
+              ctx.state = { items = { 'a', 'b' } }
+              leaked_ctx = ctx
+            end
+            return vim.tbl_map(
+              function(item) return h(TrackedComponent, { id = item, key = item }) end,
+              ctx.state.items
+            )
+          end
+
+          local r = Morph.new(0)
+          r:mount(h(App))
+
+          assert.are.same('ab', get_text())
+          assert.are.same({}, illegal_transitions)
+
+          leaked_ctx:update { items = { 'a' } }
+
+          assert.are.same('a', get_text())
+          assert.are.same({}, illegal_transitions)
+
+          local a_has_unmount = vim.tbl_contains(lifecycle_history['a'] or {}, 'unmount')
+          assert.is_false(a_has_unmount)
+
+          local b_unmounts = vim.tbl_filter(
+            function(phase) return phase == 'unmount' end,
+            lifecycle_history['b'] or {}
+          )
+          assert.are.same(1, #b_unmounts)
+        end)
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- COMPONENT CHILDREN
+  ------------------------------------------------------------------------------
+
+  describe('component children', function()
+    it('passes children via ctx.children', function()
+      with_buf({}, function()
+        --- @param ctx morph.Ctx
+        local function Wrapper(ctx) return { '[', ctx.children, ']' } end
+
+        local r = Morph.new(0)
+        r:mount(h(Wrapper, {}, { 'child content' }))
+        assert.are.same('[child content]', get_text())
+      end)
+    end)
+
+    it('handles component returning empty table', function()
+      with_buf({}, function()
+        --- @param _ctx morph.Ctx
+        local function EmptyComponent(_ctx) return {} end
+
+        local r = Morph.new(0)
+        r:mount { 'before', h(EmptyComponent), 'after' }
+        assert.are.same('beforeafter', get_text())
+      end)
+    end)
+
+    it('handles component returning nil', function()
+      with_buf({}, function()
+        --- @param _ctx morph.Ctx
+        local function NilComponent(_ctx) return nil end
+
+        local r = Morph.new(0)
+        r:mount { 'before', h(NilComponent), 'after' }
+        assert.are.same('beforeafter', get_text())
+      end)
+    end)
+
+    it('renders numbers in component children', function()
+      --- @param ctx morph.Ctx<{ value: number }, {}>
+      local function NumberDisplay(ctx)
+        return { h('text', { hl = 'Number' }, { 'The value is: ', ctx.props.value }) }
       end
 
-      local r = Morph.new(0)
-      local result = r:_expr_map_callback('n', '<Leader>abc')
-      assert.are.same(result, '<Leader>abc')
-      assert.are.same(my_component_callback_count, 0)
-
-      r:mount(h(TestComponent))
-      assert.are.same(get_text(), 'Hello World!')
-      vim.print(tostring(my_orig_callback))
-      assert.are_not.same(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
-
-      result = r:_expr_map_callback('n', '<Leader>abc')
-      assert.are.same(result, nil)
-      assert.are.same(my_component_callback_count, 1)
-
-      -- Now update the state (this effectively removes the local keymap):
-      leaked_context:update(2)
-      assert.are.same(get_text(), 'Hello World (II)!')
-
-      result = r:_expr_map_callback('n', '<Leader>abc')
-      assert.are.same(result, '<Leader>abc')
-      assert.are.same(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:mount(h(NumberDisplay, { value = 99 }))
+        assert.are.same({ 'The value is: 99' }, get_lines())
+      end)
     end)
   end)
 
+  ------------------------------------------------------------------------------
+  -- KEYED RECONCILIATION
+  ------------------------------------------------------------------------------
+
+  describe('keyed reconciliation', function()
+    it('uses key attribute for component identity', function()
+      with_buf({}, function()
+        local mount_count = 0
+        local unmount_count = 0
+
+        --- @param ctx morph.Ctx<{ id: string }, {}>
+        local function KeyedComponent(ctx)
+          if ctx.phase == 'mount' then
+            mount_count = mount_count + 1
+          elseif ctx.phase == 'unmount' then
+            unmount_count = unmount_count + 1
+          end
+          return { ctx.props.id }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { items: string[] }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { items = { 'a', 'b', 'c' } }
+            leaked_ctx = ctx
+          end
+          return vim.tbl_map(
+            function(item) return h(KeyedComponent, { id = item, key = item }) end,
+            ctx.state.items
+          )
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+
+        assert.are.same('abc', get_text())
+        assert.are.same(3, mount_count)
+        assert.are.same(0, unmount_count)
+
+        -- Same items - no mounts/unmounts
+        mount_count = 0
+        unmount_count = 0
+        leaked_ctx:update { items = { 'a', 'b', 'c' } }
+
+        assert.are.same('abc', get_text())
+        assert.are.same(0, mount_count)
+        assert.are.same(0, unmount_count)
+
+        -- Different items - remounting occurs
+        mount_count = 0
+        unmount_count = 0
+        leaked_ctx:update { items = { 'x', 'y' } }
+
+        assert.are.same('xy', get_text())
+        assert.is_true(mount_count > 0)
+        assert.is_true(unmount_count > 0)
+      end)
+    end)
+
+    it('optimally reconciles when removing items from end', function()
+      with_buf({}, function()
+        local events = {} --- @type { id: string, phase: string }[]
+
+        --- @param ctx morph.Ctx<{ id: string }, {}>
+        local function TrackedComponent(ctx)
+          table.insert(events, { id = ctx.props.id, phase = ctx.phase })
+          return { ctx.props.id }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { items: string[] }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { items = { 'a', 'b', 'c' } }
+            leaked_ctx = ctx
+          end
+          return vim.tbl_map(
+            function(item) return h(TrackedComponent, { id = item, key = item }) end,
+            ctx.state.items
+          )
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+        assert.are.same('abc', get_text())
+
+        -- Clear events from initial mount
+        events = {}
+        leaked_ctx:update { items = { 'a', 'b' } }
+
+        assert.are.same('ab', get_text())
+
+        local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, events)
+        local unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, events)
+
+        assert.are.same(0, #mounts)
+        assert.are.same(1, #unmounts)
+        assert.are.same('c', unmounts[1].id)
+      end)
+    end)
+
+    it('optimally reconciles when removing items from middle', function()
+      with_buf({}, function()
+        local events = {} --- @type { id: string, phase: string }[]
+
+        --- @param ctx morph.Ctx<{ id: string }, {}>
+        local function TrackedComponent(ctx)
+          table.insert(events, { id = ctx.props.id, phase = ctx.phase })
+          return { ctx.props.id }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { items: string[] }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { items = { 'a', 'b', 'c' } }
+            leaked_ctx = ctx
+          end
+          return vim.tbl_map(
+            function(item) return h(TrackedComponent, { id = item, key = item }) end,
+            ctx.state.items
+          )
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+        assert.are.same('abc', get_text())
+
+        -- Clear events from initial mount
+        events = {}
+        leaked_ctx:update { items = { 'a', 'c' } }
+
+        assert.are.same('ac', get_text())
+
+        local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, events)
+        local unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, events)
+
+        assert.are.same(0, #mounts)
+        assert.are.same(1, #unmounts)
+        assert.are.same('b', unmounts[1].id)
+      end)
+    end)
+
+    it('treats same component with different keys as different components', function()
+      with_buf({}, function()
+        local mount_ids = {}
+        local unmount_ids = {}
+
+        --- @param ctx morph.Ctx<{ id: string }, {}>
+        local function Item(ctx)
+          if ctx.phase == 'mount' then
+            table.insert(mount_ids, ctx.props.id)
+          elseif ctx.phase == 'unmount' then
+            table.insert(unmount_ids, ctx.props.id)
+          end
+          return { ctx.props.id }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { show_first: boolean }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { show_first = true } end
+          leaked_ctx = ctx
+          return {
+            ctx.state.show_first and h(Item, { id = 'first', key = 'first' })
+              or h(Item, { id = 'second', key = 'second' }),
+          }
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+
+        assert.are.same('first', get_text())
+        assert.are.same({ 'first' }, mount_ids)
+
+        leaked_ctx:update { show_first = false }
+
+        assert.are.same('second', get_text())
+        assert.are.same({ 'first' }, unmount_ids)
+        assert.are.same({ 'first', 'second' }, mount_ids)
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- TYPE TRANSITIONS IN RECONCILIATION
+  ------------------------------------------------------------------------------
+
+  describe('type transitions in reconciliation', function()
+    it('handles transitioning from string to array', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local leaked_ctx
+
+        --- @param ctx morph.Ctx<{show_array: boolean}>
+        local function Root(ctx)
+          if ctx.phase == 'mount' then
+            leaked_ctx = ctx
+            ctx.state = { show_array = false }
+          end
+          --- @diagnostic disable-next-line: unnecessary-if
+          if ctx.state.show_array then
+            return { 'item1', ' ', 'item2' }
+          else
+            return 'single string'
+          end
+        end
+
+        r:mount { h(Root) }
+        assert.are.same('single string', get_text())
+
+        leaked_ctx:update { show_array = true }
+        assert.are.same('item1 item2', get_text())
+      end)
+    end)
+
+    it('handles transitioning from array to string', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local leaked_ctx
+
+        --- @param ctx morph.Ctx<{show_array: boolean}>
+        local function Root(ctx)
+          if ctx.phase == 'mount' then
+            leaked_ctx = ctx
+            ctx.state = { show_array = true }
+          end
+          --- @diagnostic disable-next-line: unnecessary-if
+          if ctx.state.show_array then
+            return { 'item1', ' ', 'item2' }
+          else
+            return 'single string'
+          end
+        end
+
+        r:mount { h(Root) }
+        assert.are.same('item1 item2', get_text())
+
+        leaked_ctx:update { show_array = false }
+        assert.are.same('single string', get_text())
+      end)
+    end)
+
+    it('unmounts component when transitioning from component to array', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local leaked_ctx
+        local child_unmounted = false
+
+        --- @param ctx morph.Ctx
+        local function Child(ctx)
+          if ctx.phase == 'unmount' then child_unmounted = true end
+          return 'child component'
+        end
+
+        --- @param ctx morph.Ctx<{}, {show_array: boolean}>
+        local function Root(ctx)
+          if ctx.phase == 'mount' then
+            leaked_ctx = ctx
+            ctx.state = { show_array = false }
+          end
+          --- @diagnostic disable-next-line: unnecessary-if
+          if ctx.state.show_array then
+            return { 'item1', ' ', 'item2' }
+          else
+            return h(Child)
+          end
+        end
+
+        r:mount { h(Root) }
+        assert.are.same('child component', get_text())
+        assert.is_false(child_unmounted)
+
+        leaked_ctx:update { show_array = true }
+        assert.are.same('item1 item2', get_text())
+        assert.is_true(child_unmounted)
+      end)
+    end)
+
+    it('unmounts old tree BEFORE reconciling new array', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local leaked_ctx
+        local events = {}
+
+        --- @param ctx morph.Ctx
+        local function Child(ctx)
+          if ctx.phase == 'mount' then
+            table.insert(events, 'child:mount')
+          elseif ctx.phase == 'unmount' then
+            table.insert(events, 'child:unmount')
+          end
+          return 'child'
+        end
+
+        --- @param ctx morph.Ctx
+        local function ArrayItem(ctx)
+          if ctx.phase == 'mount' then table.insert(events, 'array-item:mount') end
+          return 'array item'
+        end
+
+        --- @param ctx morph.Ctx<{}, {show_array: boolean}>
+        local function Root(ctx)
+          if ctx.phase == 'mount' then
+            leaked_ctx = ctx
+            ctx.state = { show_array = false }
+          end
+          --- @diagnostic disable-next-line: unnecessary-if
+          if ctx.state.show_array then
+            return { h(ArrayItem) }
+          else
+            return h(Child)
+          end
+        end
+
+        r:mount { h(Root) }
+        assert.are.same({ 'child:mount' }, events)
+
+        leaked_ctx:update { show_array = true }
+        assert.are.same({ 'child:mount', 'child:unmount', 'array-item:mount' }, events)
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- MARKUP UTILITIES
+  ------------------------------------------------------------------------------
+
+  describe('markup utilities', function()
+    it('converts tree to string via markup_to_string', function()
+      local result = Morph.markup_to_string {
+        tree = {
+          'line 1\n',
+          h('text', { hl = 'Comment' }, 'styled'),
+          '\nline 3',
+        },
+      }
+      assert.are.same('line 1\nstyled\nline 3', result)
+    end)
+
+    it('detects external buffer changes and resyncs', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'initial content' }
+        assert.are.same('initial content', get_text())
+
+        vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'external change' })
+
+        r:render { 'new morph content' }
+        assert.are.same('new morph content', get_text())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- MODE PRESERVATION
   --
-  -- Mode restoration during rendering (tests is_textlock mode restoration)
-  --
+  -- Tests that rendering doesn't disrupt the current Vim mode.
+  ------------------------------------------------------------------------------
 
-  it('should preserve normal mode during rendering when textlock check occurs', function()
-    with_buf({}, function()
-      -- Start in normal mode
-      vim.cmd.stopinsert()
-      local initial_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(initial_mode:sub(1, 1), 'n')
+  describe('mode preservation during rendering', function()
+    local function test_mode_preservation(mode_char, enter_mode_fn, exit_mode_fn)
+      with_buf({ 'test content' }, function()
+        local r = Morph.new(0)
+        r:render { h('text', {}, 'initial content') }
 
-      -- Trigger a render which will call is_textlock internally
-      local r = Morph.new(0)
-      r:render { h('text', {}, 'normal mode test') }
+        set_cursor { 1, 0 }
+        enter_mode_fn()
 
-      -- Verify mode is still normal after rendering
-      local final_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(final_mode:sub(1, 1), 'n')
-      assert.are.same(get_text(), 'normal mode test')
+        local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+        assert.are.same(mode_char, initial_mode)
+
+        r:render { h('text', {}, 'updated content') }
+
+        local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+        assert.are.same(mode_char, final_mode)
+
+        exit_mode_fn()
+      end)
+    end
+
+    it('preserves normal mode', function()
+      test_mode_preservation('n', vim.cmd.stopinsert, function() end)
     end)
-  end)
 
-  it('should preserve visual mode during rendering when textlock check occurs', function()
-    with_buf({ 'visual mode test' }, function()
-      -- Render first so we have content
-      local r = Morph.new(0)
-      r:render { h('text', {}, 'visual mode test content') }
-
-      -- Enter visual mode
-      set_cursor { 1, 0 }
-      vim.cmd.normal { args = { 'v' }, bang = true }
-      local initial_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(initial_mode:sub(1, 1), 'v')
-
-      -- Trigger another render which will call is_textlock internally
-      r:render { h('text', {}, 'updated visual test') }
-
-      -- Verify mode is restored to visual after rendering
-      local final_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(final_mode:sub(1, 1), 'v')
-      assert.are.same(get_text(), 'updated visual test')
-
-      -- Exit visual mode for cleanup
-      vim.cmd.normal { args = { '<Esc>' }, bang = true }
+    it('preserves visual mode', function()
+      test_mode_preservation(
+        'v',
+        function() vim.cmd.normal { args = { 'v' }, bang = true } end,
+        function() vim.cmd.normal { args = { '<Esc>' }, bang = true } end
+      )
     end)
-  end)
 
-  it('should preserve visual line mode during rendering when textlock check occurs', function()
-    with_buf({ 'line 1', 'line 2' }, function()
-      -- Render first so we have content
-      local r = Morph.new(0)
-      r:render { h('text', {}, 'line 1\nline 2') }
+    it('preserves visual line mode', function()
+      with_buf({ 'line 1', 'line 2' }, function()
+        local r = Morph.new(0)
+        r:render { h('text', {}, 'line 1\nline 2') }
 
-      -- Enter visual line mode
-      set_cursor { 1, 0 }
-      vim.cmd.normal { args = { 'V' }, bang = true }
-      local initial_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(initial_mode:sub(1, 1), 'V')
+        set_cursor { 1, 0 }
+        vim.cmd.normal { args = { 'V' }, bang = true }
+        local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+        assert.are.same('V', initial_mode)
 
-      -- Trigger another render which will call is_textlock internally
-      r:render { h('text', {}, 'updated line 1\nupdated line 2') }
+        r:render { h('text', {}, 'updated line 1\nupdated line 2') }
 
-      -- Verify mode is restored to visual line after rendering
-      local final_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(final_mode:sub(1, 1), 'V')
-      assert.are.same(get_text(), 'updated line 1\nupdated line 2')
+        local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+        assert.are.same('V', final_mode)
 
-      -- Exit visual mode for cleanup
-      vim.cmd.normal { args = { '<Esc>' }, bang = true }
+        vim.cmd.normal { args = { '<Esc>' }, bang = true }
+      end)
     end)
-  end)
 
-  it(
-    'should preserve visual mode in focused split during render in unfocused morph buffer',
-    function()
-      -- Create first buffer with morph content
+    it('preserves visual mode in focused split during render in unfocused buffer', function()
       vim.cmd.new()
       local morph_buf = vim.api.nvim_get_current_buf()
       vim.api.nvim_buf_set_lines(morph_buf, 0, -1, false, { '' })
       local r = Morph.new(morph_buf)
       r:render { h('text', {}, 'morph buffer content') }
 
-      -- Create a second split with different content
       vim.cmd.vsplit()
       local focus_buf = vim.api.nvim_get_current_buf()
       local focus_win = vim.api.nvim_get_current_win()
       vim.api.nvim_buf_set_lines(focus_buf, 0, -1, false, { 'line 1', 'line 2', 'line 3' })
 
-      -- Enter visual mode in the focused split
       set_cursor { 1, 0 }
       vim.cmd.normal { args = { 'v' }, bang = true }
-      local initial_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(initial_mode:sub(1, 1), 'v')
+      local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+      assert.are.same('v', initial_mode)
 
-      -- Verify we're in the focus window, not the morph window
-      assert.are.same(vim.api.nvim_get_current_win(), focus_win)
-      assert.are.same(vim.api.nvim_get_current_buf(), focus_buf)
+      assert.are.same(focus_win, vim.api.nvim_get_current_win())
+      assert.are.same(focus_buf, vim.api.nvim_get_current_buf())
 
-      -- Trigger a render in the unfocused morph buffer
-      -- This will call is_textlock which should preserve the visual mode in focus_win
       r:render { h('text', {}, 'updated morph content') }
 
-      -- Verify visual mode is still active in the focused split
-      local final_mode = vim.api.nvim_get_mode().mode
-      assert.are.same(final_mode:sub(1, 1), 'v')
+      local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
+      assert.are.same('v', final_mode)
 
-      -- Verify we're still in the same window
-      assert.are.same(vim.api.nvim_get_current_win(), focus_win)
-      assert.are.same(vim.api.nvim_get_current_buf(), focus_buf)
+      assert.are.same(focus_win, vim.api.nvim_get_current_win())
+      assert.are.same(focus_buf, vim.api.nvim_get_current_buf())
 
-      -- Verify the morph buffer was updated correctly
       local morph_lines = vim.api.nvim_buf_get_lines(morph_buf, 0, -1, false)
-      assert.are.same(morph_lines, { 'updated morph content' })
+      assert.are.same({ 'updated morph content' }, morph_lines)
 
-      -- Cleanup: exit visual mode and close all windows
       vim.cmd.normal { args = { '<Esc>' }, bang = true }
-      -- Close all windows and buffers created in this test
       pcall(vim.api.nvim_win_close, focus_win, true)
       pcall(vim.api.nvim_buf_delete, morph_buf, { force = true })
       pcall(vim.api.nvim_buf_delete, focus_buf, { force = true })
-    end
-  )
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- POS00 COMPARISONS
+  ------------------------------------------------------------------------------
+
+  describe('Pos00 comparisons', function()
+    it('compares with __lt correctly', function()
+      assert.is_true(Pos00.new(0, 0) < Pos00.new(0, 1))
+      assert.is_true(Pos00.new(0, 0) < Pos00.new(1, 0))
+      assert.is_true(Pos00.new(0, 5) < Pos00.new(1, 0))
+      assert.is_false(Pos00.new(1, 0) < Pos00.new(0, 5))
+      assert.is_false(Pos00.new(0, 0) < Pos00.new(0, 0))
+    end)
+
+    it('compares with __gt correctly', function()
+      assert.is_true(Pos00.new(0, 1) > Pos00.new(0, 0))
+      assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 0))
+      assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 5))
+      assert.is_false(Pos00.new(0, 5) > Pos00.new(1, 0))
+      assert.is_false(Pos00.new(0, 0) > Pos00.new(0, 0))
+    end)
+
+    it('compares with __eq correctly', function()
+      assert.is_true(Pos00.new(0, 0) == Pos00.new(0, 0))
+      assert.is_true(Pos00.new(5, 10) == Pos00.new(5, 10))
+      assert.is_false(Pos00.new(0, 0) == Pos00.new(0, 1))
+      assert.is_false(Pos00.new(0, 0) == Pos00.new(1, 0))
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- IS_TEXTLOCK
+  ------------------------------------------------------------------------------
+
+  describe('is_textlock', function()
+    local is_textlock = Morph._is_textlock
+
+    it('returns false when not in textlock', function()
+      with_buf({}, function() assert.is_false(is_textlock()) end)
+    end)
+
+    it('returns true during expression mapping', function()
+      local result = nil
+      vim.keymap.set('n', '<F12>', function()
+        result = is_textlock()
+        return ''
+      end, { expr = true })
+
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<F12>', true, false, true), 'x', false)
+
+      vim.keymap.del('n', '<F12>')
+      assert.is_true(result)
+    end)
+
+    it('returns true during foldexpr evaluation', function()
+      vim.cmd.new()
+      local result = nil
+      --- @diagnostic disable-next-line: global-in-non-module
+      _G._test_foldexpr_textlock = function()
+        result = is_textlock()
+        return '0'
+      end
+
+      vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'line1', 'line2' })
+      vim.wo.foldmethod = 'expr'
+      vim.wo.foldexpr = 'v:lua._test_foldexpr_textlock()'
+      vim.cmd.normal { args = { 'zx' }, bang = true }
+
+      _G._test_foldexpr_textlock = nil
+      vim.cmd.bdelete { bang = true }
+
+      assert.is_true(result)
+    end)
+
+    it('returns true during vim.in_fast_event (luv callback)', function()
+      local result = nil
+      local timer = vim.uv.new_timer()
+      timer:start(0, 0, function()
+        result = is_textlock()
+        timer:close()
+      end)
+
+      vim.wait(100, function() return result ~= nil end)
+
+      assert.is_true(result)
+    end)
+
+    it('preserves window after check', function()
+      with_buf({}, function()
+        local win_before = vim.api.nvim_get_current_win()
+        is_textlock()
+        local win_after = vim.api.nvim_get_current_win()
+        assert.are.same(win_before, win_after)
+      end)
+    end)
+  end)
 end)

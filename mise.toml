@@ -85,7 +85,9 @@ done
 [tasks."test:coverage"]
 depends = ["test:prepare"]
 run = '''
+rm -f ./luacov.*.*
 busted --coverage --verbose
+luacov
 awk '/^Summary$/{flag=1;next} flag{print}' luacov.report.out
 '''
 
