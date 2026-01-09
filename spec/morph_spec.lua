@@ -1559,6 +1559,140 @@ describe('Morph', function()
         assert.are.same('z', result)
       end)
     end)
+
+    it('triggers handler on trailing empty line when element ends with newline', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local handler_called = false
+
+        -- Buffer has single element ending with newline:
+        --   Line 0: "hello"
+        --   Line 1: "" (empty, from trailing \n)
+        -- Extmark covers (0,0) to (1,0)
+        r:render {
+          h('text', {
+            id = 'with-newline',
+            nmap = {
+              ['<CR>'] = function()
+                handler_called = true
+                return ''
+              end,
+            },
+          }, 'hello\n'),
+        }
+
+        assert.are.same({ 'hello', '' }, get_lines())
+
+        -- Cursor on the trailing empty line should still trigger the handler
+        set_cursor { 2, 0 } -- 1-based: row 2, col 0 (the empty line)
+        local result = r:_dispatch_keypress('n', '<CR>')
+
+        assert.are.same('', result)
+        assert.is_true(handler_called, 'Handler should be called on trailing empty line')
+      end)
+    end)
+
+    it('triggers second element handler when first ends with newline and second follows', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local first_called = false
+        local second_called = false
+
+        -- Buffer:
+        --   Line 0: "hello"
+        --   Line 1: "world"
+        -- Element 'first': (0,0) to (1,0) - ends at start of line 1
+        -- Element 'second': (1,0) to (1,5) - covers "world"
+        r:render {
+          h('text', {
+            id = 'first',
+            nmap = {
+              ['<CR>'] = function()
+                first_called = true
+                return 'first'
+              end,
+            },
+          }, 'hello\n'),
+          h('text', {
+            id = 'second',
+            nmap = {
+              ['<CR>'] = function()
+                second_called = true
+                return 'second'
+              end,
+            },
+          }, 'world'),
+        }
+
+        assert.are.same({ 'hello', 'world' }, get_lines())
+
+        -- Cursor at start of "world" line - should be in second element only
+        set_cursor { 2, 0 } -- 1-based: row 2, col 0
+        local result = r:_dispatch_keypress('n', '<CR>')
+
+        assert.are.same('second', result)
+        assert.is_false(first_called, 'First handler should NOT be called')
+        assert.is_true(second_called, 'Second handler should be called')
+
+        -- Verify get_elements_at returns only second element in normal mode
+        local elems = r:get_elements_at { 1, 0 } -- 0-based
+        assert.are.same(1, #elems)
+        assert.are.same('second', elems[1].attributes.id)
+      end)
+    end)
+
+    it('returns both elements at boundary in insert mode', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+
+        -- Same setup: first element ends with newline, second follows
+        r:render {
+          h('text', { id = 'first' }, 'hello\n'),
+          h('text', { id = 'second' }, 'world'),
+        }
+
+        assert.are.same({ 'hello', 'world' }, get_lines())
+
+        -- In insert mode, cursor at boundary should see both elements
+        local elems = r:get_elements_at({ 1, 0 }, 'i') -- 0-based, insert mode
+        assert.are.same(2, #elems)
+        -- Second element is "innermost" (starts at cursor), first is "outer" (ends at cursor)
+        local ids = vim.tbl_map(function(e) return e.attributes.id end, elems)
+        assert.is_true(vim.tbl_contains(ids, 'first'))
+        assert.is_true(vim.tbl_contains(ids, 'second'))
+      end)
+    end)
+
+    it('does not trigger first element on non-empty line even if extmark ends there', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local first_called = false
+
+        -- Element 'first' ends at (1,0) but line 1 has content
+        r:render {
+          h('text', {
+            id = 'first',
+            nmap = {
+              ['x'] = function()
+                first_called = true
+                return ''
+              end,
+            },
+          }, 'hello\n'),
+          'world', -- plain text, no handler
+        }
+
+        assert.are.same({ 'hello', 'world' }, get_lines())
+
+        -- Cursor on "world" line - first element's handler should NOT fire
+        set_cursor { 2, 0 }
+        local result = r:_dispatch_keypress('n', 'x')
+
+        -- Should return original key (no handler matched)
+        assert.are.same('x', result)
+        assert.is_false(first_called)
+      end)
+    end)
   end)
 
   ------------------------------------------------------------------------------

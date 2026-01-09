@@ -391,16 +391,24 @@ Pos00.__index = Pos00
 
 --- @param row integer 0-based row
 --- @param col integer 0-based column
+--- @return morph.Pos00
 function Pos00.new(row, col) return setmetatable({ row, col }, Pos00) end
 
-function Pos00:__eq(other) return self[1] == other[1] and self[2] == other[2] end
+--- @param other unknown
+function Pos00:__eq(other)
+  return type(other) == 'table' and self[1] == other[1] and self[2] == other[2]
+end
 
+--- @param other unknown
 function Pos00:__lt(other)
+  if type(other) ~= 'table' then return false end
   if self[1] ~= other[1] then return self[1] < other[1] end
   return self[2] < other[2]
 end
 
+--- @param other unknown
 function Pos00:__gt(other)
+  if type(other) ~= 'table' then return false end
   if self[1] ~= other[1] then return self[1] > other[1] end
   return self[2] > other[2]
 end
@@ -461,6 +469,12 @@ function Extmark.by_id(bufnr, ns, id)
 end
 
 --- @private
+--- @param bufnr integer
+--- @param ns integer
+--- @param id integer
+--- @param start_row0 integer
+--- @param start_col0 integer
+--- @param details vim.api.keyset.extmark_details
 --- Construct an Extmark from raw API data, normalizing bounds that extend past buffer end.
 function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
   local start = Pos00.new(start_row0, start_col0)
@@ -488,6 +502,10 @@ end
 
 --- @private
 --- Find all extmarks that overlap with the given region.
+--- @param bufnr integer
+--- @param ns integer
+--- @param start morph.Pos00
+--- @param stop morph.Pos00
 --- @return morph.Extmark[]
 function Extmark._get_in_range(bufnr, ns, start, stop)
   local raw_extmarks = vim.api.nvim_buf_get_extmarks(
@@ -509,6 +527,7 @@ end
 
 --- @private
 --- Extract the text content covered by this extmark.
+--- @return string
 function Extmark:_text()
   local start, stop = self.start, self.stop
   if start == stop then return '' end
@@ -664,6 +683,7 @@ function Morph.markup_to_lines(opts)
   -- so we can cache it for on_change handlers later
   local text_accumulators = {} --- @type { text: string[] }[]
 
+  --- @param s string
   local function emit_text(s)
     lines[curr_line1] = (lines[curr_line1] or '') .. s
     curr_col1 = #lines[curr_line1] + 1
@@ -682,6 +702,7 @@ function Morph.markup_to_lines(opts)
     end
   end
 
+  --- @param node morph.Tree
   local function visit(node)
     local node_type = tree_type(node)
 
@@ -942,6 +963,7 @@ function Morph:mount(tree)
   -- Callbacks scheduled via ctx:do_after_render() - run after each render
   local after_render_callbacks = {} --- @type function[]
 
+  --- @param cb function
   local function schedule_after_render(cb) table.insert(after_render_callbacks, cb) end
 
   -- Forward declarations for mutual recursion
@@ -1029,7 +1051,11 @@ function Morph:mount(tree)
 
     -- Pre-compute "identity keys" for each node so we can match them up
     -- A key combines: type + component function (if any) + explicit key attribute
-    local old_keys, new_keys = {}, {}
+    --- @type table<integer, string>
+    local old_keys = {}
+    --- @type table<integer, string>
+    local new_keys = {}
+    --- @type table<morph.Tree, string>
     local node_key_cache = {}
 
     for i, node in ipairs(old_nodes) do
@@ -1092,7 +1118,7 @@ function Morph:mount(tree)
   end
 
   --- Reconcile a component node (mount, update, or reuse existing context).
-  --- @param old_tree morph.Node[]
+  --- @param old_tree morph.Tree
   --- @param new_tag morph.Tag
   reconcile_component = function(old_tree, new_tag)
     local Component = new_tag.name --[[@as morph.Component]]
@@ -1177,7 +1203,7 @@ function Morph:get_elements_at(pos, mode)
   local elements = {} --- @type morph.Element[]
   for _, extmark in ipairs(candidates) do
     local tag = self.text_content.curr.extmark_ids_to_tag[extmark.id]
-    if tag and self:_position_intersects_extmark(pos, extmark, mode) then
+    if tag and self._position_intersects_extmark(pos, extmark, mode) then
       table.insert(elements, vim.tbl_extend('force', {}, tag, { extmark = extmark }))
     end
   end
@@ -1194,8 +1220,10 @@ end
 
 --- @private
 --- Check if a position truly intersects an extmark (Neovim's API is over-inclusive).
---- @diagnostic disable-next-line: unused
-function Morph:_position_intersects_extmark(pos, extmark, mode)
+--- @param pos morph.Pos00
+--- @param extmark morph.Extmark
+--- @param mode? string
+function Morph._position_intersects_extmark(pos, extmark, mode)
   local start, stop = extmark.start, extmark.stop
 
   -- Zero-width extmarks at cursor position are considered intersecting
@@ -1209,6 +1237,15 @@ function Morph:_position_intersects_extmark(pos, extmark, mode)
 
   -- Check column bounds on stop row
   if pos[1] == stop[1] then
+    -- Special case: on an empty line where extmark ends at column 0,
+    -- the cursor at column 0 should be considered inside. This happens when
+    -- an element ends with a newline - the cursor on the resulting empty line
+    -- has nowhere else to be, so it should still trigger handlers.
+    if pos[2] == 0 and stop[2] == 0 then
+      local line = vim.api.nvim_buf_get_lines(extmark.bufnr, pos[1], pos[1] + 1, true)[1] or ''
+      if #line == 0 then return true end
+    end
+
     -- In insert mode the cursor is "thin" (between characters), so we include
     -- the position if it's <= stop (cursor can sit "on" the boundary)
     -- In normal mode the cursor is "wide" (occupies a character), so we only
@@ -1245,6 +1282,8 @@ end
 --- @private
 --- Handle a keypress by dispatching to element handlers (innermost first).
 --- Returns the key to execute, or '' to swallow the keypress.
+--- @param mode string
+--- @param lhs string
 function Morph:_dispatch_keypress(mode, lhs)
   local cursor = vim.api.nvim_win_get_cursor(0)
   --- @diagnostic disable-next-line: need-check-nil, assign-type-mismatch
