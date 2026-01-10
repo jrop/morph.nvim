@@ -717,10 +717,9 @@ function Morph.markup_to_lines(opts)
       -- Convert number to string and emit
       emit_text(tostring(node --[[@as number]]))
     elseif node_type == 'array' then
-      for _, child in
-        ipairs(node --[[@as morph.Node[] ]])
-      do
-        visit(child)
+      for i = 1, table.maxn(node) do
+        local child = node[i]
+        if child ~= nil then visit(child) end
       end
     elseif node_type == 'tag' then
       local tag = node --[[@as morph.Tag]]
@@ -868,6 +867,9 @@ end
 --- This is a "one-shot" render - no lifecycle, no state, just text + extmarks.
 --- @param tree morph.Tree
 function Morph:render(tree)
+  -- Guard: buffer may have been deleted while render was scheduled
+  if not vim.api.nvim_buf_is_valid(self.bufnr) then return end
+
   -- Detect if buffer changed externally since our last render
   local changedtick = vim.b[self.bufnr].changedtick
   if changedtick ~= self.changedtick then
@@ -960,6 +962,11 @@ end
 --- Components can have state, respond to updates, and run cleanup on unmount.
 --- @param tree morph.Tree
 function Morph:mount(tree)
+  if vim.b[self.bufnr]._morph_mounted then
+    error('Morph:mount() can only be called once per buffer', 0)
+  end
+  vim.b[self.bufnr]._morph_mounted = true
+
   -- Callbacks scheduled via ctx:do_after_render() - run after each render
   local after_render_callbacks = {} --- @type function[]
 
@@ -1046,7 +1053,9 @@ function Morph:mount(tree)
   --- @param new_nodes morph.Node[]?
   --- @return morph.Node[]
   reconcile_array = function(old_nodes, new_nodes)
+    --- @type morph.Node[]
     old_nodes = old_nodes or {}
+    --- @type morph.Node[]
     new_nodes = new_nodes or {}
 
     -- Pre-compute "identity keys" for each node so we can match them up
@@ -1058,16 +1067,18 @@ function Morph:mount(tree)
     --- @type table<morph.Tree, string>
     local node_key_cache = {}
 
-    for i, node in ipairs(old_nodes) do
+    for i = 1, table.maxn(old_nodes) do
+      local node = old_nodes[i]
       if node ~= nil then
-        local key = tree_identity_key(node, i)
+        local key = tree_identity_key(node --[[@as morph.Node]], i)
         old_keys[i] = key
         node_key_cache[node] = key
       end
     end
-    for i, node in ipairs(new_nodes) do
+    for i = 1, table.maxn(new_nodes) do
+      local node = new_nodes[i]
       if node ~= nil then
-        local key = tree_identity_key(node, i)
+        local key = tree_identity_key(node --[[@as morph.Node]], i)
         new_keys[i] = key
         node_key_cache[node] = key
       end
@@ -1099,16 +1110,14 @@ function Morph:mount(tree)
         -- Removed node: unmount it
         reconcile_tree(change.item, nil)
       elseif change.kind == 'change' then
-        -- Changed node: update if same type, otherwise unmount + mount
+        -- Changed node: update (the type should always be the same: see invariant below)
         local from_key = node_key_cache[change.from]
         local to_key = node_key_cache[change.to]
-
-        if from_key == to_key then
-          rendered_node = reconcile_tree(change.from, change.to)
-        else
-          reconcile_tree(change.from, nil) -- unmount old
-          rendered_node = reconcile_tree(nil, change.to) -- mount new
-        end
+        assert(
+          from_key == to_key,
+          'array reconciliation invariant: levenshtein should favor delete+add when from_key ~= to_key'
+        )
+        rendered_node = reconcile_tree(change.from, change.to)
       end
 
       if rendered_node then table.insert(result, 1, rendered_node) end
@@ -1179,6 +1188,7 @@ function Morph:mount(tree)
   unmount_autocmd_id = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
     callback = function()
+      vim.b[self.bufnr]._morph_mounted = nil
       reconcile_tree(self.component_tree.old, nil)
       --- @diagnostic disable-next-line: param-type-mismatch
       vim.api.nvim_del_autocmd(unmount_autocmd_id)

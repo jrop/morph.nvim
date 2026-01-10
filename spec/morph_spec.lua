@@ -1781,6 +1781,88 @@ describe('Morph', function()
   end)
 
   ------------------------------------------------------------------------------
+  -- KEYED LIST RECONCILIATION
+  ------------------------------------------------------------------------------
+
+  describe('keyed list reconciliation', function()
+    it('correctly identifies same component across renders', function()
+      with_buf({}, function()
+        local mount_count = {}
+        local app_ctx
+
+        --- @param ctx morph.Ctx<{ key: string }, { count: integer }>
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then
+            mount_count[ctx.props.key] = (mount_count[ctx.props.key] or 0) + 1
+            ctx.state = { count = 1 }
+          end
+          return h('text', { key = ctx.props.key }, { 'Count: ' .. ctx.state.count })
+        end
+
+        --- @param ctx morph.Ctx<{}, { items: {key: string, comp: morph.Component}[] }>
+        local function App(ctx)
+          app_ctx = ctx
+          if ctx.phase == 'mount' then
+            ctx.state = {
+              items = {
+                { key = 'a', comp = Counter },
+                { key = 'b', comp = Counter },
+              },
+            }
+          end
+          return vim.tbl_map(
+            function(item) return h(item.comp, { key = item.key }, {}) end,
+            ctx.state.items
+          )
+        end
+
+        local r = Morph.new()
+        r:mount(h(App))
+
+        -- Re-render with same components - should reuse contexts
+        local old_items = app_ctx.state.items
+        app_ctx:update { items = old_items }
+
+        -- Each component should have been mounted only once
+        assert.are.same(1, mount_count.a, 'Component a should be mounted once')
+        assert.are.same(1, mount_count.b, 'Component b should be mounted once')
+      end)
+    end)
+
+    it('correctly handles reordering of keyed components', function()
+      with_buf({}, function()
+        local key_to_init_value = {
+          a = 1,
+          b = 2,
+          c = 3,
+        }
+        local app_ctx
+
+        --- @param ctx morph.Ctx<{ key: string }, { value: integer }>
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { value = key_to_init_value[ctx.props.key] } end
+          return h('text', { key = ctx.props.key }, { ctx.props.key .. ': ' .. ctx.state.value })
+        end
+
+        --- @param ctx morph.Ctx<{}, { order: string[] }>
+        local function App(ctx)
+          app_ctx = ctx
+          if ctx.phase == 'mount' then ctx.state = { order = { 'a', 'b', 'c' } } end
+          return vim.tbl_map(function(id) return h(Counter, { key = id }, {}) end, ctx.state.order)
+        end
+
+        local r = Morph.new()
+        r:mount(h(App))
+        assert.are.same({ 'a: 1b: 2c: 3' }, get_lines())
+
+        -- Reverse order - components should be reused
+        app_ctx:update { order = { 'c', 'b', 'a' } }
+        assert.are.same({ 'c: 3b: 2a: 1' }, get_lines())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
   -- UNDO/REDO
   ------------------------------------------------------------------------------
 
@@ -1831,6 +1913,51 @@ describe('Morph', function()
         filter_elem = assert(r:get_element_by_id 'filter')
         assert.are.same('filter', filter_elem.extmark:_text())
         assert.are.same('Search: [filter]', get_text())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- MOUNT MULTIPLE TIMES
+  ------------------------------------------------------------------------------
+
+  describe('mount multiple times', function()
+    it('throws error on second mount call', function()
+      with_buf({}, function()
+        --- @param ctx morph.Ctx<{}, { text: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { text = 'initial' } end
+          return h('text', {}, { ctx.state.text })
+        end
+
+        local r = Morph.new()
+        r:mount(h(App))
+
+        local ok, err = pcall(function() r:mount(h(App)) end)
+
+        assert.is_false(ok, 'Second mount should fail')
+        assert.is_not_nil(err, 'Error should be thrown')
+        assert.is_not_nil(err:match 'once per buffer', 'Should show helpful error message')
+      end)
+    end)
+
+    it('throws error when second Morph instance mounts on same buffer', function()
+      with_buf({}, function()
+        --- @param ctx morph.Ctx<{}, { text: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { text = 'initial' } end
+          return h('text', {}, { ctx.state.text })
+        end
+
+        local r1 = Morph.new()
+        r1:mount(h(App))
+
+        local r2 = Morph.new()
+        local ok, err = pcall(function() r2:mount(h(App)) end)
+
+        assert.is_false(ok, 'Second Morph instance should fail')
+        assert.is_not_nil(err, 'Error should be thrown')
+        assert.is_not_nil(err:match 'once per buffer', 'Should show helpful error message')
       end)
     end)
   end)
@@ -2538,6 +2665,119 @@ describe('Morph', function()
         assert.are.same({ 'first', 'second' }, mount_ids)
       end)
     end)
+
+    it('preserves component context when re-rendering with same key', function()
+      with_buf({}, function()
+        local lifecycle_events = {} --- @type { id: string, phase: string }[]
+        local component_ctxs = {} --- @type table<string, morph.Ctx>
+
+        --- @param ctx morph.Ctx<{ id: string }, { value: integer }>
+        local function TrackedComponent(ctx)
+          table.insert(lifecycle_events, { id = ctx.props.id, phase = ctx.phase })
+          if ctx.phase == 'mount' then
+            ctx.state = { value = 0 }
+            component_ctxs[ctx.props.id] = ctx
+          end
+          return { ctx.props.id .. ': ' .. ctx.state.value }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { counter: integer }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { counter = 1 } end
+          leaked_ctx = ctx
+          return {
+            h(TrackedComponent, { id = 'comp', key = 'stable-key' }),
+          }
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+
+        assert.are.same('comp: 0', get_text())
+        assert.are.same(1, #lifecycle_events)
+        local original_ctx = component_ctxs['comp']
+
+        lifecycle_events = {}
+        leaked_ctx:update { counter = 2 }
+
+        local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, lifecycle_events)
+        local unmounts = vim.tbl_filter(
+          function(e) return e.phase == 'unmount' end,
+          lifecycle_events
+        )
+
+        assert.are.same(0, #mounts, 'Should not mount when key is same')
+        assert.are.same(0, #unmounts, 'Should not unmount when key is same')
+        assert.are.same(original_ctx, component_ctxs['comp'], 'Context should be preserved')
+
+        lifecycle_events = {}
+        original_ctx:update { value = 42 }
+
+        assert.are.same('comp: 42', get_text())
+
+        mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, lifecycle_events)
+        unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, lifecycle_events)
+
+        assert.are.same(0, #mounts, 'Should not mount when key is same')
+        assert.are.same(0, #unmounts, 'Should not unmount when key is same')
+        assert.are.same(original_ctx, component_ctxs['comp'], 'Context should be preserved')
+      end)
+    end)
+
+    it('produces delete+add (unmount+mount) when component keys differ', function()
+      with_buf({}, function()
+        local lifecycle_events = {} --- @type { id: string, phase: string }[]
+
+        --- @param ctx morph.Ctx<{ id: string }, {}>
+        local function TrackedComponent(ctx)
+          table.insert(lifecycle_events, { id = ctx.props.id, phase = ctx.phase })
+          return { ctx.props.id }
+        end
+
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { show_variant: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { show_variant = 'a' } end
+          leaked_ctx = ctx
+          return {
+            h(TrackedComponent, { id = ctx.state.show_variant, key = ctx.state.show_variant }),
+          }
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+
+        assert.are.same('a', get_text())
+        assert.are.same(1, #lifecycle_events)
+        assert.are.same('a', lifecycle_events[1].id)
+        assert.are.same('mount', lifecycle_events[1].phase)
+
+        lifecycle_events = {}
+        leaked_ctx:update { show_variant = 'b' }
+
+        assert.are.same('b', get_text())
+
+        local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, lifecycle_events)
+        local unmounts = vim.tbl_filter(
+          function(e) return e.phase == 'unmount' end,
+          lifecycle_events
+        )
+
+        assert.are.same(
+          1,
+          #mounts,
+          'Should mount new component when key differs (delete+add in levenshtein)'
+        )
+        assert.are.same(
+          1,
+          #unmounts,
+          'Should unmount old component when key differs (delete+add in levenshtein)'
+        )
+        assert.are.same('b', mounts[1].id)
+        assert.are.same('a', unmounts[1].id)
+      end)
+    end)
   end)
 
   ------------------------------------------------------------------------------
@@ -2678,6 +2918,75 @@ describe('Morph', function()
         assert.are.same({ 'child:mount', 'child:unmount', 'array-item:mount' }, events)
       end)
     end)
+
+    it('handles render when buffer is deleted before scheduled update', function()
+      local render_error = nil
+      local leaked_ctx
+
+      --- @param ctx morph.Ctx<{}, {}>
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = {}
+          leaked_ctx = ctx
+        end
+        return 'test'
+      end
+
+      vim.cmd.new()
+      local bufnr = vim.api.nvim_get_current_buf()
+      local r = Morph.new(bufnr)
+      r:mount(h(App))
+
+      vim.api.nvim_buf_delete(bufnr, { force = true })
+
+      local schedule_called = false
+      vim.schedule(function()
+        local ok, err = pcall(function() r:render { 'hello' } end)
+        if not ok then render_error = err end
+        schedule_called = true
+      end)
+
+      vim.wait(100, function() return schedule_called end)
+
+      assert.is_true(schedule_called, 'the scheduled callback never fired')
+      assert.is_nil(render_error, 'render should not error when buffer is deleted')
+    end)
+
+    it('handles mount when buffer is deleted before scheduled update', function()
+      local schedule_called = false
+      local update_error = nil
+      local leaked_ctx
+
+      --- @param ctx morph.Ctx<{}, {}>
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = {}
+          leaked_ctx = ctx
+        end
+        if ctx.phase == 'update' then
+          vim.schedule(function()
+            local ok, err = pcall(ctx.update, ctx, ctx.state)
+            if not ok then update_error = err end
+            schedule_called = true
+          end)
+        end
+        return 'test'
+      end
+
+      vim.cmd.new()
+      local bufnr = vim.api.nvim_get_current_buf()
+      local r = Morph.new(bufnr)
+      r:mount(h(App))
+
+      leaked_ctx:update {}
+
+      vim.api.nvim_buf_delete(bufnr, { force = true })
+
+      vim.wait(100, function() return schedule_called end)
+
+      assert.is_true(schedule_called, 'the scheduled callback never fired')
+      assert.is_nil(update_error, 'mount should not error when buffer is deleted')
+    end)
   end)
 
   ------------------------------------------------------------------------------
@@ -2694,6 +3003,58 @@ describe('Morph', function()
         },
       }
       assert.are.same('line 1\nstyled\nline 3', result)
+    end)
+
+    it('handles arrays with nil holes in markup_to_lines', function()
+      local lines = Morph.markup_to_lines {
+        tree = {
+          'before',
+          nil,
+          'after',
+        },
+      }
+      assert.are.same({ 'beforeafter' }, lines)
+    end)
+
+    it('handles multiple nil holes in markup_to_lines', function()
+      local lines = Morph.markup_to_lines {
+        tree = {
+          nil,
+          'a',
+          nil,
+          'b',
+          nil,
+        },
+      }
+      assert.are.same({ 'ab' }, lines)
+    end)
+
+    it('handles conditional rendering with nil holes', function()
+      with_buf({}, function()
+        local leaked_ctx
+        --- @param ctx morph.Ctx<{}, { show_optional: boolean }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { show_optional = false } end
+          leaked_ctx = ctx
+          return {
+            h('text', {}, 'first'),
+            '\n',
+            ctx.state.show_optional and h('text', {}, 'optional') or nil,
+            '\n',
+            h('text', {}, 'last'),
+          }
+        end
+
+        local r = Morph.new(0)
+        r:mount(h(App))
+        assert.are.same({ 'first', '', 'last' }, get_lines())
+
+        leaked_ctx:update { show_optional = true }
+        assert.are.same({ 'first', 'optional', 'last' }, get_lines())
+
+        leaked_ctx:update { show_optional = false }
+        assert.are.same({ 'first', '', 'last' }, get_lines())
+      end)
     end)
 
     it('detects external buffer changes and resyncs', function()
