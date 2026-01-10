@@ -2160,6 +2160,75 @@ describe('Morph', function()
         end)
       end)
 
+      it('preserves sibling component state when conditional array sibling changes', function()
+        -- This tests a bug where sibling components wrapped in arrays get incorrectly
+        -- matched during reconciliation when a conditional sibling changes from
+        -- false/nil to an array. All plain arrays have identity key 'array', so
+        -- the Levenshtein algorithm can match the wrong arrays together, causing
+        -- components inside to be unmounted/remounted and lose state.
+        with_buf({}, function()
+          local services_ctx_ref
+          local services_mount_count = 0
+
+          --- @param ctx morph.Ctx<{}, { filter: string }>
+          local function Services(ctx)
+            if ctx.phase == 'mount' then
+              ctx.state = { filter = '' }
+              services_mount_count = services_mount_count + 1
+            end
+            services_ctx_ref = ctx
+            return { 'Filter: [' .. ctx.state.filter .. ']' }
+          end
+
+          --- @param ctx morph.Ctx
+          local function Help(ctx) return { 'Help content' } end
+
+          local parent_ctx_ref
+          --- @param ctx morph.Ctx<{}, { show_help: boolean }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then ctx.state = { show_help = false } end
+            parent_ctx_ref = ctx
+            return {
+              'Header\n',
+              -- Conditional sibling: false when hidden, array when shown
+              ctx.state.show_help and { h(Help), '\n' },
+              -- Services wrapped in array - this is the component whose state should persist
+              { h(Services) },
+            }
+          end
+
+          local r = Morph.new(0)
+          r:mount(h(App))
+
+          assert.are.same('Header\nFilter: []', get_text())
+          assert.are.same(1, services_mount_count, 'Services should mount once initially')
+
+          -- Update Services state
+          services_ctx_ref:update { filter = 'docker' }
+          assert.are.same('Header\nFilter: [docker]', get_text())
+
+          -- Toggle help ON - this should NOT cause Services to remount
+          parent_ctx_ref:update { show_help = true }
+          assert.are.same('Header\nHelp content\nFilter: [docker]', get_text())
+          assert.are.same(
+            1,
+            services_mount_count,
+            'Services should NOT remount when sibling conditional changes'
+          )
+          assert.are.same(
+            'docker',
+            services_ctx_ref.state.filter,
+            'Services state should be preserved'
+          )
+
+          -- Toggle help OFF - state should still be preserved
+          parent_ctx_ref:update { show_help = false }
+          assert.are.same('Header\nFilter: [docker]', get_text())
+          assert.are.same(1, services_mount_count, 'Services should still not have remounted')
+          assert.are.same('docker', services_ctx_ref.state.filter, 'Services state still preserved')
+        end)
+      end)
+
       it('handles Ctx:update when on_change is nil without errors', function()
         with_buf({}, function()
           local r = Morph.new(0)

@@ -131,8 +131,10 @@ end
 --- @return string
 local function tree_identity_key(node, index)
   local t = tree_type(node)
-  if t == 'nil' or t == 'boolean' or t == 'string' or t == 'number' or t == 'array' then
+  if t == 'nil' or t == 'boolean' or t == 'string' or t == 'number' then
     return t
+  elseif t == 'array' then
+    return 'array-' .. tostring(index)
   elseif t == 'tag' then
     local tag = node --[[@as morph.Tag]]
     return 'tag-' .. tag.name .. '-' .. tostring(tag.attributes.key or index)
