@@ -3266,6 +3266,39 @@ describe('Morph', function()
   end)
 
   ------------------------------------------------------------------------------
+  -- LEVENSHTEIN
+  ------------------------------------------------------------------------------
+
+  describe('levenshtein', function()
+    local levenshtein = Morph._levenshtein
+
+    it('handles sparse arrays with gaps correctly', function()
+      -- Create sparse arrays with gaps (non-contiguous indices)
+      -- The # operator has undefined behavior for sparse arrays,
+      -- but table.maxn correctly returns the highest numeric index
+      local sparse_from = { [1] = 'a', [3] = 'c' } -- gap at index 2
+      local sparse_to = { [1] = 'x', [3] = 'z' } -- same structure, different values
+
+      -- #sparse_from might return 1 (Lua sees no contiguous sequence beyond index 1)
+      -- table.maxn(sparse_from) correctly returns 3
+      assert.are.same(3, table.maxn(sparse_from), 'test setup: maxn should be 3')
+
+      local changes = levenshtein { from = sparse_from, to = sparse_to }
+
+      -- If levenshtein correctly uses table.maxn, it should see elements at indices 1 and 3
+      -- and produce changes for both. With the # bug, it may only see index 1.
+      local change_changes = vim.tbl_filter(function(c) return c.kind == 'change' end, changes)
+
+      -- We expect 2 changes: 'a' -> 'x' at index 1, and 'c' -> 'z' at index 3
+      assert.are.same(
+        2,
+        #change_changes,
+        'should produce changes for both indices 1 and 3, not just index 1'
+      )
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
   -- IS_TEXTLOCK
   ------------------------------------------------------------------------------
 

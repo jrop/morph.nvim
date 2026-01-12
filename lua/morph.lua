@@ -176,7 +176,7 @@ local function levenshtein(opts)
   local cost_of_change = opts.cost and opts.cost.of_change or function() return 1 end
 
   local from, to = opts.from, opts.to
-  local m, n = #from, #to
+  local m, n = table.maxn(from), table.maxn(to)
 
   -- Build the DP table. Each cell dp[i][j] represents the minimum cost to
   -- transform from[1..i] into to[1..j].
@@ -1430,6 +1430,9 @@ Morph.Pos00 = Pos00
 
 -- Export internal functions for testing when NVIM_TEST=true
 --- @diagnostic disable-next-line: unnecessary-if
-if vim.env.NVIM_TEST then Morph._is_textlock = is_textlock end
+if vim.env.NVIM_TEST then
+  Morph._is_textlock = is_textlock
+  Morph._levenshtein = levenshtein
+end
 
 return Morph
