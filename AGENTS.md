@@ -60,6 +60,9 @@ vim.cmd.qall { bang = true }
 
 ## Code Style Guidelines
 
+### Runtime
+- LuaJIT, do **NOT** use goto
+
 ### Formatting
 - Use stylua with 2-space indentation, 100 char column width
 - Prefer single quotes, auto-prefer single quotes
