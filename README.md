@@ -4,6 +4,10 @@ Build interactive text user interfaces in Neovim with a React-like component mod
 
 ![Blob](./morph.jpg)
 
+## TUIs.nvim
+
+For in-depth examples/demos, go check out the plugin I made built on top of morph.nvim: [tuis.nvim](https://github.com/jrop/tuis.nvim). It includes interactive plugins for managing Docker, Kubernetes, Process Management, Bitwarden, and more.
+
 ## Demo
 
 Show, don't tell: If you want to see the kinds of things you can make with **morph.nvim**, see the following screencast, that demos [one of the examples](./examples/docker-containers.lua) from this repo.
