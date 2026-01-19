@@ -13,7 +13,7 @@ gh_emmylua_check = "github:EmmyLuaLs/emmylua-analyzer-rust"
 [tools]
 # nvimv needs jq:
 jq = "1.8.1"
-lua = "5.1.5"
+"asdf:mise-plugins/mise-lua" = "5.1.5"
 # Since we have busted configured to look for "nvim", have a "default" version
 # installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
 # but to avoid having to litter a bunch of commands with that environment
