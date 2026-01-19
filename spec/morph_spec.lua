@@ -1,4 +1,4 @@
---- @diagnostic disable: need-check-nil, undefined-field, missing-fields, param-type-mismatch
+--- @diagnostic disable: need-check-nil, undefined-field, missing-fields, redundant-parameter, param-type-mismatch
 
 vim.print(tostring(vim.version()))
 
@@ -2180,8 +2180,8 @@ describe('Morph', function()
             return { 'Filter: [' .. ctx.state.filter .. ']' }
           end
 
-          --- @param ctx morph.Ctx
-          local function Help(ctx) return { 'Help content' } end
+          --- @param _ctx morph.Ctx
+          local function Help(_ctx) return { 'Help content' } end
 
           local parent_ctx_ref
           --- @param ctx morph.Ctx<{}, { show_help: boolean }>
@@ -3283,6 +3283,7 @@ describe('Morph', function()
       -- table.maxn(sparse_from) correctly returns 3
       assert.are.same(3, table.maxn(sparse_from), 'test setup: maxn should be 3')
 
+      --- @diagnostic disable-next-line: assign-type-mismatch
       local changes = levenshtein { from = sparse_from, to = sparse_to }
 
       -- If levenshtein correctly uses table.maxn, it should see elements at indices 1 and 3

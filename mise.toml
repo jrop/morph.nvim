@@ -18,7 +18,7 @@ jq = "1.8.1"
 # installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
 # but to avoid having to litter a bunch of commands with that environment
 # initialization, this just makes things simpler:
-neovim = "0.11.5"
+neovim = "0.11.6"
 stylua = "2.3.1"
 
 [tools.gh_emmylua_ls]
@@ -100,7 +100,7 @@ run = 'mise test:version 0.11.5'
 [tasks."test:all"]
 depends = ["test:prepare"]
 run = '''
-VERSIONS="0.10.4 0.11.5 nightly"
+VERSIONS="0.10.4 0.11.6 nightly"
 for v in $VERSIONS; do
   mise test:version:no-prep $v
 done

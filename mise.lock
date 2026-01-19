@@ -17,10 +17,19 @@ backend = "cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust[crate=emmylu
 [[tools.gh_emmylua_check]]
 version = "0.19.0"
 backend = "github:EmmyLuaLs/emmylua-analyzer-rust"
+"platforms.linux-arm64" = { checksum = "sha256:03e3d9595ef97f76f552a0ca42b5ee5bb96dc9f2317d843dc5a5a6fa2bc0bb83", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_ls-linux-aarch64-glibc.2.17.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823276"}
+"platforms.linux-x64" = { checksum = "sha256:9f80238f369cd2b5e67620eb8347407f609d0b30e0ccb0574b61e1151b1196c1", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_check-linux-x64.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823272"}
+"platforms.macos-arm64" = { checksum = "sha256:d9cc6d4bb313a95b5de7f014b21df0e07d0a606f77cbeb44366297eb96033e1d", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_check-darwin-arm64.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823277"}
+"platforms.windows-x64" = { checksum = "sha256:598b38fa747a6013d2617983f05b55d88ced309906978e0bebabc01ce14ec271", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_check-win32-x64.zip", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823273"}
 
 [[tools.gh_emmylua_ls]]
 version = "0.19.0"
 backend = "github:EmmyLuaLs/emmylua-analyzer-rust"
+"platforms.linux-arm64" = { checksum = "sha256:03e3d9595ef97f76f552a0ca42b5ee5bb96dc9f2317d843dc5a5a6fa2bc0bb83", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_ls-linux-aarch64-glibc.2.17.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823276"}
+"platforms.linux-x64" = { checksum = "sha256:2ad6110f8061427bade7ecdb74ed5ceaa30b947885e7f51a6b557e5a0ea037d1", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_ls-linux-x64-glibc.2.17.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823281"}
+"platforms.macos-arm64" = { checksum = "sha256:ba21fd795eca86a37d133ba96df2a304462a2a22870a90ea22eac0e906c28b0d", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_ls-darwin-arm64.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823283"}
+"platforms.macos-x64" = { checksum = "sha256:660e346b11505df9eb18a3711902ab18e434f6bb2245d2213cdcbc4bfd0f50ed", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_ls-darwin-x64.tar.gz", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823280"}
+"platforms.windows-x64" = { checksum = "sha256:598b38fa747a6013d2617983f05b55d88ced309906978e0bebabc01ce14ec271", url = "https://github.com/EmmyLuaLs/emmylua-analyzer-rust/releases/download/0.19.0/emmylua_check-win32-x64.zip", url_api = "https://api.github.com/repos/EmmyLuaLs/emmylua-analyzer-rust/releases/assets/332823273"}
 
 [[tools.jq]]
 version = "1.8.1"
@@ -43,6 +52,15 @@ backend = "aqua:neovim/neovim"
 "platforms.macos-arm64" = { checksum = "sha256:79143d3b408f7034f90b7cf59af2276de09ef8a4c2f1a28e4c99581b249d3107", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-arm64.tar.gz"}
 "platforms.macos-x64" = { checksum = "sha256:6612760a7037ca2518e456908baf5e43101fa79819d18979fc4d4e8441d9dfa5", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-x86_64.tar.gz"}
 "platforms.windows-x64" = { checksum = "sha256:718e731326e7759cf17bbbb33f38975707a2ac85642614686b818ef5fde38f48", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-win64.zip"}
+
+[[tools.neovim]]
+version = "0.11.6"
+backend = "aqua:neovim/neovim"
+"platforms.linux-arm64" = { checksum = "sha256:8ddc0c101846145e830b17bbca50782ca9307eee4fab539d9e2ddaf8793c06f1", url = "https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-arm64.tar.gz"}
+"platforms.linux-x64" = { checksum = "sha256:2fc90b962327f73a78afbfb8203fd19db8db9cdf4ee5e2bef84704339add89cc", url = "https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-linux-x86_64.tar.gz"}
+"platforms.macos-arm64" = { checksum = "sha256:d5ee93b67630d5a87f3d336d0f7e8b2fe6973aa653d3cc93b82b820e6538c1dd", url = "https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-macos-arm64.tar.gz"}
+"platforms.macos-x64" = { checksum = "sha256:6e665bb0a711cf974050e0f7183dbb696b1e7425814eb87df7cb094a49054a06", url = "https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-macos-x86_64.tar.gz"}
+"platforms.windows-x64" = { checksum = "sha256:90fc6d7cdf3d3388737caab1e2c554aa24b468f3a5cc38ef63857ddf1103513c", url = "https://github.com/neovim/neovim/releases/download/v0.11.6/nvim-win64.zip"}
 
 [[tools.stylua]]
 version = "2.3.1"
