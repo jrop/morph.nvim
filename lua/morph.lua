@@ -493,11 +493,10 @@ function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
 
   -- Clamp extmark bounds to actual buffer size (extmarks can overshoot after deletions)
   local last_line_idx = math.max(0, vim.api.nvim_buf_line_count(bufnr) - 1)
-  if extmark.stop[1] > last_line_idx then
-    local last_line = vim.api.nvim_buf_get_lines(bufnr, last_line_idx, last_line_idx + 1, true)[1]
-      or ''
-    extmark.stop = Pos00.new(last_line_idx, #last_line)
-  end
+  local last_line = vim.api.nvim_buf_get_lines(bufnr, last_line_idx, last_line_idx + 1, true)[1]
+    or ''
+  if extmark.start[1] > last_line_idx then extmark.start = Pos00.new(last_line_idx, #last_line) end
+  if extmark.stop[1] > last_line_idx then extmark.stop = Pos00.new(last_line_idx, #last_line) end
 
   return extmark
 end
@@ -533,6 +532,10 @@ end
 function Extmark:_text()
   local start, stop = self.start, self.stop
   if start == stop then return '' end
+
+  -- Handle inverted positions (start > stop), which can occur after buffer
+  -- deletions. Return empty string as there's no valid content to extract.
+  if start > stop then return '' end
 
   -- Handle edge case: if stop is at column 0, we need to include the newline
   -- from the previous line, which getregion doesn't handle well
@@ -1433,6 +1436,7 @@ Morph.Pos00 = Pos00
 if vim.env.NVIM_TEST then
   Morph._is_textlock = is_textlock
   Morph._levenshtein = levenshtein
+  Morph.Extmark = Extmark
 end
 
 return Morph

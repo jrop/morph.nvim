@@ -8,6 +8,7 @@ vim.env.NVIM_TEST = 'true'
 local Morph = require 'morph'
 local h = Morph.h
 local Pos00 = Morph.Pos00
+local Extmark = Morph.Extmark
 
 --------------------------------------------------------------------------------
 -- TEST HELPERS
@@ -1279,6 +1280,77 @@ describe('Morph', function()
           assert.are.same('inner', events[1].id)
         end)
       end)
+    end)
+
+    it('handles inverted extmark positions gracefully', function()
+      -- This test verifies that extmark positions becoming inverted
+      -- (start > stop) is handled gracefully by returning empty string.
+      -- The error message was:
+      --   (morph.nvim:getregion:invalid-pos) { start, end } = { { 9, 4, 1 }, { 9, 3, 9 } }
+      -- Note how line 4 > line 3, which is inverted.
+      with_buf({ 'line1', 'line2', 'line3' }, function()
+        -- Create an Extmark directly with inverted positions (start > stop)
+        -- This simulates what happens when extmarks get corrupted
+        local extmark = {
+          bufnr = 0,
+          ns = vim.api.nvim_create_namespace 'test',
+          -- Inverted: start at row 2, stop at row 1 (0-based)
+          -- This is the bug condition
+          start = Pos00.new(2, 0),
+          stop = Pos00.new(1, 5),
+        }
+        setmetatable(extmark, { __index = Extmark })
+
+        -- Calling _text() with inverted positions should return empty string
+        local result = extmark:_text()
+
+        assert.are.equal(
+          '',
+          result,
+          'Extmark:_text() should handle inverted positions gracefully (return empty string), but got: '
+            .. vim.inspect(result)
+        )
+      end)
+    end)
+  end)
+
+  -- Bug: Deleting trailing blank line causes getregion invalid-pos error
+  -- Error: (morph.nvim:getregion:invalid-pos) { start, end } = { { 9, 4, 1 }, { 9, 3, 9 } }
+  --
+  -- Root cause: Extmark._from_raw clamps stop but NOT start.
+  -- When an extmark's start is past buffer end after deletion, we get start > stop.
+
+  it('clamps extmark start position to buffer bounds', function()
+    with_buf({}, function()
+      local ns = vim.api.nvim_create_namespace 'test_extmark_clamp'
+
+      -- Buffer: 4 lines (0-3)
+      vim.api.nvim_buf_set_lines(0, 0, -1, true, { 'line 0', 'line 1', 'line 2', '' })
+      assert.are.same(4, line_count())
+
+      -- Extmark at line 3 (the last line)
+      local ext_id = vim.api.nvim_buf_set_extmark(0, ns, 3, 0, { end_row = 3, end_col = 0 })
+
+      -- Delete the last line → buffer now has 3 lines (0-2)
+      vim.api.nvim_buf_set_lines(0, 3, 4, true, {})
+      assert.are.same(3, line_count())
+
+      -- Neovim returns extmark with stale position (line 3 doesn't exist)
+      local raw = vim.api.nvim_buf_get_extmark_by_id(0, ns, ext_id, { details = true })
+      local start_row, start_col, details = raw[1], raw[2], raw[3]
+
+      -- BUG: _from_raw clamps stop to buffer bounds but NOT start
+      local extmark = Extmark._from_raw(0, ns, ext_id, start_row, start_col, details)
+
+      -- start should be clamped to valid buffer line
+      local last_line_idx = line_count() - 1
+      assert.is_true(
+        extmark.start[1] <= last_line_idx,
+        ('extmark.start[1] (%d) should be <= last_line_idx (%d)'):format(
+          extmark.start[1],
+          last_line_idx
+        )
+      )
     end)
   end)
 
