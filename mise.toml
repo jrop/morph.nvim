@@ -2,10 +2,6 @@
 ## Tool Alias
 ################################################################################
 
-[tool_alias]
-gh_emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
-gh_emmylua_check = "github:EmmyLuaLs/emmylua-analyzer-rust"
-
 ################################################################################
 ## Tools
 ################################################################################
@@ -20,20 +16,8 @@ jq = "1.8.1"
 # initialization, this just makes things simpler:
 neovim = "0.11.6"
 stylua = "2.3.1"
-
-[tools.gh_emmylua_ls]
-version = "0.19.0"
-[tools.gh_emmylua_ls.platforms]
-linux-x64 = { asset_pattern = "*_ls-linux-x64*" }
-macos-x64 = { asset_pattern = "*_ls-darwin-x64*" }
-macos-arm64 = { asset_pattern = "*_ls-darwin-arm64*" }
-
-[tools.gh_emmylua_check]
-version = "0.19.0"
-[tools.gh_emmylua_check.platforms]
-linux-x64 = { asset_pattern = "*_check-linux-x64*" }
-macos-x64 = { asset_pattern = "*_check-darwin-x64*" }
-macos-arm64 = { asset_pattern = "*_check-darwin-arm64*" }
+"cargo:emmylua_ls" = "0.20.0"
+"cargo:emmylua_check" = "0.20.0"
 
 ################################################################################
 # Env

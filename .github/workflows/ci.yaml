@@ -46,7 +46,9 @@ jobs:
           echo "$HOME/.local/share/mise/shims" >> $GITHUB_PATH
 
       - name: Install mise dependencies
-        run: mise install
+        run: |
+          mise install rust
+          mise install
 
       - name: Check Lua formatting
         run: mise run fmt:check

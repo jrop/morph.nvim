@@ -243,6 +243,7 @@ local function FsNode(ctx)
 
         --- @diagnostic disable-next-line: unnecessary-if
         if kind == 'dir' then
+          --- @diagnostic disable-next-line: invert-if
           if is_expanded then
             -- If the directory itself is expanded, then collapse it:
             tree:set_expanded(path, false)

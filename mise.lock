@@ -3,12 +3,12 @@ version = "5.1.5"
 backend = "asdf:mise-plugins/mise-lua"
 
 [[tools."cargo:emmylua_check"]]
-version = "0.19.0"
-backend = "cargo:emmylua_check[binstall=true,repo=https://github.com/EmmyLuaLs/emmylua-analyzer-rust,crate=emmylua_check]"
+version = "0.20.0"
+backend = "cargo:emmylua_check"
 
 [[tools."cargo:emmylua_ls"]]
-version = "0.19.0"
-backend = "cargo:emmylua_ls[binstall=true,repo=https://github.com/EmmyLuaLs/emmylua-analyzer-rust,crate=emmylua_ls]"
+version = "0.20.0"
+backend = "cargo:emmylua_ls"
 
 [[tools."cargo:https://github.com/EmmyLuaLs/emmylua-analyzer-rust"]]
 version = "0.19.0"
@@ -43,15 +43,6 @@ backend = "aqua:jqlang/jq"
 [[tools.lua]]
 version = "5.1.5"
 backend = "asdf:lua"
-
-[[tools.neovim]]
-version = "0.11.5"
-backend = "aqua:neovim/neovim"
-"platforms.linux-arm64" = { checksum = "sha256:ea4f9a31b11cc1477ff014aebb7b207684e7280f94ffa97abdab6cacd9b98519", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-arm64.tar.gz"}
-"platforms.linux-x64" = { checksum = "sha256:b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz"}
-"platforms.macos-arm64" = { checksum = "sha256:79143d3b408f7034f90b7cf59af2276de09ef8a4c2f1a28e4c99581b249d3107", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-arm64.tar.gz"}
-"platforms.macos-x64" = { checksum = "sha256:6612760a7037ca2518e456908baf5e43101fa79819d18979fc4d4e8441d9dfa5", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-macos-x86_64.tar.gz"}
-"platforms.windows-x64" = { checksum = "sha256:718e731326e7759cf17bbbb33f38975707a2ac85642614686b818ef5fde38f48", url = "https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-win64.zip"}
 
 [[tools.neovim]]
 version = "0.11.6"

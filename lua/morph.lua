@@ -126,13 +126,16 @@ end
 
 --- Compute an identity key for a node, used to match old/new nodes during reconciliation.
 --- Includes the node type, component function (if any), and explicit key attribute.
+--- For primitive types without explicit keys, uses index to distinguish positions.
 --- @param node morph.Node
 --- @param index integer fallback key if no explicit key
 --- @return string
 local function tree_identity_key(node, index)
   local t = tree_type(node)
-  if t == 'nil' or t == 'boolean' or t == 'string' or t == 'number' then
-    return t
+  if t == 'nil' or t == 'boolean' then
+    return t .. '-' .. tostring(index)
+  elseif t == 'string' or t == 'number' then
+    return t .. '-' .. tostring(index)
   elseif t == 'array' then
     return 'array-' .. tostring(index)
   elseif t == 'tag' then
@@ -768,11 +771,29 @@ function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(
 
 --- Apply minimal edits to transform buffer content from old_lines to new_lines.
 --- Uses Levenshtein distance to find the shortest edit sequence.
+--- Falls back to full buffer replacement when >30% of lines change.
 --- @param bufnr integer
 --- @param old_lines string[]?
 --- @param new_lines string[]
 function Morph.patch_lines(bufnr, old_lines, new_lines)
   old_lines = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+  -- Quick check: if >30% of lines differ, skip expensive diffing
+  local max_lines = math.max(#old_lines, #new_lines)
+  if max_lines > vim.o.lines * 5 then
+    local diff_count = 0
+    local threshold = math.floor(max_lines * 0.3)
+    for i = 1, max_lines do
+      if old_lines[i] ~= new_lines[i] then
+        diff_count = diff_count + 1
+        if diff_count > threshold then
+          -- Too many changes, just replace the whole buffer
+          vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
+          return
+        end
+      end
+    end
+  end
 
   local line_changes = levenshtein { from = old_lines, to = new_lines }
 
@@ -948,13 +969,16 @@ function Morph:render(tree)
   self.text_content.curr =
     { lines = lines, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
 
+  -- Clear extmarks BEFORE patching to avoid Neovim's auto-deletion overhead
+  -- when lines with extmarks are deleted by patch_lines
+  vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
+
   self.changing = true
   Morph.patch_lines(self.bufnr, self.text_content.old.lines, lines)
   self.changing = false
   self.changedtick = vim.b[self.bufnr].changedtick
 
-  -- Now that text is in place, create the extmarks
-  vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
+  -- Create extmarks for the new tree
   for _, pending in ipairs(pending_extmarks) do
     local extmark = Extmark.new(self.bufnr, self.ns, pending.start, pending.stop, pending.opts)
     self.text_content.curr.extmark_ids_to_tag[extmark.id] = pending.tag
@@ -989,21 +1013,25 @@ function Morph:mount(tree)
     local node_type = tree_type(old_tree)
 
     if node_type == 'array' then
-      --- @diagnostic disable-next-line: need-check-nil
-      reconcile_array(old_tree --[[@as morph.Node[] ]], {})
+      -- Fast path: directly unmount each child without key matching overhead
+      for _, child in
+        ipairs(old_tree --[[@as morph.Node[] ]])
+      do
+        --- @diagnostic disable-next-line: need-check-nil
+        unmount_tree(child)
+      end
     elseif node_type == 'tag' then
-      -- Tag children can be any tree type, so recurse with reconcile_tree
+      -- Tag children can be any tree type, so recurse with unmount_tree
       --- @diagnostic disable-next-line: need-check-nil
-      reconcile_tree((old_tree --[[@as morph.Tag]]).children, nil)
+      unmount_tree((old_tree --[[@as morph.Tag]]).children)
     elseif node_type == 'component' then
       local tag = old_tree --[[@as morph.Tag]]
       local Component = tag.name --[[@as morph.Component]]
       local ctx = assert(tag.ctx, 'component missing context during unmount')
 
-      -- Unmount children first (depth-first) - use reconcile_tree since
-      -- prev_rendered_children can be any tree type, not just an array
+      -- Unmount children first (depth-first)
       --- @diagnostic disable-next-line: need-check-nil
-      reconcile_tree(ctx.prev_rendered_children, nil)
+      unmount_tree(ctx.prev_rendered_children)
 
       -- Then unmount this component
       ctx.phase = 'unmount'
@@ -1011,7 +1039,6 @@ function Morph:mount(tree)
       ctx.on_change = nil
       ctx._register_after_render_callback = nil
     end
-    --- @diagnostic enable: need-check-nil
   end
 
   --- Reconcile old and new trees, handling mount/update/unmount.
@@ -1063,69 +1090,40 @@ function Morph:mount(tree)
     --- @type morph.Node[]
     new_nodes = new_nodes or {}
 
-    -- Pre-compute "identity keys" for each node so we can match them up
-    -- A key combines: type + component function (if any) + explicit key attribute
-    --- @type table<integer, string>
-    local old_keys = {}
-    --- @type table<integer, string>
-    local new_keys = {}
-    --- @type table<morph.Tree, string>
-    local node_key_cache = {}
-
+    -- Build key -> node map for old nodes (React-style reconciliation)
+    -- This is O(n) and much faster than Levenshtein O(n²) for large lists
+    local old_by_key = {}
     for i = 1, table.maxn(old_nodes) do
       local node = old_nodes[i]
       if node ~= nil then
         local key = tree_identity_key(node --[[@as morph.Node]], i)
-        old_keys[i] = key
-        node_key_cache[node] = key
-      end
-    end
-    for i = 1, table.maxn(new_nodes) do
-      local node = new_nodes[i]
-      if node ~= nil then
-        local key = tree_identity_key(node --[[@as morph.Node]], i)
-        new_keys[i] = key
-        node_key_cache[node] = key
+        old_by_key[key] = node
       end
     end
 
-    -- Use Levenshtein to find optimal mapping from old -> new nodes.
-    -- We say no nodes are "equal" (all need reconciliation), but nodes with
-    -- matching keys have lower change cost (prefer updating over mount/unmount).
-    local changes = levenshtein {
-      from = old_nodes,
-      to = new_nodes,
-      are_any_equal = false,
-      cost = {
-        of_change = function(_, _, old_idx, new_idx)
-          return old_keys[old_idx] == new_keys[new_idx] and 1 or 2
-        end,
-      },
-    }
-
+    -- Scan new list, reusing nodes by key or mounting new ones
     local result = {} --- @type morph.Node[]
+    for i = 1, table.maxn(new_nodes) do
+      local new_node = new_nodes[i]
+      if new_node ~= nil then
+        local key = tree_identity_key(new_node --[[@as morph.Node]], i)
+        local old_node = old_by_key[key]
 
-    for _, change in ipairs(changes) do
-      local rendered_node
-
-      if change.kind == 'add' then
-        -- New node: mount it
-        rendered_node = reconcile_tree(nil, change.item)
-      elseif change.kind == 'delete' then
-        -- Removed node: unmount it
-        reconcile_tree(change.item, nil)
-      elseif change.kind == 'change' then
-        -- Changed node: update (the type should always be the same: see invariant below)
-        local from_key = node_key_cache[change.from]
-        local to_key = node_key_cache[change.to]
-        assert(
-          from_key == to_key,
-          'array reconciliation invariant: levenshtein should favor delete+add when from_key ~= to_key'
-        )
-        rendered_node = reconcile_tree(change.from, change.to)
+        --- @diagnostic disable-next-line: unnecessary-if
+        if old_node then
+          -- Key match: update existing node
+          table.insert(result, reconcile_tree(old_node, new_node))
+          old_by_key[key] = nil -- Mark as used
+        else
+          -- No key match: mount new node
+          table.insert(result, reconcile_tree(nil, new_node))
+        end
       end
+    end
 
-      if rendered_node then table.insert(result, 1, rendered_node) end
+    -- Unmount any old nodes that weren't reused
+    for _, old_node in pairs(old_by_key) do
+      reconcile_tree(old_node, nil)
     end
 
     return result
@@ -1145,6 +1143,7 @@ function Morph:mount(tree)
       ctx = old_tag.ctx
     end
 
+    --- @diagnostic disable-next-line: unnecessary-if
     if ctx then
       ctx.phase = 'update'
     else
@@ -1256,6 +1255,7 @@ function Morph._position_intersects_extmark(pos, extmark, mode)
     -- the cursor at column 0 should be considered inside. This happens when
     -- an element ends with a newline - the cursor on the resulting empty line
     -- has nowhere else to be, so it should still trigger handlers.
+    --- @diagnostic disable-next-line: invert-if
     if pos[2] == 0 and stop[2] == 0 then
       local line = vim.api.nvim_buf_get_lines(extmark.bufnr, pos[1], pos[1] + 1, true)[1] or ''
       if #line == 0 then return true end
@@ -1265,7 +1265,9 @@ function Morph._position_intersects_extmark(pos, extmark, mode)
     -- the position if it's <= stop (cursor can sit "on" the boundary)
     -- In normal mode the cursor is "wide" (occupies a character), so we only
     -- include if strictly < stop
+    --- @diagnostic disable-next-line: invert-if
     if mode == 'i' then
+      --- @diagnostic disable-next-line: invert-if
       if pos[2] > stop[2] then return false end
     else
       if pos[2] >= stop[2] then return false end
