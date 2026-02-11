@@ -963,6 +963,10 @@ function Morph:render(tree)
     end,
   }
 
+  -- Edge case: empty trees produce empty lines array, but buffers always have
+  -- at least one line. Set curr.lines to reflect reality, not the empty tree.
+  if #lines == 0 then lines = { '' } end
+
   -- Update buffer text with minimal edits
   --- @diagnostic disable-next-line: assign-type-mismatch
   self.text_content.old = self.text_content.curr

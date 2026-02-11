@@ -3437,4 +3437,32 @@ describe('Morph', function()
       end)
     end)
   end)
+
+  ----------------------------------------------------------------------------
+  -- REGRESSION TEST: Rendering empty tree should not cause blank lines
+  --
+  -- Bug: When rendering an empty tree ({}) between non-empty renders,
+  -- the next render would have old.lines = {} (empty array) instead of
+  -- {""}, causing patch_lines to add an extra blank line.
+  ----------------------------------------------------------------------------
+
+  it('should not add blank lines when rendering empty tree between content', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+
+      -- First render: non-empty content
+      r:render { 'First' }
+      assert.are.same({ 'First' }, get_lines())
+
+      -- Second render: empty tree (may or may not clear buffer)
+      r:render {}
+
+      -- Third render: new non-empty content
+      -- The key assertion: no blank line should appear after the content
+      r:render { 'Second' }
+      local lines = get_lines()
+      assert.are.same(1, #lines, 'Buffer should have exactly 1 line, no blank lines')
+      assert.are.same('Second', lines[1])
+    end)
+  end)
 end)
