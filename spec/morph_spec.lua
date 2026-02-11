@@ -2122,6 +2122,47 @@ describe('Morph', function()
         end)
       end)
 
+      it(
+        'executes do_after_render callbacks even when update is called during update phase',
+        function()
+          with_buf({}, function()
+            local callback_executed = false
+            local capture_ctx
+
+            --- @param ctx morph.Ctx<{}, { open: boolean, updated: boolean }>
+            local function ComponentWithCallback(ctx)
+              if ctx.phase == 'mount' then
+                ctx.state = { open = false, updated = false }
+                capture_ctx = ctx
+              end
+              -- Only schedule callback and call update on the first update when open becomes true
+              if ctx.state.open and ctx.phase == 'update' and not ctx.state.updated then
+                ctx:do_after_render(function() callback_executed = true end)
+                -- Mark as updated to prevent infinite loop
+                ctx.state.updated = true
+                ctx:update(ctx.state)
+              end
+              return { ctx.state.open and 'open' or 'closed' }
+            end
+
+            local r = Morph.new(0)
+            r:mount(h(ComponentWithCallback))
+            assert.are.same('closed', get_text())
+            assert.is_false(callback_executed)
+
+            -- Now trigger the update that causes the issue
+            capture_ctx.state.open = true
+            capture_ctx:refresh()
+
+            -- The callback should have been executed
+            assert.is_true(
+              callback_executed,
+              'do_after_render callback should be executed even when ctx:update is called during update phase'
+            )
+          end)
+        end
+      )
+
       it('does not re-render when update called during mount phase', function()
         with_buf({}, function()
           local render_count = 0

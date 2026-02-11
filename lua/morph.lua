@@ -1177,14 +1177,16 @@ function Morph:mount(tree)
 
   --- Perform a full re-render of the component tree.
   rerender = function()
-    after_render_callbacks = {}
-
     local simplified_tree = reconcile_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
     self:render(simplified_tree)
 
-    -- Run any scheduled after-render callbacks
-    for _, callback in ipairs(after_render_callbacks) do
+    -- Run any scheduled after-render callbacks, then clear the list.
+    -- We clear after (not before) to handle the case where ctx:update()
+    -- is called during the update phase, which would trigger a nested rerender.
+    local callbacks = after_render_callbacks
+    after_render_callbacks = {}
+    for _, callback in ipairs(callbacks) do
       callback()
     end
   end
