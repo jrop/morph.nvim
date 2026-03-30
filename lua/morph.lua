@@ -919,7 +919,9 @@ function Morph:render(tree)
       pcall(vim.keymap.del, mode, map.lhs, { buffer = self.bufnr })
     end
     for _, map in pairs(self.original_keymaps[mode] or {}) do
-      vim.fn.mapset(map)
+      -- Wrap mapset in nvim_buf_call to ensure buffer-local maps are restored
+      -- to self.bufnr, regardless of which buffer is currently focused
+      vim.api.nvim_buf_call(self.bufnr, function() vim.fn.mapset(map) end)
     end
   end
 

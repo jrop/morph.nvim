@@ -1850,6 +1850,81 @@ describe('Morph', function()
         assert.are.same(my_orig_callback, vim.fn.maparg('<Leader>abc', 'n', false, true).callback)
       end)
     end)
+
+    it(
+      'restores buffer-local keymaps into correct buffer when another buffer is current',
+      function()
+        -- Regression test for: Buffer-local keymaps restored into the wrong buffer
+        -- When Morph renders while another buffer is current, buffer-local maps
+        -- should still be restored into Morph's target buffer, not the current one.
+        vim.cmd.new()
+        local buf_a = vim.api.nvim_get_current_buf()
+        vim.api.nvim_buf_set_lines(buf_a, 0, -1, false, { 'Buffer A' })
+
+        -- Set up a raw buffer-local keymap in buffer A
+        local original_handler_called = false
+        vim.keymap.set('n', '<Esc>', function()
+          original_handler_called = true
+          return ''
+        end, { buffer = buf_a })
+
+        -- Create Morph document in buffer A
+        local leaked_ctx
+        local function TestComponent(ctx)
+          if ctx.phase == 'mount' then
+            ctx.state = { count = 1 }
+            leaked_ctx = ctx
+          end
+          return h('text', {
+            id = 'test',
+            nmap = {
+              ['x'] = function() return '' end,
+            },
+          }, 'Content: ' .. ctx.state.count)
+        end
+
+        local r = Morph.new(buf_a)
+        r:mount(h(TestComponent))
+
+        -- Verify buffer A has the Morph keymap
+        local buf_a_mapping = vim.fn.maparg('x', 'n', false, true)
+        assert.is_false(vim.tbl_isempty(buf_a_mapping), 'Buffer A should have x mapping')
+
+        -- Create buffer B and make it current
+        vim.cmd.new()
+        local buf_b = vim.api.nvim_get_current_buf()
+        vim.api.nvim_buf_set_lines(buf_b, 0, -1, false, { 'Buffer B' })
+
+        -- Ensure we're in buffer B
+        assert.are.same(buf_b, vim.api.nvim_get_current_buf())
+
+        -- Trigger a rerender of Morph while buffer B is current
+        leaked_ctx:update { count = 2 }
+
+        -- Verify buffer A still has its original <Esc> mapping
+        -- Use nvim_buf_get_keymap to check specific buffer's mappings
+        local buf_a_keymaps = vim.api.nvim_buf_get_keymap(buf_a, 'n')
+        local buf_a_has_esc = vim.tbl_filter(function(m) return m.lhs == '<Esc>' end, buf_a_keymaps)
+        assert.are.same(
+          1,
+          #buf_a_has_esc,
+          'Buffer A should still have <Esc> mapping after render from buffer B'
+        )
+
+        -- Verify buffer B does NOT have buffer A's <Esc> mapping leaked into it
+        local buf_b_keymaps = vim.api.nvim_buf_get_keymap(buf_b, 'n')
+        local buf_b_has_esc = vim.tbl_filter(function(m) return m.lhs == '<Esc>' end, buf_b_keymaps)
+        assert.are.same(
+          0,
+          #buf_b_has_esc,
+          "Buffer B should NOT have buffer A's <Esc> mapping leaked into it"
+        )
+
+        -- Cleanup
+        pcall(vim.api.nvim_buf_delete, buf_a, { force = true })
+        pcall(vim.api.nvim_buf_delete, buf_b, { force = true })
+      end
+    )
   end)
 
   ------------------------------------------------------------------------------
