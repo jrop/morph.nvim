@@ -11,6 +11,7 @@ jq = "1.8.1"
 # but to avoid having to litter a bunch of commands with that environment
 # initialization, this just makes things simpler:
 neovim = "0.12.1"
+"http:nvimv" = { version = "latest", url = "https://raw.githubusercontent.com/jrop/nvimv/refs/heads/main/nvimv" }
 stylua = "2.3.1"
 cargo-binstall = "1.17.9"
 "cargo:emmylua_ls" = { version = "0.20.0", depends = ["cargo-binstall"] }
@@ -41,10 +42,10 @@ echo
 if find .prefix -path '**/nightly/**/nvim' -mtime -1 2>/dev/null | grep -q .; then
   echo "Neovim Nightly is up-to-date"
 else
-  if ./nvimv/nvimv ls | grep nightly >/dev/null; then
-    ./nvimv/nvimv upgrade nightly
+  if nvimv ls | grep nightly >/dev/null; then
+    nvimv upgrade nightly
   else
-    ./nvimv/nvimv install nightly
+    nvimv install nightly
   fi
 fi
 echo
@@ -63,8 +64,8 @@ echo Neovim version=$usage_version
 echo -----------------------------
 echo -----------------------------
 echo
-./nvimv/nvimv install $usage_version
-eval $(./nvimv/nvimv env $usage_version)
+nvimv install $usage_version
+eval $(nvimv env $usage_version)
 busted --verbose
 '''
 

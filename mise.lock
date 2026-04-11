@@ -36,6 +36,18 @@ backend = "cargo:emmylua_check"
 version = "0.20.0"
 backend = "cargo:emmylua_ls"
 
+[[tools."http:nvimv"]]
+version = "latest"
+backend = "http:nvimv"
+
+[tools."http:nvimv"."platforms.macos-arm64"]
+checksum = "blake3:42efe216d0463cd84dcfc6371ebdce9baa271f1607b8e798b67e292602787d87"
+url = "https://raw.githubusercontent.com/jrop/nvimv/refs/heads/main/nvimv"
+
+[[tools."http:nvimv"]]
+version = "42efe21"
+backend = "http:nvimv"
+
 [[tools.jq]]
 version = "1.8.1"
 backend = "aqua:jqlang/jq"
