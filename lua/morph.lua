@@ -1510,7 +1510,7 @@ function Morph:_on_bytes_after_autocmd(
   -- setting the text lock, we make sure we can iterate through the list,
   -- maintaining whatever tag <=> extmark correlations exist at the beginning
   -- of this loop, and we can maintain that all the correct handlers are
-  -- called (at lease, the ones we CAN guarantee).
+  -- called (at least, the ones we CAN guarantee).
   local prev_textlock = self.textlock
   self.textlock = true
 
