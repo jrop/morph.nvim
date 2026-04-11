@@ -1,4 +1,11 @@
---- @diagnostic disable: need-check-nil, undefined-field, missing-fields, redundant-parameter, param-type-mismatch
+--- @diagnostic disable: assign-type-mismatch
+--- @diagnostic disable: inject-field
+--- @diagnostic disable: missing-fields
+--- @diagnostic disable: need-check-nil
+--- @diagnostic disable: param-type-mismatch
+--- @diagnostic disable: redundant-parameter
+--- @diagnostic disable: undefined-field
+--- @diagnostic disable: unnecessary-if
 
 vim.print(tostring(vim.version()))
 
@@ -1928,6 +1935,58 @@ describe('Morph', function()
   end)
 
   ------------------------------------------------------------------------------
+  -- MOUNT INTO NON-EMPTY BUFFER
+  --
+  -- Bug: When mount() is called on a non-empty buffer, TextChanged can fire
+  -- after the initial render without on_bytes having captured any args.
+  -- This causes _on_bytes_after_autocmd to receive nil for all parameters,
+  -- resulting in: "attempt to perform arithmetic on local 'start_row0' (a nil value)"
+  --
+  -- The issue is in create_buf_watcher: it initializes last_on_bytes_args to nil,
+  -- and unpack({}) returns zero values, so all callback parameters are nil.
+  ------------------------------------------------------------------------------
+
+  describe('mount into non-empty buffer', function()
+    it('handles TextChanged firing when on_bytes has no captured args', function()
+      with_buf({ 'existing content', 'multiple lines' }, function()
+        --- @param ctx morph.Ctx<{}, { text: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { text = 'morph content' } end
+          return h('text', {}, { ctx.state.text })
+        end
+
+        local r = Morph.new()
+        r:mount(h(App))
+        assert.are.same({ 'morph content' }, get_lines())
+
+        -- Simulate the bug: clear the captured on_bytes args, then fire TextChanged.
+        -- This can happen if TextChanged fires without a corresponding on_bytes event,
+        -- e.g., when a plugin or user action triggers TextChanged without actual changes.
+        r.buf_watcher.last_on_bytes_args = nil
+
+        -- This should NOT throw "attempt to perform arithmetic on local 'start_row0' (a nil value)"
+        assert.has_no.errors(function() vim.cmd.doautocmd 'TextChanged' end)
+      end)
+    end)
+
+    it('works correctly when buffer is empty', function()
+      with_buf({}, function()
+        --- @param ctx morph.Ctx<{}, { text: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { text = 'morph content' } end
+          return h('text', {}, { ctx.state.text })
+        end
+
+        local r = Morph.new()
+        local ok, err = pcall(function() r:mount(h(App)) end)
+
+        assert.is_true(ok, 'Mount should succeed when buffer is empty: ' .. tostring(err))
+        assert.are.same({ 'morph content' }, get_lines())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
   -- KEYED LIST RECONCILIATION
   ------------------------------------------------------------------------------
 
@@ -3580,5 +3639,79 @@ describe('Morph', function()
       assert.are.same(1, #lines, 'Buffer should have exactly 1 line, no blank lines')
       assert.are.same('Second', lines[1])
     end)
+  end)
+
+  ----------------------------------------------------------------------------
+  -- STARTUP PHASE BUFFER HANDLING
+  --
+  -- Bug: When mounting during Neovim startup (before VimEnter), the buffer
+  -- has a filename but isn't loaded yet. nvim_buf_attach fails silently,
+  -- breaking on_change handlers.
+  ----------------------------------------------------------------------------
+
+  describe('_is_buffer_api_ready', function()
+    it('returns true for normal buffers after VimEnter', function()
+      with_buf({ 'content' }, function() assert.is_true(Morph._is_buffer_api_ready(0)) end)
+    end)
+
+    it('returns true for scratch buffers (no filename)', function()
+      local buf = vim.api.nvim_create_buf(false, true)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'scratch' })
+      assert.is_true(Morph._is_buffer_api_ready(buf))
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end)
+  end)
+
+  it('auto-defers mount when buffer not yet loaded during startup', function()
+    local tmpdir = vim.fn.tempname()
+    vim.fn.mkdir(tmpdir .. '/morph_test/lua/my', 'p')
+
+    local morph_path = vim.fn.getcwd() .. '/lua/morph.lua'
+    vim.fn.system { 'ln', '-sf', morph_path, tmpdir .. '/morph_test/lua/my/morph.lua' }
+
+    local init_content = [=[
+vim.o.runtimepath = vim.o.runtimepath .. ',.'
+local Morph = require 'my.morph'
+local h = Morph.h
+
+local function App(ctx)
+  if ctx.phase == 'mount' then ctx.state = { text = 'RENDERED' } end
+  return h('text', {}, { ctx.state.text })
+end
+
+Morph.new(0):mount(h(App))
+vim.defer_fn(function()
+  local f = io.open('RESULT', 'w')
+  f:write(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), '\n'))
+  f:close()
+  vim.cmd('qall!')
+end, 100)
+]=]
+    init_content = init_content:gsub('RESULT', tmpdir .. '/result.txt')
+    vim.fn.writefile(vim.split(init_content, '\n'), tmpdir .. '/morph_test/init.lua')
+    vim.fn.writefile({ '-- original content' }, tmpdir .. '/test.lua')
+
+    vim
+      .system({
+        'nvim',
+        '--headless',
+        tmpdir .. '/test.lua',
+      }, {
+        env = {
+          XDG_CONFIG_HOME = tmpdir,
+          NVIM_APPNAME = 'morph_test',
+        },
+        text = true,
+      })
+      :wait()
+
+    vim.wait(2000, function() return vim.fn.filereadable(tmpdir .. '/result.txt') == 1 end, 100)
+
+    local result = vim.fn.filereadable(tmpdir .. '/result.txt') == 1
+        and vim.fn.readfile(tmpdir .. '/result.txt')[1]
+      or ''
+    vim.fn.delete(tmpdir, 'rf')
+
+    assert.are.same('RENDERED', result)
   end)
 end)

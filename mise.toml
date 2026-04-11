@@ -1,8 +1,4 @@
 ################################################################################
-## Tool Alias
-################################################################################
-
-################################################################################
 ## Tools
 ################################################################################
 
@@ -14,10 +10,11 @@ jq = "1.8.1"
 # installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
 # but to avoid having to litter a bunch of commands with that environment
 # initialization, this just makes things simpler:
-neovim = "0.12.0"
+neovim = "0.12.1"
 stylua = "2.3.1"
-"cargo:emmylua_ls" = "0.20.0"
-"cargo:emmylua_check" = "0.20.0"
+cargo-binstall = "1.17.9"
+"cargo:emmylua_ls" = { version = "0.20.0", depends = ["cargo-binstall"] }
+"cargo:emmylua_check" = { version = "0.20.0", depends = ["cargo-binstall"] }
 
 ################################################################################
 # Env

@@ -313,6 +313,27 @@ local function is_textlock()
 end
 
 --------------------------------------------------------------------------------
+-- Buffer API Readiness
+--
+-- During Neovim startup (before VimEnter), file buffers may have their
+-- filename set but content not loaded yet. Rendering into such buffers
+-- causes content to be prepended instead of replaced (bug).
+--------------------------------------------------------------------------------
+
+--- Check if the buffer API is in a consistent state for rendering.
+--- @param bufnr integer
+--- @return boolean
+local function is_buffer_api_ready(bufnr)
+  -- Vim hasn't finished startup - buffer state may be inconsistent
+  if vim.v.vim_did_enter == 0 then return false end
+
+  -- File buffer has filename but isn't loaded yet
+  if vim.api.nvim_buf_get_name(bufnr) ~= '' and vim.fn.bufloaded(bufnr) == 0 then return false end
+
+  return true
+end
+
+--------------------------------------------------------------------------------
 -- Buffer Watcher
 --
 -- Neovim's nvim_buf_attach on_bytes callback fires *during* the change,
@@ -330,21 +351,50 @@ end
 --- @param callback function Called with on_bytes args after TextChanged fires
 --- @return morph.BufWatcher
 local function create_buf_watcher(bufnr, callback)
+  -- Guard: buffer API must be ready for nvim_buf_attach to work
+  if not is_buffer_api_ready(bufnr) then
+    error(
+      'morph.nvim: Cannot create buffer watcher - buffer not yet loaded. '
+        .. 'Buffer must be loaded before mounting.',
+      0
+    )
+  end
+
   local watcher = {
-    last_on_bytes_args = {},
+    last_on_bytes_args = nil,
   }
 
   -- Capture on_bytes args but don't call callback yet
-  vim.api.nvim_buf_attach(bufnr, false, {
+  local attach_ok = vim.api.nvim_buf_attach(bufnr, false, {
     on_bytes = function(...) watcher.last_on_bytes_args = { ... } end,
   })
+
+  -- Safety check: attach may fail for other reasons
+  if not attach_ok then
+    error(
+      'morph.nvim: Failed to attach buffer change detection. '
+        .. 'on_change handlers will not work.',
+      0
+    )
+  end
 
   -- Fire callback when TextChanged fires (buffer is now stable)
   watcher.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
     { 'TextChanged', 'TextChangedI', 'TextChangedP' },
     {
       buffer = bufnr,
-      callback = function() callback(unpack(watcher.last_on_bytes_args)) end,
+      callback = function()
+        if not watcher.last_on_bytes_args then
+          -- on_bytes hasn't fired yet. This can happen when TextChanged
+          -- triggers before any actual buffer changes (e.g., on initial mount
+          -- into a non-empty buffer).
+          return
+        end
+
+        local last_args = watcher.last_on_bytes_args
+        watcher.last_on_bytes_args = nil
+        callback(unpack(last_args))
+      end,
     }
   )
 
@@ -550,8 +600,8 @@ function Extmark:_text()
   end
 
   -- Convert to 1-based positions for getregion (Neovim's API inconsistency strikes again)
-  local pos1 = { self.bufnr, start[1] + 1, start[2] + 1 }
-  local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2] }
+  local pos1 = { self.bufnr, start[1] + 1, start[2] + 1, 0 }
+  local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2], 0 }
 
   local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
   if not ok then
@@ -666,9 +716,9 @@ end
 --- @field private textlock boolean
 --- @field private original_keymaps table<string, table<string, any>>
 --- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
---- @field private component_tree { old: morph.Tree  }
+--- @field private component_tree { old: morph.Tree }
 --- @field private cleanup_hooks function[]
---- @field private buf_watcher morph.BufWatcher
+--- @field private buf_watcher morph.BufWatcher? -- Created lazily
 local Morph = {}
 Morph.__index = Morph
 
@@ -855,6 +905,7 @@ function Morph.new(bufnr)
     },
     component_tree = { old = nil },
     cleanup_hooks = {},
+    buf_watcher = nil, -- Created lazily in _ensure_buf_watcher()
   }, Morph)
 
   -- Snapshot all buffer-local keymaps so we can restore them before each render
@@ -865,11 +916,6 @@ function Morph.new(bufnr)
       self.original_keymaps[mode][map.lhs] = map
     end
   end
-
-  -- Watch for text changes so we can fire on_change handlers
-  --- @diagnostic disable-next-line: param-type-mismatch
-  self.buf_watcher = create_buf_watcher(bufnr, function(...) self:_on_bytes_after_autocmd(...) end)
-  table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
 
   -- Clean up when buffer is deleted
   local cleanup_autocmd = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
@@ -885,6 +931,27 @@ function Morph.new(bufnr)
   return self
 end
 
+--- Ensure the buffer watcher is created. Called lazily from render/mount.
+--- @private
+function Morph:_ensure_buf_watcher()
+  if self.buf_watcher then return end
+
+  -- Guard: buffer API must be ready for nvim_buf_attach to work
+  if not is_buffer_api_ready(self.bufnr) then
+    error(
+      'morph.nvim: Cannot create buffer watcher - buffer not yet loaded. '
+        .. 'Buffer must be loaded before mounting.',
+      0
+    )
+  end
+
+  self.buf_watcher = create_buf_watcher(
+    self.bufnr,
+    function(...) self:_on_bytes_after_autocmd(...) end
+  )
+  table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
+end
+
 --------------------------------------------------------------------------------
 -- Instance Methods
 --------------------------------------------------------------------------------
@@ -895,6 +962,20 @@ end
 function Morph:render(tree)
   -- Guard: buffer may have been deleted while render was scheduled
   if not vim.api.nvim_buf_is_valid(self.bufnr) then return end
+
+  -- Guard: buffer API may not be ready during startup (before VimEnter)
+  if not is_buffer_api_ready(self.bufnr) then
+    vim.notify(
+      'morph.nvim: Buffer not yet loaded, deferring render. '
+        .. 'Consider wrapping render in vim.schedule() for cleaner startup.',
+      vim.log.levels.WARN
+    )
+    vim.schedule(function() self:render(tree) end)
+    return
+  end
+
+  -- Ensure buffer watcher is created (for on_change handlers)
+  self:_ensure_buf_watcher()
 
   -- Detect if buffer changed externally since our last render
   local changedtick = vim.b[self.bufnr].changedtick
@@ -1000,6 +1081,21 @@ function Morph:mount(tree)
   if vim.b[self.bufnr]._morph_mounted then
     error('Morph:mount() can only be called once per buffer', 0)
   end
+
+  -- Guard: buffer API may not be ready during startup
+  if not is_buffer_api_ready(self.bufnr) then
+    vim.notify(
+      'morph.nvim: Buffer not yet loaded, deferring mount. '
+        .. 'Consider wrapping mount in vim.schedule() for cleaner startup.',
+      vim.log.levels.WARN
+    )
+    vim.schedule(function() self:mount(tree) end)
+    return
+  end
+
+  -- Ensure buffer watcher is created (for on_change handlers)
+  self:_ensure_buf_watcher()
+
   vim.b[self.bufnr]._morph_mounted = true
 
   -- Callbacks scheduled via ctx:do_after_render() - run after each render
@@ -1444,6 +1540,7 @@ Morph.Pos00 = Pos00
 -- Export internal functions for testing when NVIM_TEST=true
 --- @diagnostic disable-next-line: unnecessary-if
 if vim.env.NVIM_TEST then
+  Morph._is_buffer_api_ready = is_buffer_api_ready
   Morph._is_textlock = is_textlock
   Morph._levenshtein = levenshtein
   Morph.Extmark = Extmark

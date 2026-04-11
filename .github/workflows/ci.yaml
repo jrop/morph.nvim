@@ -47,7 +47,6 @@ jobs:
 
       - name: Install mise dependencies
         run: |
-          mise install rust
           mise install
 
       - name: Check Lua formatting
