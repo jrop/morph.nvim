@@ -77,12 +77,12 @@ arg "<version>" help="The version of Neovim to test with"
 run = 'mise test:version:no-prep $usage_version'
 
 [tasks."test"]
-run = 'mise test:version 0.12.0'
+run = 'mise test:version 0.12.1'
 
 [tasks."test:all"]
 depends = ["test:prepare"]
 run = '''
-VERSIONS="0.10.4 0.11.7 0.12.0 nightly"
+VERSIONS="0.10.4 0.11.7 0.12.1 nightly"
 for v in $VERSIONS; do
   mise test:version:no-prep $v
 done
