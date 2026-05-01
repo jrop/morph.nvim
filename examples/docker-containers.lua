@@ -293,13 +293,12 @@ local function App(ctx)
     --
     -- Help (if enabled)
     --
-    state.show_help
-      and {
-        h(Help, {
-          show_help = state.show_help,
-        }),
-        '\n\n',
-      },
+    state.show_help and {
+      h(Help, {
+        show_help = state.show_help,
+      }),
+      '\n\n',
+    },
 
     --
     -- List of containers

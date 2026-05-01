@@ -10,10 +10,10 @@ jq = "1.8.1"
 # installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
 # but to avoid having to litter a bunch of commands with that environment
 # initialization, this just makes things simpler:
-neovim = "0.12.1"
-"http:nvimv" = { version = "latest", url = "https://raw.githubusercontent.com/jrop/nvimv/refs/heads/main/nvimv" }
-stylua = "2.3.1"
-cargo-binstall = "1.17.9"
+neovim = "0.12.2"
+"http:nvimv" = { version = "2d018f5", url = "https://raw.githubusercontent.com/jrop/nvimv/2d018f55173bb88e6fb41e6f07a4908e5619c136/nvimv" }
+stylua = "2.4.1"
+cargo-binstall = "1.18.1"
 "cargo:emmylua_ls" = { version = "0.20.0", depends = ["cargo-binstall"] }
 "cargo:emmylua_check" = { version = "0.20.0", depends = ["cargo-binstall"] }
 
@@ -77,12 +77,12 @@ arg "<version>" help="The version of Neovim to test with"
 run = 'mise test:version:no-prep $usage_version'
 
 [tasks."test"]
-run = 'mise test:version 0.12.1'
+run = 'mise test:version 0.12.2'
 
 [tasks."test:all"]
 depends = ["test:prepare"]
 run = '''
-VERSIONS="0.10.4 0.11.7 0.12.1 nightly"
+VERSIONS="0.10.4 0.11.7 0.12.2 nightly"
 for v in $VERSIONS; do
   mise test:version:no-prep $v
 done

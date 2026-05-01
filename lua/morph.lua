@@ -1163,14 +1163,12 @@ function Morph:mount(tree)
     elseif new_type == 'string' or new_type == 'number' then
       rendered = new_tree
     elseif new_type == 'array' then
-      local old_array = (old_type == 'array') and old_tree --[[@as morph.Node[]?]]
-        or nil
+      local old_array = (old_type == 'array') and old_tree --[[@as morph.Node[]?]] or nil
       --- @diagnostic disable-next-line: need-check-nil
       rendered = reconcile_array(old_array, new_tree --[[@as morph.Node[] ]])
     elseif new_type == 'tag' then
       local new_tag = new_tree --[[@as morph.Tag]]
-      local old_children = (old_type == new_type) and (old_tree --[[@as morph.Tag]]).children
-        or nil
+      local old_children = (old_type == new_type) and (old_tree --[[@as morph.Tag]]).children or nil
       --- @diagnostic disable-next-line: need-check-nil
       rendered = h(new_tag.name, new_tag.attributes, reconcile_tree(old_children, new_tag.children))
     elseif new_type == 'component' then
