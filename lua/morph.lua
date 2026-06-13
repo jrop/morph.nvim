@@ -635,6 +635,7 @@ end
 --- @class morph.Ctx<TProps, TState>
 --- @field bufnr integer
 --- @field document? morph.Morph
+--- @field name string
 --- @field phase 'mount'|'update'|'unmount'
 --- @field props TProps
 --- @field state? TState
@@ -654,6 +655,7 @@ function Ctx.new(bufnr, document, props, state, children)
   return setmetatable({
     bufnr = bufnr,
     document = document,
+    name = '',
     phase = 'mount',
     props = props,
     state = state,
@@ -689,6 +691,66 @@ function Ctx:refresh() self:update(self.state) end
 --- @param fn function
 function Ctx:do_after_render(fn)
   if self._register_after_render_callback then self._register_after_render_callback(fn) end
+end
+
+--- @private
+--- Build the fallback tree for error display. Checks props.fallback first,
+--- then falls back to a default error UI.
+--- @return morph.Tree
+function Ctx:build_error_fallback()
+  local fallback = self.props.fallback
+  --- @diagnostic disable-next-line: need-check-nil
+  if type(fallback) == 'function' then return fallback(self.state.error) end
+  if fallback ~= nil then return fallback end
+
+  --- @diagnostic disable: need-check-nil
+  local name_part = self.state.error.component_name ~= ''
+      and (' in ' .. self.state.error.component_name .. '@' .. self.state.error.phase)
+    or ''
+  --- @diagnostic enable: need-check-nil
+  return {
+    h('text', { hl = 'ErrorMsg' }, 'Error' .. name_part),
+    '\n',
+    --- @diagnostic disable-next-line: need-check-nil
+    h('text', { hl = 'Comment' }, self.state.error.message),
+  }
+end
+
+-------------------------------------------------------------------------------
+-- Error Formatting
+-------------------------------------------------------------------------------
+
+--- @class morph.RenderError
+--- @field message string original error message
+--- @field component_name string component that threw
+--- @field phase string lifecycle phase
+--- @field render_trace string[] ancestor component names
+local RenderError = {}
+RenderError.__index = RenderError
+
+--- @param message string
+--- @param component_name string
+--- @param phase string
+--- @param render_trace string[]
+--- @return morph.RenderError
+function RenderError.new(message, component_name, phase, render_trace)
+  return setmetatable({
+    message = message,
+    component_name = component_name,
+    phase = phase,
+    render_trace = render_trace,
+  }, RenderError)
+end
+
+--- @return string
+function RenderError:__tostring()
+  local lines = {
+    'Error in ' .. self.component_name .. '@' .. self.phase .. ': ' .. self.message,
+  }
+  if #self.render_trace > 0 then
+    table.insert(lines, 'Render trace: ' .. table.concat(self.render_trace, ' > '))
+  end
+  return table.concat(lines, '\n')
 end
 
 --------------------------------------------------------------------------------
@@ -931,8 +993,8 @@ function Morph.new(bufnr)
   return self
 end
 
---- Ensure the buffer watcher is created. Called lazily from render/mount.
 --- @private
+--- Ensure the buffer watcher is created. Called lazily from render/mount.
 function Morph:_ensure_buf_watcher()
   if self.buf_watcher then return end
 
@@ -1104,6 +1166,9 @@ function Morph:mount(tree)
   --- @param cb function
   local function schedule_after_render(cb) table.insert(after_render_callbacks, cb) end
 
+  -- Render trace stack: tracks component ancestry for error messages
+  local render_trace = {} --- @type morph.Ctx[]
+
   -- Forward declarations for mutual recursion
   --- @diagnostic disable: unused
   local reconcile_tree, reconcile_array, reconcile_component, unmount_tree, rerender
@@ -1129,7 +1194,11 @@ function Morph:mount(tree)
     elseif node_type == 'component' then
       local tag = old_tree --[[@as morph.Tag]]
       local Component = tag.name --[[@as morph.Component]]
-      local ctx = assert(tag.ctx, 'component missing context during unmount')
+
+      -- Skip if already unmounted (prevents double-unmount on component_tree.old
+      -- not being updated due to a prior unmount error during reconciliation)
+      if not tag.ctx then return end
+      local ctx = tag.ctx
 
       -- Unmount children first (depth-first)
       --- @diagnostic disable-next-line: need-check-nil
@@ -1137,9 +1206,17 @@ function Morph:mount(tree)
 
       -- Then unmount this component
       ctx.phase = 'unmount'
-      Component(ctx)
+      local ok, err = pcall(Component, ctx)
       ctx.on_change = nil
       ctx._register_after_render_callback = nil
+      tag.ctx = nil
+      if not ok then
+        local names = {} --- @type string[]
+        for _, c in ipairs(render_trace) do
+          table.insert(names, c.name)
+        end
+        error(RenderError.new(tostring(err), ctx.name, 'unmount', names), 0)
+      end
     end
   end
 
@@ -1250,6 +1327,12 @@ function Morph:mount(tree)
       ctx = Ctx.new(self.bufnr, self, new_tag.attributes, nil, new_tag.children)
     end
 
+    -- Set name before calling Component so ctx.name is populated if it throws.
+    -- Components that self-name (ctx.name = 'X') will override this; on update the
+    -- guard skips since the name was already set during mount.
+    --- @diagnostic disable-next-line: need-check-nil
+    if ctx.name == '' then ctx.name = debug.getinfo(Component, 'n').name or '<anonymous>' end
+
     -- Update context with new props/children and wire up callbacks
     ctx.props = new_tag.attributes
     ctx.children = new_tag.children
@@ -1258,10 +1341,45 @@ function Morph:mount(tree)
 
     -- Render the component
     new_tag.ctx = ctx
+    table.insert(render_trace, ctx)
     --- @diagnostic disable-next-line: param-type-mismatch
-    local rendered_children = Component(ctx)
-    local result = reconcile_tree(ctx.prev_rendered_children, rendered_children)
+    local ok, rendered_children = pcall(Component, ctx)
+    if not ok then
+      table.remove(render_trace)
+      local names = {} --- @type string[]
+      for _, c in ipairs(render_trace) do
+        table.insert(names, c.name)
+      end
+      error(RenderError.new(tostring(rendered_children), ctx.name, ctx.phase, names), 0)
+    end
+
+    -- ErrorBoundary: catch descendant render errors, show fallback instead of crashing
+    local result
+    if Component == Morph.ErrorBoundary then
+      local ok, res = pcall(reconcile_tree, ctx.prev_rendered_children, rendered_children)
+      if not ok then
+        --- @diagnostic disable: need-check-nil
+        ctx.state.has_error = true
+        local is_render_error = getmetatable(res) == RenderError
+        ctx.state.error = {
+          message = is_render_error and res.message or tostring(res),
+          component_name = is_render_error and res.component_name or '',
+          phase = is_render_error and res.phase or '',
+          render_trace = is_render_error and res.render_trace
+            or vim.tbl_map(function(c) return c.name end, render_trace),
+        }
+        rendered_children = ctx:build_error_fallback()
+        result = reconcile_tree(ctx.prev_rendered_children, rendered_children)
+        --- @diagnostic enable: need-check-nil
+      else
+        result = res
+      end
+    else
+      result = reconcile_tree(ctx.prev_rendered_children, rendered_children)
+    end
+
     ctx.prev_rendered_children = rendered_children
+    table.remove(render_trace)
 
     -- As soon as we've mounted, move past the 'mount' state. This is
     -- because Ctx will not fire `on_update` if it is still in the
@@ -1551,12 +1669,33 @@ function Morph:_on_bytes_after_autocmd(
   self.textlock = prev_textlock
 end
 
+-------------------------------------------------------------------------------
+-- ErrorBoundary Component
+-------------------------------------------------------------------------------
+
+--- React-style error boundary that catches render errors in its children
+--- and displays a fallback UI instead of crashing the entire render tree.
+Morph.ErrorBoundary = function(ctx)
+  ctx.name = 'ErrorBoundary'
+  if ctx.phase == 'mount' then ctx.state = { has_error = false, error = nil } end
+
+  if ctx.state.has_error and ctx.phase == 'update' then
+    ctx.state.has_error = false
+    ctx.state.error = nil
+  end
+
+  if ctx.state.has_error then return ctx:build_error_fallback() end
+
+  return ctx.children
+end
+
 --------------------------------------------------------------------------------
 -- Exports
 --------------------------------------------------------------------------------
 
 Morph.h = h
 Morph.Pos00 = Pos00
+Morph.RenderError = RenderError
 
 -- Export internal functions for testing when NVIM_TEST=true
 --- @diagnostic disable-next-line: unnecessary-if

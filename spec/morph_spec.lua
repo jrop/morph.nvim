@@ -3761,3 +3761,470 @@ end, 100)
     assert.are.same('RENDERED', result)
   end)
 end)
+
+-------------------------------------------------------------------------------
+-- RENDERERROR
+-------------------------------------------------------------------------------
+
+describe('RenderError', function()
+  it('produces expected string from tostring with render trace', function()
+    local RenderError = Morph.RenderError
+    local err = RenderError.new('msg', 'Comp', 'mount', { 'Root', 'Middle' })
+    assert.are.same('Error in Comp@mount: msg\nRender trace: Root > Middle', tostring(err))
+  end)
+
+  it('produces expected string without render trace', function()
+    local RenderError = Morph.RenderError
+    local err = RenderError.new('msg', 'Comp', 'mount', {})
+    assert.are.same('Error in Comp@mount: msg', tostring(err))
+  end)
+
+  it('exposes component_name and phase fields directly', function()
+    local RenderError = Morph.RenderError
+    local err = RenderError.new('msg', 'Comp', 'update', { 'Root' })
+    assert.are.same('Comp', err.component_name)
+    assert.are.same('update', err.phase)
+    assert.are.same('msg', err.message)
+    assert.are.same({ 'Root' }, err.render_trace)
+  end)
+
+  it('nested component error has string names in render_trace', function()
+    local RenderError = Morph.RenderError
+
+    --- @param ctx morph.Ctx
+    local function DeepChild(ctx)
+      ctx.name = 'DeepChild'
+      error 'deep error'
+    end
+
+    --- @param ctx morph.Ctx
+    local function Middle(ctx)
+      ctx.name = 'Middle'
+      return h(DeepChild)
+    end
+
+    --- @param ctx morph.Ctx
+    local function Root(ctx)
+      ctx.name = 'Root'
+      return h(Middle)
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount(h(Root)) end)
+      assert.is_false(ok)
+      assert.is_true(getmetatable(err) == RenderError, 'should be a RenderError object')
+      assert.are.same({ 'Root', 'Middle' }, err.render_trace, 'render_trace should be string names')
+    end)
+  end)
+end)
+-------------------------------------------------------------------------------
+-- ERROR MESSAGES
+-------------------------------------------------------------------------------
+
+describe('error messages', function()
+  it('uses <anonymous> as fallback name when debug.getinfo has no name', function()
+    local function AnonymousComponent(_ctx) error 'fail' end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount(h(AnonymousComponent)) end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        tostring(err):match 'Error in <anonymous>@mount',
+        'expected <anonymous> in error: ' .. tostring(err)
+      )
+    end)
+  end)
+
+  it('includes component name and update phase when component throws during update', function()
+    local captured_ctx
+
+    --- @param ctx morph.Ctx
+    local function UpdatingComponent(ctx)
+      ctx.name = 'UpdatingComponent'
+      if ctx.phase == 'mount' then
+        ctx.state = { count = 0 }
+        captured_ctx = ctx
+      end
+      if ctx.phase == 'update' then error 'update error' end
+      return { 'ok' }
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(UpdatingComponent))
+      -- Trigger update which throws
+      local ok, err = pcall(function() captured_ctx:update { count = 1 } end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'UpdatingComponent@update',
+        'expected component name and update phase in error: ' .. vim.inspect(err)
+      )
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'update error',
+        'expected original error message: ' .. vim.inspect(err)
+      )
+    end)
+  end)
+
+  it('includes component name and unmount phase when component throws during unmount', function()
+    local parent_ctx
+
+    --- @param ctx morph.Ctx
+    local function UnmountingComponent(ctx)
+      ctx.name = 'UnmountingComponent'
+      if ctx.phase == 'unmount' then error 'unmount error' end
+      return { 'ok' }
+    end
+
+    --- @param ctx morph.Ctx
+    local function App(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = { show = true }
+        parent_ctx = ctx
+      end
+      if ctx.state.show then return h(UnmountingComponent) end
+      return 'hidden'
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(App))
+      -- Toggle show to false, triggering unmount of UnmountingComponent
+      local ok, err = pcall(function() parent_ctx:update { show = false } end)
+      assert.is_false(ok, 'unmount should fail. err=' .. tostring(err))
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'UnmountingComponent@unmount',
+        'expected component name and unmount phase in error: ' .. vim.inspect(err)
+      )
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'unmount error',
+        'expected original error message: ' .. vim.inspect(err)
+      )
+    end)
+  end)
+
+  it('includes render trace for nested components', function()
+    --- @param ctx morph.Ctx
+    local function DeepChild(ctx)
+      ctx.name = 'DeepChild'
+      error 'deep error'
+    end
+
+    --- @param ctx morph.Ctx
+    local function Middle(ctx)
+      ctx.name = 'Middle'
+      return h(DeepChild)
+    end
+
+    --- @param ctx morph.Ctx
+    local function Root(ctx)
+      ctx.name = 'Root'
+      return h(Middle)
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount(h(Root)) end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'Error in DeepChild@mount',
+        'expected error in DeepChild: ' .. vim.inspect(err)
+      )
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'Render trace: Root > Middle$',
+        'expected render trace Root > Middle: ' .. vim.inspect(err)
+      )
+    end)
+  end)
+
+  it('uses explicit ctx.name when set by component', function()
+    --- @param ctx morph.Ctx
+    local function NamedComponent(ctx)
+      ctx.name = 'MyCustomName'
+      error 'named error'
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount(h(NamedComponent)) end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'MyCustomName@mount',
+        'expected custom name: ' .. vim.inspect(err)
+      )
+    end)
+  end)
+
+  it('includes component name and mount phase when component throws during mount', function()
+    --- @param ctx morph.Ctx
+    local function CrashyComponent(ctx)
+      ctx.name = 'CrashyComponent'
+      error 'something went wrong'
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount(h(CrashyComponent)) end)
+      assert.is_false(ok, 'mount should fail. err=' .. tostring(err))
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'CrashyComponent@mount',
+        'should include component name and mount phase. err=' .. vim.inspect(err)
+      )
+      assert.is_not_nil(
+        type(err) == 'string' and err:match 'something went wrong',
+        'should include original error message. err=' .. vim.inspect(err)
+      )
+    end)
+  end)
+end)
+
+-------------------------------------------------------------------------------
+-- ERROR BOUNDARIES
+-------------------------------------------------------------------------------
+
+describe('error boundaries', function()
+  it('catches child mount error and renders fallback', function()
+    --- @param _ctx morph.Ctx
+    local function CrashyComponent(_ctx) error 'mount error' end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      -- Test without h() wrapper - direct ErrorBoundary
+      local ok, err = pcall(
+        function()
+          r:mount {
+            h(Morph.ErrorBoundary, { fallback = h('text', {}, 'Oops') }, {
+              h(CrashyComponent),
+            }),
+          }
+        end
+      )
+      assert.is_true(ok, 'mount should not throw: ' .. tostring(err))
+      assert.are.same('Oops', get_text())
+    end)
+  end)
+
+  it('catches child update error and renders fallback', function()
+    local child_ctx
+
+    --- @param ctx morph.Ctx
+    local function CrashyComponent(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = {}
+        child_ctx = ctx
+      end
+      if ctx.phase == 'update' then error 'update error' end
+      return { 'normal' }
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(Morph.ErrorBoundary, { fallback = h('text', {}, 'Fallback') }, {
+        h(CrashyComponent),
+      }))
+      assert.are.same('normal', get_text())
+
+      child_ctx:update {}
+      assert.are.same('Fallback', get_text())
+    end)
+  end)
+
+  it('catches child unmount error', function()
+    local parent_ctx
+
+    --- @param ctx morph.Ctx
+    local function CrashyChild(ctx)
+      if ctx.phase == 'unmount' then error 'unmount error' end
+      return { 'child' }
+    end
+
+    --- @param ctx morph.Ctx
+    local function App(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = { show = true }
+        parent_ctx = ctx
+      end
+      return {
+        h(Morph.ErrorBoundary, { fallback = h('text', {}, 'Fallback') }, {
+          ctx.state.show and h(CrashyChild) or nil,
+        }),
+      }
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(App))
+      assert.are.same('child', get_text())
+
+      parent_ctx:update { show = false }
+      assert.are.same('Fallback', get_text())
+    end)
+  end)
+
+  it('renders custom fallback prop', function()
+    local function CrashyComponent(_ctx) error 'fail' end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(Morph.ErrorBoundary, {
+        fallback = h('text', { hl = 'ErrorMsg' }, 'Custom Fallback'),
+      }, {
+        h(CrashyComponent),
+      }))
+      assert.are.same('Custom Fallback', get_text())
+    end)
+  end)
+
+  it('passes error info to fallback function', function()
+    local captured_error
+
+    --- @param _ctx morph.Ctx
+    local function CrashyComponent(_ctx) error 'boom' end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(Morph.ErrorBoundary, {
+        fallback = function(error_info)
+          captured_error = error_info
+          return h('text', {}, 'Caught: ' .. error_info.message)
+        end,
+      }, {
+        h(CrashyComponent),
+      }))
+      assert.is_not_nil(captured_error, 'error_info should be passed to fallback')
+      assert.is_not_nil(
+        captured_error.message:match 'boom',
+        'fallback should receive error message containing original error'
+      )
+    end)
+  end)
+
+  it('passes structured error info with component_name and phase to fallback', function()
+    local captured_error
+
+    --- @param ctx morph.Ctx
+    local function CrashyComponent(ctx)
+      ctx.name = 'CrashyComponent'
+      error 'boom'
+    end
+
+    --- @param ctx morph.Ctx
+    local function App(ctx)
+      ctx.name = 'App'
+      return h(Morph.ErrorBoundary, {
+        fallback = function(error_info)
+          captured_error = error_info
+          return h('text', {}, 'Caught')
+        end,
+      }, {
+        h(CrashyComponent),
+      })
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(App))
+      assert.is_not_nil(captured_error)
+      assert.are.same('CrashyComponent', captured_error.component_name)
+      assert.are.same('mount', captured_error.phase)
+      assert.is_not_nil(captured_error.message:match 'boom')
+      assert.are.same(
+        { 'App', 'ErrorBoundary' },
+        captured_error.render_trace,
+        'render_trace should be string names of ancestors'
+      )
+    end)
+  end)
+
+  it('shows default error UI when no fallback prop', function()
+    --- @param _ctx morph.Ctx
+    local function CrashyComponent(_ctx) error 'default ui test' end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(Morph.ErrorBoundary, {}, {
+        h(CrashyComponent),
+      }))
+      local text = get_text()
+      assert.is_not_nil(text:match 'Error', 'should show Error heading')
+      assert.is_not_nil(text:match 'default ui test', 'should show error message')
+    end)
+  end)
+
+  it('does not interfere with normal rendering', function()
+    --- @param ctx morph.Ctx
+    local function StableComponent(ctx)
+      if ctx.phase == 'mount' then ctx.state = { text = 'hello' } end
+      return { h('text', {}, ctx.state.text) }
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(Morph.ErrorBoundary, {}, {
+        h(StableComponent),
+      }))
+      assert.are.same('hello', get_text())
+    end)
+  end)
+
+  it('retries child rendering on state update', function()
+    local child_attempts = 0
+
+    --- @param ctx morph.Ctx
+    local function SometimesCrashy(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = {}
+        child_attempts = child_attempts + 1
+        if child_attempts == 1 then error 'first attempt fails' end
+      end
+      return { 'attempt ' .. child_attempts }
+    end
+
+    local boundary_ctx
+
+    --- @param ctx morph.Ctx
+    local function App(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = {}
+        boundary_ctx = ctx
+      end
+      return {
+        h(Morph.ErrorBoundary, { fallback = h('text', {}, 'Fallback') }, {
+          h(SometimesCrashy),
+        }),
+      }
+    end
+
+    with_buf({}, function()
+      local r = Morph.new(0)
+      r:mount(h(App))
+      assert.are.same('Fallback', get_text())
+
+      -- Retry: child should succeed on second attempt (new ctx, fresh mount)
+      boundary_ctx:update {}
+      assert.are.same('attempt 2', get_text())
+    end)
+  end)
+
+  it('nested boundary: inner catches first, outer unaffected', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+
+      --- @param _ctx morph.Ctx
+      local function InnerCrashy(_ctx) error 'inner error' end
+
+      r:mount(h(Morph.ErrorBoundary, {
+        fallback = h('text', {}, 'Outer OK'),
+      }, {
+        h(Morph.ErrorBoundary, {
+          fallback = h('text', {}, 'Inner Caught'),
+        }, {
+          h(InnerCrashy),
+        }),
+      }))
+      assert.are.same('Inner Caught', get_text())
+    end)
+  end)
+end)
