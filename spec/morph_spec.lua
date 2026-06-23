@@ -1047,6 +1047,52 @@ describe('Morph', function()
       end)
     end)
 
+    it('does not corrupt buffer on atomic multi-line insert at end of line', function()
+      -- When a multi-line insert happens at the end of an extmark, the buggy
+      -- end_col0 calculation (treating new_end_col_off as relative even when
+      -- new_end_row_off > 0) and the wrong clamp (against the last line instead
+      -- of the end row's line) can cause _get_in_range to query the wrong region.
+      -- With a controlled component that echoes on_change back via re-render,
+      -- a stale or missed on_change event causes the buffer to be overwritten
+      -- with stale single-line text, destroying the user's multi-line insert.
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local captured_changed_text = nil
+
+        --- @param ctx morph.Ctx<{}, { text: string }>
+        local function App(ctx)
+          if ctx.phase == 'mount' then ctx.state = { text = 'jsonPayload.message' } end
+          local state = assert(ctx.state)
+          return {
+            h('text', {
+              id = 'the-id',
+              on_change = function(e)
+                e.bubble_up = false
+                captured_changed_text = e.text
+                ctx:update { text = e.text }
+              end,
+            }, state.text),
+          }
+        end
+        r:mount(h(App))
+
+        assert.are.same({ 'jsonPayload.message' }, get_lines())
+
+        -- Simulate real Cmd+V: atomic multi-line insert at end of line 0.
+        -- "jsonPayload.message" is 19 chars; insert "\nseverity" at col 19.
+        vim.api.nvim_buf_set_text(0, 0, 19, 0, 19, { '', 'severity' })
+        vim.cmd.doautocmd 'TextChanged'
+
+        -- Drain scheduled re-render (on_change updates state => scheduled rerender)
+        vim.wait(100, function() return false end)
+
+        -- Buffer must NOT be corrupted by the re-render
+        assert.are.same({ 'jsonPayload.message', 'severity' }, get_lines())
+        -- on_change must receive the full updated text, not a truncated/garbled slice
+        assert.are.same('jsonPayload.message\nseverity', captured_changed_text)
+      end)
+    end)
+
     it('fires with empty string when tag text is deleted entirely', function()
       with_buf({}, function()
         local r = Morph.new(0)

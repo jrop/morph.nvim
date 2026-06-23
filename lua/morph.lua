@@ -1460,12 +1460,35 @@ function Morph:_on_bytes_after_autocmd(
   -- Ignore changes we're making ourselves during render
   if self.changing then return end
 
-  -- Clamp the changed region to buffer bounds
-  local end_row0 =
-    math.min(start_row0 + new_end_row_off, vim.api.nvim_buf_line_count(self.bufnr) - 1)
-  local end_col0 = start_col0 + new_end_col_off
-  local last_line = vim.api.nvim_buf_get_lines(self.bufnr, -2, -1, true)[1] or ''
-  if end_col0 > #last_line then end_col0 = #last_line end
+  -- Per :h nvim_buf_attach on_bytes: when new_end_row_off > 0, new_end_col_off
+  -- is the ABSOLUTE column in the end row (from column 0), not a relative
+  -- offset from start_col0. Only when the change stays on one line
+  -- (new_end_row_off == 0) is new_end_col_off relative to start_col0.
+  local end_row0 = start_row0 + new_end_row_off
+  local end_col0
+  if new_end_row_off == 0 then
+    end_col0 = start_col0 + new_end_col_off
+  else
+    end_col0 = new_end_col_off
+  end
+
+  -- Clamp the end column to the length of the line it actually lands on.
+  -- on_bytes fires after the buffer change so positions are normally valid,
+  -- but extmarks can carry stale bounds past buffer end after deletions, and
+  -- nvim_buf_get_extmarks rejects out-of-bounds positions.
+  local line_count = vim.api.nvim_buf_line_count(self.bufnr)
+  if end_row0 >= line_count then
+    end_row0 = line_count - 1
+    end_col0 = 0
+  else
+    local end_line = vim.api.nvim_buf_get_lines(
+      self.bufnr,
+      end_row0 --[[@as integer]],
+      (end_row0 + 1) --[[@as integer]],
+      false
+    )[1] or ''
+    if end_col0 > #end_line then end_col0 = #end_line end
+  end
 
   -- Find extmarks that overlap the changed region
   local affected_extmarks = Extmark._get_in_range(
