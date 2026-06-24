@@ -1367,6 +1367,100 @@ describe('Morph', function()
     end)
   end)
 
+  it('fires on_change when set_lines inserts content after extmark range', function()
+    -- nvim_buf_set_lines at a boundary does NOT expand the extmark's end_row.
+    -- This simulates linewise paste ("p" in Normal mode), where the extmark
+    -- covers only the original content, and the newly inserted lines fall
+    -- outside the extmark's range. The fallback in _on_bytes_after_autocmd
+    -- must scan all on_change elements when no extmarks overlap the changed
+    -- region and read the full buffer content directly.
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_changed_text = nil
+
+      --- @param ctx morph.Ctx<{}, { text: string }>
+      local function App(ctx)
+        if ctx.phase == 'mount' then ctx.state = { text = 'asldkfjasdlfjkasdfkj' } end
+        local state = assert(ctx.state)
+        return {
+          h('text', {
+            id = 'the-id',
+            on_change = function(e)
+              e.bubble_up = false
+              captured_changed_text = e.text
+              ctx:update { text = e.text }
+            end,
+          }, state.text),
+        }
+      end
+      r:mount(h(App))
+
+      assert.are.same({ 'asldkfjasdlfjkasdfkj' }, get_lines())
+
+      -- Simulate linewise paste: insert a line after the extmark's range.
+      -- nvim_buf_set_lines at index 1 (past end of line 0) does NOT expand
+      -- the extmark's end_row, so _get_in_range will find no overlap.
+      vim.api.nvim_buf_set_lines(0, 1, 1, false, { 'logName="projects/latakoo-dev/logs/ltk"' })
+      vim.cmd.doautocmd 'TextChanged'
+
+      -- Drain scheduled re-render (on_change updates state => scheduled rerender)
+      vim.wait(100, function() return false end)
+
+      -- Buffer must contain both lines
+      assert.are.same(
+        { 'asldkfjasdlfjkasdfkj', 'logName="projects/latakoo-dev/logs/ltk"' },
+        get_lines()
+      )
+      -- on_change must receive the full multi-line text
+      assert.are.same(
+        'asldkfjasdlfjkasdfkj\nlogName="projects/latakoo-dev/logs/ltk"',
+        captured_changed_text
+      )
+    end)
+  end)
+  it('fires on_change when set_lines inserts content before extmark range', function()
+    -- nvim_buf_set_lines at row 0 (before the extmark) shifts the extmark
+    -- rather than expanding it. The fallback must detect that the extmark
+    -- moved (current.start ~= cached.start) and fire on_change with the
+    -- full buffer text including the prepended content.
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local captured_changed_text = nil
+
+      --- @param ctx morph.Ctx<{}, { text: string }>
+      local function App(ctx)
+        if ctx.phase == 'mount' then ctx.state = { text = 'asldkfjasdlfjkasdfkj' } end
+        local state = assert(ctx.state)
+        return {
+          h('text', {
+            id = 'the-id',
+            on_change = function(e)
+              e.bubble_up = false
+              captured_changed_text = e.text
+              ctx:update { text = e.text }
+            end,
+          }, state.text),
+        }
+      end
+      r:mount(h(App))
+
+      assert.are.same({ 'asldkfjasdlfjkasdfkj' }, get_lines())
+
+      -- Prepend a line before the extmark range.
+      -- Neovim shifts the extmark from row 0 to row 1.
+      vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'prepended' })
+      vim.cmd.doautocmd 'TextChanged'
+
+      -- Drain scheduled re-render (on_change updates state => scheduled rerender)
+      vim.wait(100, function() return false end)
+
+      -- on_change must fire with the full buffer including prepended content
+      assert.are.same('prepended\nasldkfjasdlfjkasdfkj', captured_changed_text)
+      -- Buffer must contain both lines (on_change fired, state update kept both)
+      assert.are.same({ 'prepended', 'asldkfjasdlfjkasdfkj' }, get_lines())
+    end)
+  end)
+
   -- Bug: Deleting trailing blank line causes getregion invalid-pos error
   -- Error: (morph.nvim:getregion:invalid-pos) { start, end } = { { 9, 4, 1 }, { 9, 3, 9 } }
   --
@@ -2577,6 +2671,67 @@ describe('Morph', function()
 
           assert.are.same(2, render_count)
           assert.are.same('ready', get_text())
+        end)
+      end)
+
+      it('unmounts old and mounts new when component function changes', function()
+        with_buf({}, function()
+          local phases_a = {}
+          local phases_b = {}
+
+          --- @param ctx morph.Ctx
+          local function CompA(ctx)
+            table.insert(phases_a, ctx.phase)
+            return { 'CompA' }
+          end
+
+          --- @param ctx morph.Ctx
+          local function CompB(ctx)
+            table.insert(phases_b, ctx.phase)
+            return { 'CompB' }
+          end
+
+          local parent_ctx
+          --- @param ctx morph.Ctx<{}, { use_b: boolean }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then ctx.state = { use_b = false } end
+            parent_ctx = ctx
+            if ctx.state.use_b then
+              return h(CompB)
+            else
+              return h(CompA)
+            end
+          end
+
+          local r = Morph.new(0)
+          r:mount(h(App))
+
+          -- Phase 1: Initial mount -> CompA mounts
+          assert.are.same({ 'mount' }, phases_a, 'CompA mounts on initial render')
+          assert.are.same({}, phases_b, 'CompB not called yet')
+          assert.are.same('CompA', get_text())
+
+          -- Phase 2: Switch to CompB -> CompA unmounts, CompB mounts
+          parent_ctx:update { use_b = true }
+
+          assert.are.same(
+            { 'mount', 'unmount' },
+            phases_a,
+            'CompA unmounts when component function changes'
+          )
+          assert.are.same({ 'mount' }, phases_b, 'CompB mounts when component function changes')
+          assert.are.same('CompB', get_text())
+
+          -- Phase 3: Switch back to CompA -> CompB unmounts, CompA mounts fresh
+          parent_ctx:update { use_b = false }
+
+          assert.are.same(
+            { 'mount', 'unmount', 'mount' },
+            phases_a,
+            'CompA mounts fresh when switched back'
+          )
+          assert.are.same({ 'mount', 'unmount' }, phases_b, 'CompB unmounts when switched away')
+          assert.are.same('CompA', get_text())
         end)
       end)
     end)

@@ -767,7 +767,8 @@ end
 ---   lines: string[],
 ---   extmarks: morph.Extmark[],
 ---   tags_to_extmark_ids: table<morph.Tag, integer?>,
----   extmark_ids_to_tag: table<integer, morph.Tag?>
+---   extmark_ids_to_tag: table<integer, morph.Tag?>,
+---   top_level_tag?: morph.Tag,
 --- }
 
 --- @class morph.Morph
@@ -1134,6 +1135,15 @@ function Morph:render(tree)
     self.text_content.curr.tags_to_extmark_ids[pending.tag] = extmark.id
     table.insert(self.text_content.curr.extmarks, extmark)
   end
+  -- Identify the top-level tag: the text element whose extmark covers the
+  -- entire rendered buffer (start at (0,0), stop at rendered_end).
+  local rendered_end = Pos00.new(#lines - 1, #(lines[#lines] or ''))
+  for _, pending in ipairs(pending_extmarks) do
+    if pending.start[1] == 0 and pending.start[2] == 0 and pending.stop == rendered_end then
+      self.text_content.curr.top_level_tag = pending.tag
+      break
+    end
+  end
 end
 
 --- Mount a component tree with full lifecycle management.
@@ -1317,7 +1327,13 @@ function Morph:mount(tree)
     local old_type = tree_type(old_tree)
     if old_type == 'component' then
       local old_tag = old_tree --[[@as morph.Tag]]
-      ctx = old_tag.ctx
+      -- Only reuse context when the component function is the same
+      if old_tag.name == Component then
+        ctx = old_tag.ctx
+      else
+        -- Component function changed: unmount old, mount fresh
+        unmount_tree(old_tree)
+      end
     end
 
     --- @diagnostic disable-next-line: unnecessary-if
@@ -1628,6 +1644,24 @@ function Morph:_on_bytes_after_autocmd(
         table.insert(changed_elements, { extmark = extmark, text = new_text })
       end
     end
+  end
+
+  -- Fallback: no extmark matched - paste likely went beyond top-level node bounds.
+  if #changed_elements == 0 then
+    local tag = self.text_content.curr.top_level_tag
+    if tag and vim.is_callable(tag.attributes.on_change) then
+      local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
+      if tag.curr_text ~= content then
+        tag.curr_text = content
+        local prev_textlock = self.textlock
+        self.textlock = true
+        local event = { text = content, bubble_up = true }
+        --- @diagnostic disable-next-line: need-check-nil
+        tag.attributes.on_change(event)
+        self.textlock = prev_textlock
+      end
+    end
+    return
   end
 
   -- Sort innermost first (same as get_elements_at)
