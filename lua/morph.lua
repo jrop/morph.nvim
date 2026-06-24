@@ -1135,14 +1135,12 @@ function Morph:render(tree)
     self.text_content.curr.tags_to_extmark_ids[pending.tag] = extmark.id
     table.insert(self.text_content.curr.extmarks, extmark)
   end
-  -- Identify the top-level tag: the text element whose extmark covers the
-  -- entire rendered buffer (start at (0,0), stop at rendered_end).
+  -- First pending_extmark is the outermost <text> node (DFS order).
+  -- If it spans the full buffer, it's the top-level tag.
+  local first = pending_extmarks[1]
   local rendered_end = Pos00.new(#lines - 1, #(lines[#lines] or ''))
-  for _, pending in ipairs(pending_extmarks) do
-    if pending.start[1] == 0 and pending.start[2] == 0 and pending.stop == rendered_end then
-      self.text_content.curr.top_level_tag = pending.tag
-      break
-    end
+  if first and first.start[1] == 0 and first.start[2] == 0 and first.stop == rendered_end then
+    self.text_content.curr.top_level_tag = first.tag
   end
 end
 
