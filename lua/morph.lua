@@ -148,6 +148,12 @@ local function tree_identity_key(node, index)
   error 'unreachable'
 end
 
+-- Pre-computed keymap mode tables and attribute names.
+-- Avoids allocating `{ 'i', 'n', 'v', 'x', 'o' }` and concatenating
+-- `mode .. 'map'` on every on_tag callback invocation.
+local KEYMAP_MODES = { 'i', 'n', 'v', 'x', 'o' }
+local KEYMAP_ATTRS = { 'imap', 'nmap', 'vmap', 'xmap', 'omap' }
+
 --------------------------------------------------------------------------------
 -- Levenshtein Diff Algorithm
 --
@@ -425,7 +431,11 @@ local h = setmetatable({}, {
   -- h.Comment(attrs, children) - shorthand for h('text', { hl = 'Comment', ...attrs }, children)
   __index = function(self, highlight_group)
     return function(attributes, children)
-      local merged_attrs = vim.tbl_deep_extend('force', { hl = highlight_group }, attributes or {})
+      attributes = attributes or {}
+      local merged_attrs = { hl = highlight_group }
+      for k, v in pairs(attributes) do
+        merged_attrs[k] = v
+      end
       return self('text', merged_attrs, children or {})
     end
   end,
@@ -496,12 +506,15 @@ Extmark.__index = Extmark
 --- @param opts vim.api.keyset.set_extmark
 --- @return morph.Extmark
 function Extmark.new(bufnr, ns, start, stop, opts)
-  local extmark_opts = vim.tbl_extend('force', {
+  local extmark_opts = {
     end_row = stop[1],
     end_col = stop[2],
     right_gravity = false,
     end_right_gravity = true,
-  }, opts)
+  }
+  for k, v in next, opts do
+    extmark_opts[k] = v
+  end
 
   local id = vim.api.nvim_buf_set_extmark(bufnr, ns, start[1], start[2], extmark_opts)
   return setmetatable(
@@ -798,6 +811,7 @@ Morph.__index = Morph
 --- @return string[]
 function Morph.markup_to_lines(opts)
   local lines = {} --- @type string[]
+  local line_buffers = {} --- @type string[][]
   local curr_line1, curr_col1 = 1, 1 -- 1-based position tracking
 
   -- Stack of text accumulators - each tag tracks its own text content
@@ -806,8 +820,13 @@ function Morph.markup_to_lines(opts)
 
   --- @param s string
   local function emit_text(s)
-    lines[curr_line1] = (lines[curr_line1] or '') .. s
-    curr_col1 = #lines[curr_line1] + 1
+    local buf = line_buffers[curr_line1]
+    if not buf then
+      buf = {}
+      line_buffers[curr_line1] = buf
+    end
+    table.insert(buf, s)
+    curr_col1 = curr_col1 + #s
     -- Append to all active accumulators (for nested tags)
     for _, acc in ipairs(text_accumulators) do
       table.insert(acc.text, s)
@@ -815,7 +834,6 @@ function Morph.markup_to_lines(opts)
   end
 
   local function emit_newline()
-    table.insert(lines, '')
     curr_line1 = curr_line1 + 1
     curr_col1 = 1
     for _, acc in ipairs(text_accumulators) do
@@ -874,6 +892,14 @@ function Morph.markup_to_lines(opts)
   end
 
   visit(opts.tree)
+
+  -- Finalize: concatenate line buffers into final lines table.
+  -- table.concat is O(n) and single-allocation in LuaJIT.
+  for i = 1, curr_line1 do
+    local buf = line_buffers[i]
+    lines[i] = buf and table.concat(buf) or ''
+  end
+
   return lines
 end
 
@@ -883,35 +909,67 @@ end
 function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(opts), '\n') end
 
 --- Apply minimal edits to transform buffer content from old_lines to new_lines.
---- Uses Levenshtein distance to find the shortest edit sequence.
---- Falls back to full buffer replacement when >30% of lines change.
+--- Uses a two-stage strategy:
+---   1. (O(1)) If line count delta >30% on a large buffer (>500 lines), skip
+---      diffing entirely and do a full buffer replace.
+---   2. (O(n)) Trim common prefix/suffix lines, then run Levenshtein on the
+---      (much smaller) middle section for character-precise edits.
 --- @param bufnr integer
 --- @param old_lines string[]?
 --- @param new_lines string[]
 function Morph.patch_lines(bufnr, old_lines, new_lines)
   old_lines = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-  -- Quick check: if >30% of lines differ, skip expensive diffing
   local max_lines = math.max(#old_lines, #new_lines)
-  if max_lines > vim.o.lines * 5 then
-    local diff_count = 0
-    local threshold = math.floor(max_lines * 0.3)
-    for i = 1, max_lines do
-      if old_lines[i] ~= new_lines[i] then
-        diff_count = diff_count + 1
-        if diff_count > threshold then
-          -- Too many changes, just replace the whole buffer
-          vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
-          return
-        end
-      end
+
+  -- Stage 1 (O(1)): check if the line count changed enough that
+  -- Levenshtein would be wasteful - if so, do a full buffer replace.
+  if max_lines > 500 then
+    local len_delta = math.abs(#old_lines - #new_lines) / max_lines
+    if len_delta > 0.3 then
+      local view = vim.fn.winsaveview()
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, new_lines)
+      vim.fn.winrestview(view)
+      return
     end
   end
 
-  local line_changes = levenshtein { from = old_lines, to = new_lines }
+  -- Stage 2 (O(n)): trim common prefix/suffix lines so Levenshtein
+  -- only sees the changed middle.  A single-line insertion deep in a
+  -- 1000-line list balloons Levenshtein's O(n^2) cost; most tree-view
+  -- edits are localised, so the trimmed input is orders of magnitude
+  -- smaller than the raw line count suggests.
+  local prefix = 0
+  while
+    prefix < #old_lines
+    and prefix < #new_lines
+    and old_lines[prefix + 1] == new_lines[prefix + 1]
+  do
+    prefix = prefix + 1
+  end
+
+  local suffix = 0
+  while
+    suffix < #old_lines - prefix
+    and suffix < #new_lines - prefix
+    and old_lines[#old_lines - suffix] == new_lines[#new_lines - suffix]
+  do
+    suffix = suffix + 1
+  end
+
+  local trimmed_old = {}
+  for i = prefix + 1, #old_lines - suffix do
+    trimmed_old[#trimmed_old + 1] = old_lines[i]
+  end
+  local trimmed_new = {}
+  for i = prefix + 1, #new_lines - suffix do
+    trimmed_new[#trimmed_new + 1] = new_lines[i]
+  end
+
+  local line_changes = levenshtein { from = trimmed_old, to = trimmed_new }
 
   for _, change in ipairs(line_changes) do
-    local line0 = change.index - 1
+    local line0 = prefix + change.index - 1
 
     if change.kind == 'add' then
       vim.api.nvim_buf_set_lines(bufnr, line0, line0, true, { change.item })
@@ -972,7 +1030,7 @@ function Morph.new(bufnr)
   }, Morph)
 
   -- Snapshot all buffer-local keymaps so we can restore them before each render
-  for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
+  for _, mode in ipairs(KEYMAP_MODES) do
     self.original_keymaps[mode] = {}
     --- @diagnostic disable-next-line: param-type-mismatch
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, mode)) do
@@ -1057,7 +1115,7 @@ function Morph:render(tree)
   local pending_extmarks = {} --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
 
   -- Clear all buffer-local keymaps, then restore originals
-  for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
+  for _, mode in ipairs(KEYMAP_MODES) do
     for _, map in ipairs(vim.api.nvim_buf_get_keymap(self.bufnr, mode)) do
       --- @diagnostic disable-next-line: param-type-mismatch
       pcall(vim.keymap.del, mode, map.lhs, { buffer = self.bufnr })
@@ -1089,8 +1147,9 @@ function Morph:render(tree)
       })
 
       -- Register keymaps for any mode handlers (nmap, imap, vmap, xmap, omap)
-      for _, mode in ipairs { 'i', 'n', 'v', 'x', 'o' } do
-        local handlers = tag.attributes[mode .. 'map']
+      for i = 1, 5 do
+        local handlers = tag.attributes[KEYMAP_ATTRS[i]]
+        local mode = KEYMAP_MODES[i]
         for lhs, _ in pairs(handlers or {}) do
           vim.keymap.set(mode, lhs, function()
             local result = self:_dispatch_keypress(mode, lhs)

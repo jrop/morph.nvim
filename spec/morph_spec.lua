@@ -271,7 +271,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render {
-          h.Comment({}, {
+          h.Comment({ id = 'merged-attrs' }, {
             'comment start ',
             h.String({}, 'string'),
             ' comment end',
@@ -334,6 +334,20 @@ describe('Morph', function()
       with_buf({ 'single' }, function()
         Morph.patch_lines(0, { 'single' }, { 'line 1', 'line 2', 'line 3', 'line 4' })
         assert.are.same({ 'line 1', 'line 2', 'line 3', 'line 4' }, get_lines())
+      end)
+    end)
+
+    it('uses full buffer replace when line count delta exceeds threshold', function()
+      with_buf({}, function()
+        local old = {}
+        for i = 1, 600 do table.insert(old, 'old line ' .. i) end
+        local new = {}
+        for i = 1, 1000 do table.insert(new, 'new line ' .. i) end
+        Morph.patch_lines(0, old, new)
+        local lines = get_lines()
+        assert.are.same(1000, #lines)
+        assert.are.same('new line 1', lines[1])
+        assert.are.same('new line 1000', lines[1000])
       end)
     end)
   end)
