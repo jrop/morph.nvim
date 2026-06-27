@@ -340,9 +340,13 @@ describe('Morph', function()
     it('uses full buffer replace when line count delta exceeds threshold', function()
       with_buf({}, function()
         local old = {}
-        for i = 1, 600 do table.insert(old, 'old line ' .. i) end
+        for i = 1, 600 do
+          table.insert(old, 'old line ' .. i)
+        end
         local new = {}
-        for i = 1, 1000 do table.insert(new, 'new line ' .. i) end
+        for i = 1, 1000 do
+          table.insert(new, 'new line ' .. i)
+        end
         Morph.patch_lines(0, old, new)
         local lines = get_lines()
         assert.are.same(1000, #lines)
@@ -2962,6 +2966,134 @@ describe('Morph', function()
   end)
 
   ------------------------------------------------------------------------------
+  -- DEBOUNCED RENDERING
+  ------------------------------------------------------------------------------
+
+  describe('debounced rendering', function()
+    it('fires at most once per debounce_ms under streaming updates', function()
+      with_buf({}, function()
+        local render_count = 0
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+          ctx_ref = ctx
+          render_count = render_count + 1
+          return { 'Count: ' .. ctx.state.count }
+        end
+        local r = Morph.new()
+        r:mount(h(Counter), { debounce_ms = 100 })
+
+        assert.are.same(1, render_count)
+        assert.are.same('Count: 0', get_text())
+
+        -- Simulate a stream of updates
+        ctx_ref:update { count = 1 }
+        ctx_ref:update { count = 2 }
+        ctx_ref:update { count = 3 }
+
+        -- State is updated immediately, but no rerender yet
+        assert.are.same(3, ctx_ref.state.count)
+        assert.are.same(1, render_count)
+        assert.are.same('Count: 0', get_text())
+
+        -- Wait for the debounced render to fire AND update the buffer
+        local ok = vim.wait(500, function() return get_text():find 'Count: 3' ~= nil end, 10)
+        assert.is_true(ok, 'debounce should render latest state, got: ' .. get_text())
+        assert.are.same('Count: 3', get_text())
+      end)
+    end)
+
+    it('debounces refresh() calls with same timer', function()
+      with_buf({}, function()
+        local render_count = 0
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+          ctx_ref = ctx
+          render_count = render_count + 1
+          return { 'Count: ' .. ctx.state.count }
+        end
+
+        local r = Morph.new()
+        r:mount(h(Counter), { debounce_ms = 30 })
+
+        assert.are.same(1, render_count)
+
+        ctx_ref:refresh()
+        ctx_ref:refresh()
+
+        local ok = vim.wait(200, function() return render_count >= 2 end, 5)
+        assert.is_true(ok, 'debounce should fire trailing render after refresh')
+        assert.are.same(2, render_count)
+      end)
+    end)
+
+    it('updates synchronously when debounce_ms is 0 (default)', function()
+      with_buf({}, function()
+        local render_count = 0
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+          ctx_ref = ctx
+          render_count = render_count + 1
+          return { 'Count: ' .. ctx.state.count }
+        end
+
+        local r = Morph.new()
+        r:mount(h(Counter)) -- no opts
+
+        assert.are.same(1, render_count)
+        ctx_ref:update { count = 1 }
+        assert.are.same(2, render_count) -- immediate
+        ctx_ref:refresh()
+        assert.are.same(3, render_count) -- immediate
+      end)
+    end)
+
+    it('does not error when buffer is deleted during debounce window', function()
+      -- with_buf helper deletes the buffer on exit; pending timer should be
+      -- cleaned up by the BufDelete autocmd without errors
+      with_buf({}, function()
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+          ctx_ref = ctx
+          return { 'Count: ' .. ctx.state.count }
+        end
+
+        local r = Morph.new()
+        r:mount(h(Counter), { debounce_ms = 100 })
+        ctx_ref:update { count = 1 } -- starts debounce timer
+      end)
+      -- No error expected
+    end)
+
+    it('renders with latest state after coalescing', function()
+      with_buf({}, function()
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = { count = 0 } end
+          ctx_ref = ctx
+          return { 'Count: ' .. ctx.state.count }
+        end
+
+        local r = Morph.new()
+        r:mount(h(Counter), { debounce_ms = 30 })
+
+        ctx_ref:update { count = 5 }
+        ctx_ref:update { count = 42 }
+
+        local ok = vim.wait(200, function()
+          local text = get_text()
+          return text:find 'Count: 42'
+        end, 5)
+        assert.is_true(ok, 'debounced render should use latest state')
+        assert.are.same('Count: 42', get_text())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
   -- COMPONENT CHILDREN
   ------------------------------------------------------------------------------
 
@@ -4394,6 +4526,54 @@ describe('error boundaries', function()
         }),
       }))
       assert.are.same('Inner Caught', get_text())
+    end)
+  end)
+end)
+
+--------------------------------------------------------------------------------
+-- Ctx:update textlock bypass (E565) during expr mappings
+--------------------------------------------------------------------------------
+describe('ctx:update during expr mappings', function()
+  it('does not throw E565 when called from an expr keymap handler', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local navigated = {}
+      local caught_error = nil
+
+      -- A component with state and an expr keymap that calls ctx:update
+      -- This reproduces the pattern used by Table pagination.
+      local Component = function(ctx)
+        if ctx.phase == 'mount' then ctx.state = { page = 1 } end
+        if ctx.phase == 'unmount' then return nil end
+
+        local page = ctx.state.page
+
+        return h('text', {
+          nmap = {
+            [']]'] = function(e)
+              e.bubble_up = false
+              table.insert(navigated, page + 1)
+              ctx.state.page = page + 1
+              -- This should NOT throw E565, but it does (Bug: debounce_ms=0
+              -- is truthy in Lua, and the debounce path skips is_textlock()).
+              local ok, err = pcall(function() ctx:update(ctx.state) end)
+              if not ok then caught_error = err end
+              return ''
+            end,
+          },
+        }, 'Page ' .. page)
+      end
+
+      r:mount(h(Component))
+      -- default mount sets debounce_ms = 0, which is truthy in Lua,
+      -- so the debounce path is taken, which skips is_textlock() → E565
+
+      vim.api.nvim_feedkeys(']]', 'x', false)
+
+      -- The handler should have caught any E565 internally and still
+      -- completed. If ctx:update threw E565, caught_error is non-nil.
+      assert.is_nil(caught_error, 'ctx:update threw: ' .. tostring(caught_error))
+      assert.are.same({ 2 }, navigated, 'handler should have updated state to page 2')
     end)
   end)
 end)

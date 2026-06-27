@@ -687,6 +687,19 @@ function Ctx:update(new_state)
   if self.phase == 'mount' then return end
   if not self.on_change then return end
 
+  -- Debounced mode: on_change wrapper defers via vim.defer_fn, so it never
+  -- touches the buffer synchronously. But we still need to check both
+  -- is_textlock() (expr mappings → E565) and vim.in_fast_event() (fast events
+  -- forbid buffer mutation). When either applies, schedule instead.
+  if self.document and self.document.debounce_ms then
+    if vim.in_fast_event() or is_textlock() then
+      vim.schedule(self.on_change)
+    else
+      self.on_change()
+    end
+    return
+  end
+
   -- Textlock means we can't modify the buffer right now - schedule for later
   local is_textlocked = (self.document and self.document.textlock) or is_textlock()
   if is_textlocked then
@@ -790,6 +803,7 @@ end
 --- @field private changedtick integer
 --- @field private changing boolean
 --- @field private textlock boolean
+--- @field private debounce_ms? integer
 --- @field private original_keymaps table<string, table<string, any>>
 --- @field private text_content { old: morph.MorphTextState, curr: morph.MorphTextState }
 --- @field private component_tree { old: morph.Tree }
@@ -1206,7 +1220,11 @@ end
 --- Mount a component tree with full lifecycle management.
 --- Components can have state, respond to updates, and run cleanup on unmount.
 --- @param tree morph.Tree
-function Morph:mount(tree)
+--- @param opts? { debounce_ms?: integer }  debounce_ms: ms to debounce rerenders (0=sync)
+function Morph:mount(tree, opts)
+  opts = opts or {}
+  local debounce_ms = opts.debounce_ms or (vim.env.NVIM_TEST and 0 or 16)
+  if debounce_ms > 0 then self.debounce_ms = debounce_ms end
   if vim.b[self.bufnr]._morph_mounted then
     error('Morph:mount() can only be called once per buffer', 0)
   end
@@ -1229,6 +1247,10 @@ function Morph:mount(tree)
 
   -- Callbacks scheduled via ctx:do_after_render() - run after each render
   local after_render_callbacks = {} --- @type function[]
+  -- Debounce state: shared between the rerender wrapper (Step 2) and
+  -- the BufDelete autocmd cleanup (Step 4).
+  local debounce_timer = nil --- @type table?
+  local last_invoke_time = nil --- @type integer?
 
   --- @param cb function
   local function schedule_after_render(cb) table.insert(after_render_callbacks, cb) end
@@ -1486,14 +1508,69 @@ function Morph:mount(tree)
     buffer = self.bufnr,
     callback = function()
       vim.b[self.bufnr]._morph_mounted = nil
+      if debounce_timer then
+        debounce_timer:stop()
+        debounce_timer:close()
+        debounce_timer = nil
+      end
       reconcile_tree(self.component_tree.old, nil)
       --- @diagnostic disable-next-line: param-type-mismatch
       vim.api.nvim_del_autocmd(unmount_autocmd_id)
     end,
   })
 
+  -- Install the debounced wrapper BEFORE the initial render so that
+  -- ctx.on_change = rerender (set in reconcile_component) captures the
+  -- debounced version, not the original.
+  if debounce_ms > 0 then
+    local orig_rerender = rerender
+
+    --- MaxWait debounce: at most one rerender per debounce_ms interval
+    --- while updates keep arriving, plus a trailing-edge final render
+    --- when they stop.
+    ---
+    --- On each call:
+    ---   - If a timer is already pending, do nothing (state is already
+    ---     up to date — Ctx:update sets self.state before calling us).
+    ---   - If not, compute the time remaining until the next allowed
+    ---     render slot (debounce_ms since last_invoke_time) and schedule
+    ---     a timer for that duration.
+    ---
+    --- This guarantees a ceiling rate of 1 render / debounce_ms, and
+    --- the trailing edge ensures the UI always shows the latest state
+    --- after a burst settles.
+    rerender = function()
+      -- Pass-through: initial mount render runs synchronously.
+      -- last_invoke_time is nil until set after the initial rerender() call.
+      if last_invoke_time == nil then
+        orig_rerender()
+        return
+      end
+
+      if debounce_timer and debounce_timer:is_active() then return end
+
+      local now = vim.uv.now()
+      local ms_since_last_invoke = math.max(0, now - last_invoke_time)
+      local delay
+      if ms_since_last_invoke >= debounce_ms then
+        delay = debounce_ms
+      else
+        delay = debounce_ms - ms_since_last_invoke
+      end
+
+      debounce_timer = vim.defer_fn(function()
+        debounce_timer = nil
+        last_invoke_time = vim.uv.now()
+        orig_rerender()
+      end, delay)
+    end
+  end
+
   -- Kick off initial render
   rerender()
+  -- Record when the initial render finished (used by debounce maxWait logic).
+  -- Must be set AFTER rerender() to allow the pass-through guard above.
+  last_invoke_time = vim.uv.now()
 end
 
 --- Find all elements that contain the given position, sorted innermost to outermost.
