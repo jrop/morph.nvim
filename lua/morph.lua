@@ -114,6 +114,17 @@ local function tree_type(node)
   if type(node) == 'boolean' then return 'boolean' end
   if type(node) == 'string' then return 'string' end
   if type(node) == 'number' then return 'number' end
+  if type(node) == 'function' then
+    local name = debug.getinfo(node, 'n').name or '<anonymous>'
+    error(
+      'morph.nvim: raw component function "'
+        .. name
+        .. '" found in vnode tree. '
+        .. 'Wrap it: h('
+        .. name
+        .. ', ...)'
+    )
+  end
   if type(node) == 'table' then
     if node.kind == 'tag' then
       return vim.is_callable(node.name) and 'component' or 'tag'

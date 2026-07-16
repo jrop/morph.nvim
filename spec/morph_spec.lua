@@ -4281,6 +4281,60 @@ describe('error messages', function()
   end)
 end)
 
+describe('raw component function in tree', function()
+  it('reports raw component function in mount tree', function()
+    local function MyComponent(_ctx) return 'hello' end
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:mount { MyComponent } end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        tostring(err):match '<anonymous>',
+        'expected <anonymous> in error: ' .. tostring(err)
+      )
+      assert.is_not_nil(
+        tostring(err):match 'Wrap it',
+        'expected suggestion in error: ' .. tostring(err)
+      )
+    end)
+  end)
+
+  it('reports raw component function in render tree', function()
+    local function MyComponent(_ctx) return 'hello' end
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function() r:render { MyComponent } end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        tostring(err):match '<anonymous>',
+        'expected <anonymous> in error: ' .. tostring(err)
+      )
+      assert.is_not_nil(
+        tostring(err):match 'Wrap it',
+        'expected suggestion in error: ' .. tostring(err)
+      )
+    end)
+  end)
+
+  it('uses <anonymous> for unnamed functions', function()
+    with_buf({}, function()
+      local r = Morph.new(0)
+      local ok, err = pcall(function()
+        r:mount { function(_ctx) return '' end }
+      end)
+      assert.is_false(ok)
+      assert.is_not_nil(
+        tostring(err):match '<anonymous>',
+        'expected <anonymous> in error: ' .. tostring(err)
+      )
+      assert.is_not_nil(
+        tostring(err):match 'Wrap it',
+        'expected suggestion in error: ' .. tostring(err)
+      )
+    end)
+  end)
+end)
+
 -------------------------------------------------------------------------------
 -- ERROR BOUNDARIES
 -------------------------------------------------------------------------------
