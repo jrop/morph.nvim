@@ -898,6 +898,28 @@ describe('Morph', function()
         assert.are.same('modified content', captured_changed_text)
       end)
     end)
+
+    it('extracts only the newline for an extmark covering just a trailing newline', function()
+      -- Extmark start (0,1) stop (1,0) covers exactly the '\n' at end of line 0.
+      -- The needs_trailing_newline adjustment makes stop == start, producing
+      -- inverted same-line getregion positions (start col > end col), which
+      -- getregion silently normalizes -- returning the character BEFORE the
+      -- extmark instead of just the newline.
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render {
+          'x',
+          h('text', { id = 'nl' }, '\n'),
+        }
+        assert.are.same({ 'x', '' }, get_lines())
+
+        local elem = r:get_element_by_id 'nl'
+        assert.is_not_nil(elem)
+        assert.are.same(Pos00.new(0, 1), elem.extmark.start)
+        assert.are.same(Pos00.new(1, 0), elem.extmark.stop)
+        assert.are.same('\n', elem.extmark:_text())
+      end)
+    end)
   end)
 
   ------------------------------------------------------------------------------
@@ -2896,6 +2918,44 @@ describe('Morph', function()
           unmount_calls = {}
           leaked_contexts.app:update { show_nested = true }
           assert.are.same({}, unmount_calls)
+        end)
+      end)
+
+      it('unmounts components positioned after a nil hole in the children array', function()
+        -- morph.Tree allows nil nodes; mount/render iterate arrays with
+        -- table.maxn (skipping holes), but unmount_tree uses ipairs, which
+        -- stops at the first nil. Components after a hole never receive
+        -- their unmount lifecycle.
+        with_buf({}, function()
+          local r = Morph.new(0)
+          local unmount_calls = {}
+          local app_ctx = nil
+
+          --- @param ctx morph.Ctx<{ name: string }, {}>
+          local function Leaf(ctx)
+            if ctx.phase == 'unmount' then table.insert(unmount_calls, ctx.props.name) end
+            return ctx.props.name
+          end
+
+          --- @param ctx morph.Ctx<{}, { show: boolean }>
+          local function App(ctx)
+            if ctx.phase == 'mount' then
+              ctx.state = { show = true }
+              app_ctx = ctx
+            end
+            if ctx.state.show then
+              return { h(Leaf, { name = 'A' }), nil, h(Leaf, { name = 'B' }) }
+            end
+            return 'gone'
+          end
+
+          r:mount(h(App))
+          assert.are.same({ 'AB' }, get_lines())
+
+          app_ctx:update { show = false }
+
+          assert.are.same({ 'gone' }, get_lines())
+          assert.are.same({ 'A', 'B' }, unmount_calls)
         end)
       end)
     end)

@@ -621,6 +621,10 @@ function Extmark:_text()
     needs_trailing_newline = true
     local prev_line = vim.api.nvim_buf_get_lines(self.bufnr, stop[1] - 1, stop[1], true)[1] or ''
     stop = Pos00.new(stop[1] - 1, #prev_line)
+    -- Extmark covers exactly one newline. Return early to avoid the
+    -- adjusted stop == start producing inverted same-line positions
+    -- that confuse getregion into leaking the preceding character.
+    if start == stop then return '\n' end
   end
 
   -- Convert to 1-based positions for getregion (Neovim's API inconsistency strikes again)
@@ -1280,12 +1284,10 @@ function Morph:mount(tree, opts)
     local node_type = tree_type(old_tree)
 
     if node_type == 'array' then
-      -- Fast path: directly unmount each child without key matching overhead
-      for _, child in
-        ipairs(old_tree --[[@as morph.Node[] ]])
-      do
-        --- @diagnostic disable-next-line: need-check-nil
-        unmount_tree(child)
+      local arr = old_tree --[[@as morph.Node[] ]]
+      for i = 1, table.maxn(arr) do
+        local child = arr[i]
+        if child ~= nil then unmount_tree(child) end
       end
     elseif node_type == 'tag' then
       -- Tag children can be any tree type, so recurse with unmount_tree
