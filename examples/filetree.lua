@@ -241,7 +241,6 @@ local function FsNode(ctx)
         --- @type morph.examples.Path | nil
         local to_focus
 
-        --- @diagnostic disable-next-line: unnecessary-if
         if kind == 'dir' then
           --- @diagnostic disable-next-line: invert-if
           if is_expanded then
@@ -265,7 +264,6 @@ local function FsNode(ctx)
       l = function(e)
         e.bubble_up = false
         local to_focus
-        --- @diagnostic disable-next-line: unnecessary-if
         if kind == 'dir' then
           tree:set_expanded(path, true)
           to_focus = tree:children(path)[1]
@@ -317,7 +315,6 @@ local function App(ctx)
   end
 
   if ctx.phase ~= 'unmount' then
-    --- @diagnostic disable-next-line: unnecessary-if
     if state.focused then
       local to_focus = state.focused._path
       -- Nil out the focused state, but don't re-render:

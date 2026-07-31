@@ -377,6 +377,7 @@ The flow: `Tree → render() → Element → buffer text + extmarks`
 - `h(name, attributes?, children?)` - Create elements
 - `Morph.new(bufnr?)` - Create a new renderer for a buffer
 - `renderer:mount(tree)` - Mount a component tree
+- `renderer:unmount()` - Unmount the component tree (fires all unmount phases). Leaves buffer content as-is; idempotent; the buffer/instance can be re-mounted afterwards
 - `renderer:render(tree)` - Render static markup
 - `renderer:get_element_by_id(id)` - Find an element by its `id` attribute
 - `renderer:get_elements_at(pos, mode?)` - Get all elements at a cursor position, sorted from innermost to outermost

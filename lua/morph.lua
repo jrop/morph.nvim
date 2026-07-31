@@ -304,7 +304,6 @@ local textlock_probe_buf = nil
 --- Uses nvim_buf_set_lines on a hidden probe buffer.
 --- @return boolean
 local function is_textlock()
-  --- @diagnostic disable-next-line: unnecessary-if
   if vim.in_fast_event() then return true end
 
   -- Lazily create the probe buffer. We can't create it during textlock,
@@ -824,6 +823,8 @@ end
 --- @field private component_tree { old: morph.Tree }
 --- @field private cleanup_hooks function[]
 --- @field private buf_watcher morph.BufWatcher? -- Created lazily
+--- @field private _unmount? fun() -- Terminal teardown, set on mount
+--- @field private _mounted boolean -- True while mounted; stale rerenders no-op after unmount
 local Morph = {}
 Morph.__index = Morph
 
@@ -1056,6 +1057,8 @@ function Morph.new(bufnr)
     component_tree = { old = nil },
     cleanup_hooks = {},
     buf_watcher = nil, -- Created lazily in _ensure_buf_watcher()
+    _unmount = nil,
+    _mounted = false,
   }, Morph)
 
   -- Snapshot all buffer-local keymaps so we can restore them before each render
@@ -1106,6 +1109,25 @@ end
 -- Instance Methods
 --------------------------------------------------------------------------------
 
+--- @private
+--- Clear all buffer-local keymaps, then restore the pre-morph snapshot.
+--- Shared by render (before each draw) and terminal teardown (unmount), so a
+--- live buffer is never left with stale morph-installed keymap handlers.
+--- @param self morph.Morph
+local function restore_buffer_keymaps(self)
+  for _, mode in ipairs(KEYMAP_MODES) do
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(self.bufnr, mode)) do
+      --- @diagnostic disable-next-line: param-type-mismatch
+      pcall(vim.keymap.del, mode, map.lhs, { buffer = self.bufnr })
+    end
+    for _, map in pairs(self.original_keymaps[mode] or {}) do
+      -- Wrap mapset in nvim_buf_call to ensure buffer-local maps are restored
+      -- to self.bufnr, regardless of which buffer is currently focused
+      vim.api.nvim_buf_call(self.bufnr, function() vim.fn.mapset(map) end)
+    end
+  end
+end
+
 --- Render static markup to the buffer.
 --- This is a "one-shot" render - no lifecycle, no state, just text + extmarks.
 --- @param tree morph.Tree
@@ -1144,17 +1166,7 @@ function Morph:render(tree)
   local pending_extmarks = {} --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
 
   -- Clear all buffer-local keymaps, then restore originals
-  for _, mode in ipairs(KEYMAP_MODES) do
-    for _, map in ipairs(vim.api.nvim_buf_get_keymap(self.bufnr, mode)) do
-      --- @diagnostic disable-next-line: param-type-mismatch
-      pcall(vim.keymap.del, mode, map.lhs, { buffer = self.bufnr })
-    end
-    for _, map in pairs(self.original_keymaps[mode] or {}) do
-      -- Wrap mapset in nvim_buf_call to ensure buffer-local maps are restored
-      -- to self.bufnr, regardless of which buffer is currently focused
-      vim.api.nvim_buf_call(self.bufnr, function() vim.fn.mapset(map) end)
-    end
-  end
+  restore_buffer_keymaps(self)
 
   -- Traverse the tree, collecting text lines and extmark info
   local lines = Morph.markup_to_lines {
@@ -1269,6 +1281,19 @@ function Morph:mount(tree, opts)
 
   --- @param cb function
   local function schedule_after_render(cb) table.insert(after_render_callbacks, cb) end
+
+  --- Run all queued after-render callbacks, then clear the queue.
+  --- Called at the end of each rerender and after a terminal unmount (buffer
+  --- deletion), so callbacks registered during an unmount phase still execute.
+  --- The queue is cleared before running so a callback that triggers a nested
+  --- rerender (via ctx:update during the update phase) sees a fresh queue.
+  local function run_after_render_callbacks()
+    local callbacks = after_render_callbacks
+    after_render_callbacks = {}
+    for _, callback in ipairs(callbacks) do
+      callback()
+    end
+  end
 
   -- Render trace stack: tracks component ancestry for error messages
   local render_trace = {} --- @type morph.Ctx[]
@@ -1388,7 +1413,6 @@ function Morph:mount(tree, opts)
         local key = tree_identity_key(new_node --[[@as morph.Node]], i)
         local old_node = old_by_key[key]
 
-        --- @diagnostic disable-next-line: unnecessary-if
         if old_node then
           -- Key match: update existing node
           table.insert(result, reconcile_tree(old_node, new_node))
@@ -1428,7 +1452,6 @@ function Morph:mount(tree, opts)
       end
     end
 
-    --- @diagnostic disable-next-line: unnecessary-if
     if ctx then
       ctx.phase = 'update'
     else
@@ -1499,37 +1522,79 @@ function Morph:mount(tree, opts)
 
   --- Perform a full re-render of the component tree.
   rerender = function()
+    -- Stale rerenders (e.g. a vim.schedule'd on_change from before an unmount)
+    -- are dropped once the document is no longer mounted.
+    if not self._mounted then return end
     local simplified_tree = reconcile_tree(self.component_tree.old, tree)
     self.component_tree.old = tree
     self:render(simplified_tree)
 
-    -- Run any scheduled after-render callbacks, then clear the list.
-    -- We clear after (not before) to handle the case where ctx:update()
-    -- is called during the update phase, which would trigger a nested rerender.
-    local callbacks = after_render_callbacks
-    after_render_callbacks = {}
-    for _, callback in ipairs(callbacks) do
-      callback()
-    end
+    run_after_render_callbacks()
   end
 
   -- Don't track this autocmd in cleanup_hooks, because the prior BufDelete/BufUnload/BufWipeout
   -- will take priority, and will delete this autocmd before it even has a
   -- chance to run:
   local unmount_autocmd_id
+
+  --- Terminal teardown: fires all unmount phases and frees every resource
+  --- attached to this mount. Shared by the unmount autocmd (buffer deletion)
+  --- and the public Morph:unmount(). Leaves buffer content as-is; callers that
+  --- want a blank buffer clear it themselves. Resets instance state so the same
+  --- buffer/instance can be re-mounted. Idempotent: a buffer deletion may
+  --- unmount the document via its autocmd, and a later explicit unmount (e.g.
+  --- a Portal releasing its inner document after the portal buffer is gone)
+  --- must be a no-op.
+  local teardown_done = false
+  local teardown = function()
+    if teardown_done then return end
+    teardown_done = true
+    self._unmount = nil
+    self._mounted = false
+
+    if vim.api.nvim_buf_is_valid(self.bufnr) then vim.b[self.bufnr]._morph_mounted = nil end
+
+    if debounce_timer then
+      debounce_timer:stop()
+      debounce_timer:close()
+      debounce_timer = nil
+    end
+
+    reconcile_tree(self.component_tree.old, nil)
+    -- Drain after-render callbacks registered during the unmount phase (no
+    -- rerender follows to drain them).
+    run_after_render_callbacks()
+
+    -- Remove the unmount autocmd, then run registered cleanups (buf_watcher,
+    -- Morph.new's buffer-delete autocmd).
+    --- @diagnostic disable-next-line: param-type-mismatch
+    vim.api.nvim_del_autocmd(unmount_autocmd_id)
+    for _, cleanup in ipairs(self.cleanup_hooks) do
+      cleanup()
+    end
+    self.cleanup_hooks = {}
+
+    -- Restore pre-morph keymaps and clear morph extmarks. Content text stays.
+    if vim.api.nvim_buf_is_valid(self.bufnr) then
+      restore_buffer_keymaps(self)
+      vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
+    end
+
+    -- Reset instance state for re-mountability.
+    self.buf_watcher = nil
+    self.changedtick = 0
+    self.debounce_ms = nil
+    self.component_tree.old = nil
+    self.text_content = {
+      old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+    }
+  end
+  self._unmount = teardown
+
   unmount_autocmd_id = vim.api.nvim_create_autocmd({ 'BufDelete', 'BufUnload', 'BufWipeout' }, {
     buffer = self.bufnr,
-    callback = function()
-      vim.b[self.bufnr]._morph_mounted = nil
-      if debounce_timer then
-        debounce_timer:stop()
-        debounce_timer:close()
-        debounce_timer = nil
-      end
-      reconcile_tree(self.component_tree.old, nil)
-      --- @diagnostic disable-next-line: param-type-mismatch
-      vim.api.nvim_del_autocmd(unmount_autocmd_id)
-    end,
+    callback = teardown,
   })
 
   -- Install the debounced wrapper BEFORE the initial render so that
@@ -1580,10 +1645,18 @@ function Morph:mount(tree, opts)
   end
 
   -- Kick off initial render
+  self._mounted = true
   rerender()
   -- Record when the initial render finished (used by debounce maxWait logic).
   -- Must be set AFTER rerender() to allow the pass-through guard above.
   last_invoke_time = vim.uv.now()
+end
+
+--- Unmount the component tree, firing all unmount phases. Leaves buffer
+--- content as-is. After unmounting, the same buffer/instance can be re-mounted.
+--- Idempotent: calling when already unmounted is a no-op.
+function Morph:unmount()
+  if self._unmount then self._unmount() end
 end
 
 --- Find all elements that contain the given position, sorted innermost to outermost.
@@ -1703,7 +1776,6 @@ function Morph:_dispatch_keypress(mode, lhs)
       if result == '' then
         -- Handler wants to cancel, but let event bubble in case parent handles it
         should_cancel = true
-        --- @diagnostic disable-next-line: unnecessary-if
         if not event.bubble_up then break end
       else
         return result
@@ -1842,7 +1914,6 @@ function Morph:_on_bytes_after_autocmd(
       local event = { text = changed.text, bubble_up = true }
       --- @diagnostic disable-next-line: need-check-nil
       on_change(event)
-      --- @diagnostic disable-next-line: unnecessary-if
       if not event.bubble_up then break end
     end
   end
@@ -1871,7 +1942,278 @@ Morph.ErrorBoundary = function(ctx)
 end
 
 --------------------------------------------------------------------------------
--- Exports
+-- Portal: Renders children to a different buffer (like React portals)
+--------------------------------------------------------------------------------
+
+--- @class PortalProps
+--- @field bufnr integer
+--- @field children morph.Tree
+--- @field on_buf_create? fun(bufnr: integer, document: morph.Morph)
+
+--- Portal component: Renders children to a different buffer (like React portals)
+--- @param ctx morph.Ctx<PortalProps, { document: morph.Morph, update: fun(children: morph.Tree?) }>
+function Morph.Portal(ctx)
+  if ctx.phase == 'mount' then
+    local bufnr = ctx.props.bufnr
+    local document = Morph.new(bufnr)
+    ctx.state = { document = document, update = nil }
+
+    if ctx.props.on_buf_create then ctx.props.on_buf_create(bufnr, document) end
+
+    --- Renders children from state; exposes its ctx:update as ctx.state.update
+    --- @param inner morph.Ctx<any, { children: morph.Tree }>
+    local function Content(inner)
+      if inner.phase == 'mount' then
+        inner.state = { children = inner.children }
+        ctx.state.update = function(children) inner:update { children = children } end
+      end
+      return assert(inner.state).children
+    end
+
+    document:mount(h(Content, {}, ctx.children), { debounce_ms = 0 })
+    return nil
+  end
+
+  if ctx.phase == 'update' and ctx.state.update then
+    ctx.state.update(ctx.children)
+  elseif ctx.phase == 'unmount' then
+    -- Release the inner document. Content stays in the portal buffer; a fresh
+    -- Morph.new(bufnr) + mount is legal on re-mount because unmount cleared the
+    -- buffer's mounted flag.
+    --- @diagnostic disable-next-line: need-check-nil
+    ctx.state.document:unmount()
+  end
+
+  return nil
+end
+
+--------------------------------------------------------------------------------
+-- FloatingWindow
+--------------------------------------------------------------------------------
+
+--- @class morph._internal.hooks.PrevValueCell<T>
+--- @field private prev T
+--- @field get fun(self: morph._internal.hooks.PrevValueCell<T>, v: T): T  -- returns the previous value, stores v as current
+
+--- Create a previous-value cell. Call once at mount, store on ctx.state.
+--- Each render, call cell:get(v) to read the previous value of v and store v.
+--- @generic T
+--- @param initial T value returned by the first get() call
+--- @return morph._internal.hooks.PrevValueCell<T>
+local function mk_prev_value_cell(initial)
+  local cell = { prev = initial }
+  function cell:get(v)
+    local p = self.prev
+    self.prev = v
+    return p
+  end
+  return cell
+end
+
+--- Transition to target_mode (via stopinsert/startinsert) and call callback
+--- once the mode change takes effect, confirmed via ModeChanged autocmd
+--- (no timing dependency). If already in target_mode, calls callback
+--- immediately. Safety fallback: if ModeChanged never fires, proceeds
+--- after 500ms.
+--- @param target_mode string  Single-char mode to transition to ('n' or 'i')
+--- @param callback fun()
+local function restore_mode_and_wait(target_mode, callback)
+  local current_mode = vim.fn.mode():sub(1, 1)
+  if current_mode == target_mode then
+    callback()
+    return
+  end
+
+  local mode_pattern = current_mode .. ':' .. target_mode
+  local mode_changed_id
+  local fallback_timer = vim.defer_fn(function()
+    pcall(vim.api.nvim_del_autocmd, mode_changed_id)
+    callback()
+  end, 500)
+
+  mode_changed_id = vim.api.nvim_create_autocmd('ModeChanged', {
+    pattern = mode_pattern,
+    once = true,
+    nested = true,
+    callback = function()
+      fallback_timer:stop()
+      pcall(vim.api.nvim_del_autocmd, mode_changed_id)
+      callback()
+    end,
+  })
+
+  if target_mode == 'n' then
+    vim.cmd.stopinsert()
+  elseif target_mode == 'i' then
+    vim.cmd.startinsert()
+  else
+    callback()
+    return
+  end
+end
+
+--------------------------------------------------------------------------------
+-- FloatingWindow: Component that manages a floating window with children rendered via Portal
+--------------------------------------------------------------------------------
+
+--- @class components.FloatingWindowProps
+--- @field open boolean
+--- @field config vim.api.keyset.win_config | fun(): vim.api.keyset.win_config
+--- @field children morph.Tree
+--- @field on_win_create? fun(winnr: integer, bufnr: integer, document: morph.Morph)
+--- @field on_buf_create? fun(bufnr: integer, document: morph.Morph)
+--- @field on_closed? fun()  @ fires exactly once per open→closed transition, after the window
+--- is closed and the previous window/cursor/mode have been restored. If the component is
+--- unmounted while still open, that unmount IS the transition and on_closed fires there.
+
+--- @class components.FloatingWindowState
+--- @field bufnr integer
+--- @field winnr integer?
+--- @field document morph.Morph?
+--- @field autocmd_id integer?
+--- @field prev_winnr integer?
+--- @field prev_cursor [integer, integer]?
+--- @field prev_mode string?
+--- @field prev_open_cell morph._internal.hooks.PrevValueCell<boolean>
+--- @field prev_config_cell morph._internal.hooks.PrevValueCell<vim.api.keyset.win_config>
+
+--- @param ctx morph.Ctx<components.FloatingWindowProps, components.FloatingWindowState>
+function Morph.FloatingWindow(ctx)
+  local open = ctx.props.open
+
+  if ctx.phase == 'mount' then
+    -- Create autocmd to refresh on window resize
+    local autocmd_id = vim.api.nvim_create_autocmd('VimResized', {
+      callback = vim.schedule_wrap(function() ctx:refresh() end),
+    })
+
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    ctx.state = {
+      bufnr = bufnr,
+      winnr = nil,
+      document = nil,
+      autocmd_id = autocmd_id,
+      prev_winnr = nil,
+      prev_cursor = nil,
+      prev_mode = nil,
+      prev_open_cell = mk_prev_value_cell(false),
+      prev_config_cell = mk_prev_value_cell(nil),
+    }
+  end
+
+  --- @type components.FloatingWindowState
+  local state = assert(ctx.state)
+  local prev_open = state.prev_open_cell:get(open)
+  --- @type vim.api.keyset.win_config
+  local config = type(ctx.props.config) == 'function' and ctx.props.config() or ctx.props.config
+
+  --- Shared open→closed teardown for both the prop-driven close transition
+  --- and unmount. Closes over ctx/state/prev_open. When the float still holds
+  --- focus and a mode was captured, transitions back to that mode first and
+  --- restores the previous window/cursor (if alive); never steals focus back.
+  --- On unmount also tears down the resize autocmd and the float buffer.
+  --- on_closed fires when prev_open is true -- a real transition, not the
+  --- unmount of an already-closed or never-opened component.
+  local function close_transition()
+    local is_unmount = ctx.phase == 'unmount'
+    local focused = state.winnr ~= nil
+      and vim.api.nvim_win_is_valid(state.winnr)
+      and vim.api.nvim_get_current_win() == state.winnr
+    local prev_winnr = state.prev_winnr
+    local prev_cursor = state.prev_cursor
+    local prev_mode = state.prev_mode
+
+    --- @param restore_focus boolean
+    local function work(restore_focus)
+      if is_unmount and state.autocmd_id then pcall(vim.api.nvim_del_autocmd, state.autocmd_id) end
+      if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then
+        vim.api.nvim_win_close(state.winnr, true)
+        state.winnr = nil
+      end
+      if is_unmount and vim.api.nvim_buf_is_valid(state.bufnr) then
+        vim.api.nvim_buf_delete(state.bufnr, { force = true })
+      end
+      if restore_focus and prev_winnr and vim.api.nvim_win_is_valid(prev_winnr) then
+        pcall(vim.api.nvim_set_current_win, prev_winnr)
+        if prev_cursor then pcall(vim.api.nvim_win_set_cursor, prev_winnr, prev_cursor) end
+      end
+      if prev_open and ctx.props.on_closed then ctx.props.on_closed() end
+    end
+
+    local function run()
+      if focused and prev_mode then
+        restore_mode_and_wait(prev_mode, function() work(true) end)
+      else
+        work(false)
+      end
+    end
+
+    if is_unmount then
+      run()
+    else
+      ctx:do_after_render(run)
+    end
+  end
+
+  if ctx.phase == 'update' or ctx.phase == 'mount' then
+    --
+    -- Buffer:
+    --
+    if not vim.api.nvim_buf_is_valid(state.bufnr) then
+      state.bufnr = vim.api.nvim_create_buf(false, true)
+    end
+
+    --
+    -- Window transitions:
+    --
+    -- Window is opening now.
+    if not prev_open and open then
+      if config.focusable ~= false then
+        state.prev_winnr = vim.api.nvim_get_current_win()
+        state.prev_cursor = vim.api.nvim_win_get_cursor(state.prev_winnr)
+        state.prev_mode = vim.fn.mode():sub(1, 1)
+      end
+
+      local enter = config.focusable ~= false
+      state.winnr = vim.api.nvim_open_win(state.bufnr, enter, config)
+      state.prev_config_cell:get(config)
+      -- Call on_win_create callback if provided
+      if ctx.props.on_win_create then
+        ctx:do_after_render(
+          function() ctx.props.on_win_create(state.winnr, state.bufnr, state.document) end
+        )
+      end
+    elseif prev_open and not open then
+      close_transition()
+
+      state.prev_winnr = nil
+      state.prev_cursor = nil
+      state.prev_mode = nil
+
+      -- Window stays open; just update its config (skip unchanged configs to avoid UI flicker).
+    elseif open then
+      if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then
+        local prev = state.prev_config_cell:get(config)
+        if not vim.deep_equal(config, prev) then
+          vim.api.nvim_win_set_config(state.winnr, config)
+        end
+      end
+    end
+  end
+
+  if ctx.phase == 'unmount' then close_transition() end
+
+  return h(Morph.Portal, {
+    bufnr = state.bufnr,
+    on_buf_create = function(bufnr, document)
+      state.document = document
+      if ctx.props.on_buf_create then ctx.props.on_buf_create(bufnr, document) end
+    end,
+  }, ctx.children)
+end
+
+--------------------------------------------------------------------------------
+-- Additional exports
 --------------------------------------------------------------------------------
 
 Morph.h = h
@@ -1879,7 +2221,6 @@ Morph.Pos00 = Pos00
 Morph.RenderError = RenderError
 
 -- Export internal functions for testing when NVIM_TEST=true
---- @diagnostic disable-next-line: unnecessary-if
 if vim.env.NVIM_TEST then
   Morph._is_buffer_api_ready = is_buffer_api_ready
   Morph._is_textlock = is_textlock

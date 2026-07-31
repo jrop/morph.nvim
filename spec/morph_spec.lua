@@ -5,7 +5,6 @@
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: redundant-parameter
 --- @diagnostic disable: undefined-field
---- @diagnostic disable: unnecessary-if
 
 vim.print(tostring(vim.version()))
 
@@ -16,6 +15,7 @@ local Morph = require 'morph'
 local h = Morph.h
 local Pos00 = Morph.Pos00
 local Extmark = Morph.Extmark
+local _assert = require 'morph._test.assert'
 
 --------------------------------------------------------------------------------
 -- TEST HELPERS
@@ -920,6 +920,37 @@ describe('Morph', function()
         assert.are.same('\n', elem.extmark:_text())
       end)
     end)
+
+    it('handles inverted extmark positions gracefully', function()
+      -- This test verifies that extmark positions becoming inverted
+      -- (start > stop) is handled gracefully by returning empty string.
+      -- The error message was:
+      --   (morph.nvim:getregion:invalid-pos) { start, end } = { { 9, 4, 1 }, { 9, 3, 9 } }
+      -- Note how line 4 > line 3, which is inverted.
+      with_buf({ 'line1', 'line2', 'line3' }, function()
+        -- Create an Extmark directly with inverted positions (start > stop)
+        -- This simulates what happens when extmarks get corrupted
+        local extmark = {
+          bufnr = 0,
+          ns = vim.api.nvim_create_namespace 'test',
+          -- Inverted: start at row 2, stop at row 1 (0-based)
+          -- This is the bug condition
+          start = Pos00.new(2, 0),
+          stop = Pos00.new(1, 5),
+        }
+        setmetatable(extmark, { __index = Extmark })
+
+        -- Calling _text() with inverted positions should return empty string
+        local result = extmark:_text()
+
+        assert.are.equal(
+          '',
+          result,
+          'Extmark:_text() should handle inverted positions gracefully (return empty string), but got: '
+            .. vim.inspect(result)
+        )
+      end)
+    end)
   end)
 
   ------------------------------------------------------------------------------
@@ -984,520 +1015,6 @@ describe('Morph', function()
           assert.are.same('mixed', elements_in_middle[1].attributes.id)
         end
       end)
-    end)
-  end)
-
-  ------------------------------------------------------------------------------
-  -- ON_CHANGE EVENTS
-  --
-  -- Tests for text change detection and event bubbling.
-  ------------------------------------------------------------------------------
-
-  describe('on_change events', function()
-    it('fires when text is replaced', function()
-      with_buf({}, function()
-        local r = Morph.new(0)
-        local captured_changed_text = ''
-
-        -- Text:
-        --   01234
-        -- 0 one
-        -- 1 two
-        -- 2 three
-        -- 3
-        r:render {
-          h('text', {
-            on_change = function(e) captured_changed_text = e.text end,
-          }, {
-            'one\n',
-            'two\n',
-            'three\n',
-          }),
-        }
-
-        local elems = r:get_elements_at { 0, 1 }
-        assert.are.same(1, #elems)
-        assert.are.same(Pos00.new(0, 0), elems[1].extmark.start)
-        assert.are.same(Pos00.new(3, 0), elems[1].extmark.stop)
-
-        vim.fn.setreg('"', 'bleh')
-        vim.cmd [[normal! ggVGp]]
-
-        assert.are.same(1, line_count())
-        elems = r:get_elements_at { 0, 1 }
-        assert.are.same(1, #elems)
-
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same('bleh', get_text())
-        assert.are.same('bleh', captured_changed_text)
-
-        vim.fn.setreg('"', '')
-        vim.cmd [[normal! ggdG]]
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same('', get_text())
-        assert.are.same('', captured_changed_text)
-      end)
-    end)
-
-    it('fires when text is deleted', function()
-      with_buf({}, function()
-        local r = Morph.new(0)
-        --- @type string?
-        local captured_changed_text = nil
-        r:render {
-          'prefix:',
-          h('text', {
-            on_change = function(e) captured_changed_text = e.text end,
-          }, { 'one' }),
-          'suffix',
-        }
-
-        vim.fn.setreg('"', 'bleh')
-        set_cursor { 1, 9 }
-        vim.cmd [[normal! vhhd]]
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same('prefix:suffix', get_text())
-        assert.are.same('', captured_changed_text)
-      end)
-    end)
-
-    it('fires when newline is inserted', function()
-      with_buf({}, function()
-        local r = Morph.new(0)
-        local captured_changed_text = nil
-
-        r:render {
-          'Search [',
-          h('text', {
-            on_change = function(e) captured_changed_text = e.text end,
-          }, 'filter'),
-          ']',
-        }
-
-        assert.are.same({ 'Search [filter]' }, get_lines())
-
-        set_text(0, 14, 0, 14, { '', '' })
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same({ 'Search [filter', ']' }, get_lines())
-        assert.are.same('filter\n', captured_changed_text)
-      end)
-    end)
-
-    it('does not corrupt buffer on atomic multi-line insert at end of line', function()
-      -- When a multi-line insert happens at the end of an extmark, the buggy
-      -- end_col0 calculation (treating new_end_col_off as relative even when
-      -- new_end_row_off > 0) and the wrong clamp (against the last line instead
-      -- of the end row's line) can cause _get_in_range to query the wrong region.
-      -- With a controlled component that echoes on_change back via re-render,
-      -- a stale or missed on_change event causes the buffer to be overwritten
-      -- with stale single-line text, destroying the user's multi-line insert.
-      with_buf({}, function()
-        local r = Morph.new(0)
-        local captured_changed_text = nil
-
-        --- @param ctx morph.Ctx<{}, { text: string }>
-        local function App(ctx)
-          if ctx.phase == 'mount' then ctx.state = { text = 'jsonPayload.message' } end
-          local state = assert(ctx.state)
-          return {
-            h('text', {
-              id = 'the-id',
-              on_change = function(e)
-                e.bubble_up = false
-                captured_changed_text = e.text
-                ctx:update { text = e.text }
-              end,
-            }, state.text),
-          }
-        end
-        r:mount(h(App))
-
-        assert.are.same({ 'jsonPayload.message' }, get_lines())
-
-        -- Simulate real Cmd+V: atomic multi-line insert at end of line 0.
-        -- "jsonPayload.message" is 19 chars; insert "\nseverity" at col 19.
-        vim.api.nvim_buf_set_text(0, 0, 19, 0, 19, { '', 'severity' })
-        vim.cmd.doautocmd 'TextChanged'
-
-        -- Drain scheduled re-render (on_change updates state => scheduled rerender)
-        vim.wait(100, function() return false end)
-
-        -- Buffer must NOT be corrupted by the re-render
-        assert.are.same({ 'jsonPayload.message', 'severity' }, get_lines())
-        -- on_change must receive the full updated text, not a truncated/garbled slice
-        assert.are.same('jsonPayload.message\nseverity', captured_changed_text)
-      end)
-    end)
-
-    it('fires with empty string when tag text is deleted entirely', function()
-      with_buf({}, function()
-        local r = Morph.new(0)
-        local captured_changed_text = nil
-
-        -- Text structure: "Search: input_text"
-        -- The input tag is at the end of the line
-        r:render {
-          'Search: ',
-          h('text', {
-            on_change = function(e) captured_changed_text = e.text end,
-          }, 'input_text'),
-        }
-
-        assert.are.same({ 'Search: input_text' }, get_lines())
-
-        -- Delete the input text at the end of the line
-        -- This should trigger on_change with an empty string
-        set_text(0, 8, 0, 18, {})
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same('Search: ', get_text())
-        assert.are.same('', captured_changed_text)
-
-        -- Test with different end position
-        r:render {
-          'Filter: ',
-          h('text', {
-            on_change = function(e) captured_changed_text = e.text end,
-          }, 'query'),
-        }
-
-        captured_changed_text = nil
-        assert.are.same({ 'Filter: query' }, get_lines())
-
-        -- Delete just the query part
-        set_text(0, 8, 0, 13, {})
-        vim.cmd.doautocmd 'TextChanged'
-
-        assert.are.same('Filter: ', get_text())
-        assert.are.same('', captured_changed_text)
-      end)
-    end)
-
-    it('detects change when new text has same length as original', function()
-      with_buf({}, function()
-        local captured_changed_text = ''
-
-        --- @param _ctx morph.Ctx
-        local function App(_ctx)
-          return {
-            h('text', {
-              id = 'the-id',
-              on_change = function(e)
-                e.bubble_up = false
-                captured_changed_text = e.text
-              end,
-            }, { 'hello' }),
-          }
-        end
-        local r = Morph.new()
-        r:mount(h(App))
-
-        assert.are.same('hello', get_text())
-
-        set_text(0, 4, 0, 5, { 'p' })
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('hellp', get_text())
-        assert.are.same('hellp', captured_changed_text)
-      end)
-    end)
-
-    it('detects change when text changes back to original content', function()
-      with_buf({}, function()
-        local captured_changed_text = ''
-
-        --- @param _ctx morph.Ctx
-        local function App2(_ctx)
-          return {
-            h('text', {
-              id = 'the-id',
-              on_change = function(e)
-                e.bubble_up = false
-                captured_changed_text = e.text
-              end,
-            }, { 'hello' }),
-          }
-        end
-        local r = Morph.new()
-        r:mount(h(App2))
-
-        assert.are.same('hello', get_text())
-
-        set_text(0, 4, 0, 5, {})
-        assert.are.same('hell', get_text())
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('hell', captured_changed_text)
-
-        set_text(0, 4, 0, 4, { 'o' })
-        assert.are.same('hello', get_text())
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('hello', captured_changed_text)
-      end)
-    end)
-
-    describe('event bubbling', function()
-      it('fires handlers from inner to outer, not affecting siblings', function()
-        with_buf({}, function()
-          local r = Morph.new(0)
-          local captured_events = {}
-
-          -- Text:
-          --   0         1         2
-          --   0123456789012345678901234567890
-          --   sibling outer middle inner
-          local function reset_render()
-            r:render {
-              h('text', {
-                id = 'sibling',
-                on_change = function(e)
-                  table.insert(captured_events, { id = 'sibling', text = e.text })
-                end,
-              }, 'sibling'),
-              ' ',
-              h('text', {
-                id = 'outer',
-                on_change = function(e)
-                  table.insert(captured_events, { id = 'outer', text = e.text })
-                end,
-              }, {
-                'outer ',
-                h('text', { id = 'middle' }, {
-                  'middle ',
-                  h('text', {
-                    id = 'inner',
-                    on_change = function(e)
-                      table.insert(captured_events, { id = 'inner', text = e.text })
-                    end,
-                  }, 'inner'),
-                }),
-              }),
-            }
-          end
-          reset_render()
-
-          -- Change innermost element -> fires inner then outer
-          captured_events = {}
-          set_text(0, 21, 0, 26, { 'changed' })
-          assert.are.same({ 'sibling outer middle changed' }, get_lines())
-          vim.cmd.doautocmd 'TextChanged'
-
-          assert.are.same(2, #captured_events)
-          assert.are.same('inner', captured_events[1].id)
-          assert.are.same('changed', captured_events[1].text)
-          assert.are.same('outer', captured_events[2].id)
-          assert.are.same('outer middle changed', captured_events[2].text)
-
-          -- Change sibling -> only sibling handler fires
-          reset_render()
-          captured_events = {}
-          set_text(0, 0, 0, 7, { 'modified' })
-          assert.are.same({ 'modified outer middle inner' }, get_lines())
-          vim.cmd.doautocmd 'TextChanged'
-
-          assert.are.same(1, #captured_events)
-          assert.are.same('sibling', captured_events[1].id)
-          assert.are.same('modified', captured_events[1].text)
-
-          -- Change middle (no handler) -> only outer handler fires
-          reset_render()
-          captured_events = {}
-          set_text(0, 14, 0, 20, { 'center' })
-          assert.are.same({ 'sibling outer center inner' }, get_lines())
-          vim.cmd.doautocmd 'TextChanged'
-
-          assert.are.same(1, #captured_events)
-          assert.are.same('outer', captured_events[1].id)
-          assert.are.same('outer center inner', captured_events[1].text)
-        end)
-      end)
-
-      it('bubbles through multiple nested levels', function()
-        with_buf({}, function()
-          local r = Morph.new(0)
-          local events = {}
-
-          r:render {
-            h('text', {
-              id = 'level1',
-              on_change = function(e) table.insert(events, { level = 1, text = e.text }) end,
-            }, {
-              h('text', {
-                id = 'level2',
-                on_change = function(e) table.insert(events, { level = 2, text = e.text }) end,
-              }, {
-                h('text', {
-                  id = 'level3',
-                  on_change = function(e) table.insert(events, { level = 3, text = e.text }) end,
-                }, 'inner'),
-              }),
-            }),
-          }
-
-          set_text(0, 0, 0, 5, { 'changed' })
-          vim.cmd.doautocmd 'TextChanged'
-
-          assert.are.same(3, #events)
-          assert.are.same(3, events[1].level)
-          assert.are.same(2, events[2].level)
-          assert.are.same(1, events[3].level)
-        end)
-      end)
-
-      it('stops bubbling when bubble_up is set to false', function()
-        with_buf({}, function()
-          local r = Morph.new(0)
-          local events = {}
-
-          r:render {
-            h('text', {
-              id = 'outer',
-              on_change = function(e) table.insert(events, { id = 'outer', text = e.text }) end,
-            }, {
-              h('text', {
-                id = 'inner',
-                on_change = function(e)
-                  table.insert(events, { id = 'inner', text = e.text })
-                  e.bubble_up = false
-                end,
-              }, 'text'),
-            }),
-          }
-
-          set_text(0, 0, 0, 4, { 'new' })
-          vim.cmd.doautocmd 'TextChanged'
-
-          assert.are.same(1, #events)
-          assert.are.same('inner', events[1].id)
-        end)
-      end)
-    end)
-
-    it('handles inverted extmark positions gracefully', function()
-      -- This test verifies that extmark positions becoming inverted
-      -- (start > stop) is handled gracefully by returning empty string.
-      -- The error message was:
-      --   (morph.nvim:getregion:invalid-pos) { start, end } = { { 9, 4, 1 }, { 9, 3, 9 } }
-      -- Note how line 4 > line 3, which is inverted.
-      with_buf({ 'line1', 'line2', 'line3' }, function()
-        -- Create an Extmark directly with inverted positions (start > stop)
-        -- This simulates what happens when extmarks get corrupted
-        local extmark = {
-          bufnr = 0,
-          ns = vim.api.nvim_create_namespace 'test',
-          -- Inverted: start at row 2, stop at row 1 (0-based)
-          -- This is the bug condition
-          start = Pos00.new(2, 0),
-          stop = Pos00.new(1, 5),
-        }
-        setmetatable(extmark, { __index = Extmark })
-
-        -- Calling _text() with inverted positions should return empty string
-        local result = extmark:_text()
-
-        assert.are.equal(
-          '',
-          result,
-          'Extmark:_text() should handle inverted positions gracefully (return empty string), but got: '
-            .. vim.inspect(result)
-        )
-      end)
-    end)
-  end)
-
-  it('fires on_change when set_lines inserts content after extmark range', function()
-    -- nvim_buf_set_lines at a boundary does NOT expand the extmark's end_row.
-    -- This simulates linewise paste ("p" in Normal mode), where the extmark
-    -- covers only the original content, and the newly inserted lines fall
-    -- outside the extmark's range. The fallback in _on_bytes_after_autocmd
-    -- must scan all on_change elements when no extmarks overlap the changed
-    -- region and read the full buffer content directly.
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = nil
-
-      --- @param ctx morph.Ctx<{}, { text: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then ctx.state = { text = 'asldkfjasdlfjkasdfkj' } end
-        local state = assert(ctx.state)
-        return {
-          h('text', {
-            id = 'the-id',
-            on_change = function(e)
-              e.bubble_up = false
-              captured_changed_text = e.text
-              ctx:update { text = e.text }
-            end,
-          }, state.text),
-        }
-      end
-      r:mount(h(App))
-
-      assert.are.same({ 'asldkfjasdlfjkasdfkj' }, get_lines())
-
-      -- Simulate linewise paste: insert a line after the extmark's range.
-      -- nvim_buf_set_lines at index 1 (past end of line 0) does NOT expand
-      -- the extmark's end_row, so _get_in_range will find no overlap.
-      vim.api.nvim_buf_set_lines(0, 1, 1, false, { 'logName="projects/latakoo-dev/logs/ltk"' })
-      vim.cmd.doautocmd 'TextChanged'
-
-      -- Drain scheduled re-render (on_change updates state => scheduled rerender)
-      vim.wait(100, function() return false end)
-
-      -- Buffer must contain both lines
-      assert.are.same(
-        { 'asldkfjasdlfjkasdfkj', 'logName="projects/latakoo-dev/logs/ltk"' },
-        get_lines()
-      )
-      -- on_change must receive the full multi-line text
-      assert.are.same(
-        'asldkfjasdlfjkasdfkj\nlogName="projects/latakoo-dev/logs/ltk"',
-        captured_changed_text
-      )
-    end)
-  end)
-  it('fires on_change when set_lines inserts content before extmark range', function()
-    -- nvim_buf_set_lines at row 0 (before the extmark) shifts the extmark
-    -- rather than expanding it. The fallback must detect that the extmark
-    -- moved (current.start ~= cached.start) and fire on_change with the
-    -- full buffer text including the prepended content.
-    with_buf({}, function()
-      local r = Morph.new(0)
-      local captured_changed_text = nil
-
-      --- @param ctx morph.Ctx<{}, { text: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then ctx.state = { text = 'asldkfjasdlfjkasdfkj' } end
-        local state = assert(ctx.state)
-        return {
-          h('text', {
-            id = 'the-id',
-            on_change = function(e)
-              e.bubble_up = false
-              captured_changed_text = e.text
-              ctx:update { text = e.text }
-            end,
-          }, state.text),
-        }
-      end
-      r:mount(h(App))
-
-      assert.are.same({ 'asldkfjasdlfjkasdfkj' }, get_lines())
-
-      -- Prepend a line before the extmark range.
-      -- Neovim shifts the extmark from row 0 to row 1.
-      vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'prepended' })
-      vim.cmd.doautocmd 'TextChanged'
-
-      -- Drain scheduled re-render (on_change updates state => scheduled rerender)
-      vim.wait(100, function() return false end)
-
-      -- on_change must fire with the full buffer including prepended content
-      assert.are.same('prepended\nasldkfjasdlfjkasdfkj', captured_changed_text)
-      -- Buffer must contain both lines (on_change fired, state update kept both)
-      assert.are.same({ 'prepended', 'asldkfjasdlfjkasdfkj' }, get_lines())
     end)
   end)
 
@@ -2025,6 +1542,10 @@ describe('Morph', function()
           vim.fn.maparg('<Leader>abc', 'n', false, true).callback
         )
 
+        -- Position cursor inside the rendered text: patch_lines leaves the
+        -- cursor at an incidental position that depends on prior global state,
+        -- so set it explicitly (see the sibling test above which does the same).
+        set_cursor { 1, 0 }
         result = r:_dispatch_keypress('n', '<Leader>abc')
         assert.are.same(nil, result)
         assert.are.same(1, my_component_callback_count)
@@ -2032,6 +1553,7 @@ describe('Morph', function()
         leaked_context:update(2)
         assert.are.same('Hello World (II)!', get_text())
 
+        set_cursor { 1, 0 }
         result = r:_dispatch_keypress('n', '<Leader>abc')
         assert.are.same('<Leader>abc', result)
         assert.are.same(my_orig_callback, vim.fn.maparg('<Leader>abc', 'n', false, true).callback)
@@ -2244,61 +1766,6 @@ describe('Morph', function()
         -- Reverse order - components should be reused
         app_ctx:update { order = { 'c', 'b', 'a' } }
         assert.are.same({ 'c: 3b: 2a: 1' }, get_lines())
-      end)
-    end)
-  end)
-
-  ------------------------------------------------------------------------------
-  -- UNDO/REDO
-  ------------------------------------------------------------------------------
-
-  describe('undo/redo', function()
-    it('tracks extmarks correctly through undo/redo', function()
-      with_buf({}, function()
-        local r = Morph.new(0)
-        local captured_changed_text = ''
-
-        --- @param _ctx morph.Ctx
-        local function App(_ctx)
-          return {
-            'Search: [',
-            h('text', {
-              id = 'filter',
-              on_change = function(e) captured_changed_text = e.text end,
-            }, ''),
-            ']',
-          }
-        end
-
-        r:mount(h(App))
-        local filter_elem = assert(r:get_element_by_id 'filter')
-        assert.are.same('Search: []', get_text())
-        assert.are.same('', filter_elem.extmark:_text())
-        set_cursor { filter_elem.extmark.start[1] + 1, filter_elem.extmark.start[2] }
-
-        vim.api.nvim_feedkeys('ifilter', 'ntx', false)
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('filter', captured_changed_text)
-
-        filter_elem = assert(r:get_element_by_id 'filter')
-        assert.are.same('filter', filter_elem.extmark:_text())
-        assert.are.same('Search: [filter]', get_text())
-
-        vim.cmd.undo()
-        assert.are.same('Search: []', get_text())
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('', captured_changed_text)
-
-        filter_elem = assert(r:get_element_by_id 'filter')
-        assert.are.same('', filter_elem.extmark:_text())
-
-        vim.cmd.redo()
-        vim.cmd.doautocmd 'TextChanged'
-        assert.are.same('filter', captured_changed_text)
-
-        filter_elem = assert(r:get_element_by_id 'filter')
-        assert.are.same('filter', filter_elem.extmark:_text())
-        assert.are.same('Search: [filter]', get_text())
       end)
     end)
   end)
@@ -2694,7 +2161,6 @@ describe('Morph', function()
             if ctx.phase == 'mount' then
               ctx.state = { initialized = false }
               ctx:do_after_render(function()
-                --- @diagnostic disable-next-line: unnecessary-if
                 if not ctx.state.initialized then ctx:update { initialized = true } end
               end)
             end
@@ -2820,6 +2286,117 @@ describe('Morph', function()
         assert.is_true(vim.tbl_contains(unmount_calls, 'first'))
         assert.is_true(vim.tbl_contains(unmount_calls, 'second'))
         assert.is_true(vim.tbl_contains(unmount_calls, 'app'))
+      end)
+
+      it('executes do_after_render callbacks registered during a terminal unmount', function()
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local r = Morph.new(bufnr)
+        local order = {}
+
+        --- @param ctx morph.Ctx
+        local function TestComponent(ctx)
+          if ctx.phase == 'unmount' then
+            table.insert(order, 'unmount')
+            ctx:do_after_render(function() table.insert(order, 'callback') end)
+          end
+          return { 'Hello' }
+        end
+
+        r:mount(h(TestComponent))
+        assert.are.same({}, order)
+
+        vim.api.nvim_buf_delete(bufnr, { force = true })
+
+        assert.are.same({ 'unmount', 'callback' }, order)
+      end)
+
+      it('unmounts on demand and can be remounted on the same buffer', function()
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local r = Morph.new(bufnr)
+        local unmount_calls = 0
+
+        --- @param ctx morph.Ctx
+        local function TestComponent(ctx)
+          if ctx.phase == 'unmount' then unmount_calls = unmount_calls + 1 end
+          return { 'Hello' }
+        end
+
+        r:mount(h(TestComponent))
+        assert.are.equal('Hello', get_text())
+
+        r:unmount()
+        assert.are.equal(1, unmount_calls)
+
+        r:mount(h(TestComponent))
+        assert.are.equal('Hello', get_text())
+      end)
+
+      it('unmount is idempotent', function()
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local r = Morph.new(bufnr)
+        local unmount_calls = 0
+
+        --- @param ctx morph.Ctx
+        local function TestComponent(ctx)
+          if ctx.phase == 'unmount' then unmount_calls = unmount_calls + 1 end
+          return { 'Hello' }
+        end
+
+        r:mount(h(TestComponent))
+        r:unmount()
+        r:unmount()
+        r:unmount()
+
+        assert.are.equal(1, unmount_calls)
+      end)
+
+      it('executes do_after_render callbacks registered during an explicit unmount', function()
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+        local r = Morph.new(bufnr)
+        local order = {}
+
+        --- @param ctx morph.Ctx
+        local function TestComponent(ctx)
+          if ctx.phase == 'unmount' then
+            table.insert(order, 'unmount')
+            ctx:do_after_render(function() table.insert(order, 'callback') end)
+          end
+          return { 'Hello' }
+        end
+
+        r:mount(h(TestComponent))
+        r:unmount()
+
+        assert.are.same({ 'unmount', 'callback' }, order)
+      end)
+
+      it('restores pre-morph keymaps on unmount', function()
+        vim.cmd.new()
+        local bufnr = vim.api.nvim_get_current_buf()
+
+        local original_callback = function() return 'original' end
+        vim.keymap.set('n', '<Leader>x', original_callback, { buffer = bufnr })
+        assert.is_not_nil(vim.fn.maparg('<Leader>x', 'n', false, true).callback)
+
+        local r = Morph.new(bufnr)
+
+        local function TestComponent(_ctx)
+          return {
+            h('text', {
+              nmap = { ['<Leader>x'] = function() return 'morph' end },
+            }, 'Hello'),
+          }
+        end
+
+        r:mount(h(TestComponent))
+        assert.are.equal('morph', vim.fn.maparg('<Leader>x', 'n', false, true).callback())
+
+        r:unmount()
+        assert.are.equal('original', vim.fn.maparg('<Leader>x', 'n', false, true).callback())
       end)
 
       it('unmounts deeply nested components on state change', function()
@@ -3519,7 +3096,6 @@ describe('Morph', function()
             leaked_ctx = ctx
             ctx.state = { show_array = false }
           end
-          --- @diagnostic disable-next-line: unnecessary-if
           if ctx.state.show_array then
             return { 'item1', ' ', 'item2' }
           else
@@ -3546,7 +3122,6 @@ describe('Morph', function()
             leaked_ctx = ctx
             ctx.state = { show_array = true }
           end
-          --- @diagnostic disable-next-line: unnecessary-if
           if ctx.state.show_array then
             return { 'item1', ' ', 'item2' }
           else
@@ -3580,7 +3155,6 @@ describe('Morph', function()
             leaked_ctx = ctx
             ctx.state = { show_array = false }
           end
-          --- @diagnostic disable-next-line: unnecessary-if
           if ctx.state.show_array then
             return { 'item1', ' ', 'item2' }
           else
@@ -3626,7 +3200,6 @@ describe('Morph', function()
             leaked_ctx = ctx
             ctx.state = { show_array = false }
           end
-          --- @diagnostic disable-next-line: unnecessary-if
           if ctx.state.show_array then
             return { h(ArrayItem) }
           else
@@ -3950,6 +3523,107 @@ describe('Morph', function()
         #change_changes,
         'should produce changes for both indices 1 and 3, not just index 1'
       )
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
+  -- _TEST.ASSERT.DIFF
+  ------------------------------------------------------------------------------
+
+  describe('morph._test.assert.diff', function()
+    local diff = _assert.diff
+
+    it(
+      'renders identical lists as context only',
+      function()
+        assert.are.same(
+          table.concat({ '--- got', '+++ want', '  a', '  b', '  c' }, '\n'),
+          diff({ 'a', 'b', 'c' }, { 'a', 'b', 'c' })
+        )
+      end
+    )
+
+    it(
+      'renders a substitution as delete then add with context',
+      function()
+        assert.are.same(
+          table.concat({ '--- got', '+++ want', '  a', '- b', '+ x', '  c' }, '\n'),
+          diff({ 'a', 'b', 'c' }, { 'a', 'x', 'c' })
+        )
+      end
+    )
+
+    it(
+      'renders an insertion with context',
+      function()
+        assert.are.same(
+          table.concat({ '--- got', '+++ want', '  a', '+ b', '  c' }, '\n'),
+          diff({ 'a', 'c' }, { 'a', 'b', 'c' })
+        )
+      end
+    )
+
+    it(
+      'renders a deletion with context',
+      function()
+        assert.are.same(
+          table.concat({ '--- got', '+++ want', '  a', '- b', '  c' }, '\n'),
+          diff({ 'a', 'b', 'c' }, { 'a', 'c' })
+        )
+      end
+    )
+
+    it(
+      'renders an empty got list',
+      function()
+        assert.are.same(table.concat({ '--- got', '+++ want', '+ a' }, '\n'), diff({}, { 'a' }))
+      end
+    )
+  end)
+
+  describe('morph._test.assert.assert_deep_equal', function()
+    local assert_deep_equal = _assert.assert_deep_equal
+
+    it('passes for deeply equal scalars', function()
+      assert_deep_equal(42, 42)
+      assert_deep_equal('hello', 'hello')
+      assert_deep_equal(true, true)
+    end)
+
+    it(
+      'passes for deeply equal nested tables',
+      function() assert_deep_equal({ a = 1, b = { c = { 2, 3 } } }, { a = 1, b = { c = { 2, 3 } } }) end
+    )
+
+    it(
+      'passes for maps regardless of key order',
+      function() assert_deep_equal({ a = 1, b = 2 }, { b = 2, a = 1 }) end
+    )
+
+    it('errors on scalar mismatch', function()
+      local ok, err = pcall(assert_deep_equal, 1, 2)
+      assert.is_false(ok)
+      assert.matches('^assert_deep_equal failed', err)
+      assert.matches('%-%-%- got', err)
+      assert.matches('%+%+%+ want', err)
+    end)
+
+    it('errors on nested table mismatch', function()
+      local ok, err = pcall(assert_deep_equal, { a = { b = 1 } }, { a = { b = 2 } })
+      assert.is_false(ok)
+      assert.matches('%+%s+b = 2', err)
+    end)
+
+    it('errors when array lengths differ', function()
+      local ok, err = pcall(assert_deep_equal, { 1, 2 }, { 1, 2, 3 })
+      assert.is_false(ok)
+      assert.matches('%+ { 1, 2, 3 }', err)
+    end)
+
+    it('includes the custom message when provided', function()
+      local ok, err = pcall(assert_deep_equal, { 1 }, { 2 }, 'values should match')
+      assert.is_false(ok)
+      assert.matches('^assert_deep_equal failed: values should match', err)
     end)
   end)
 

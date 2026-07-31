@@ -261,7 +261,16 @@ The algorithm:
 
 - `BufDelete`/`BufUnload`/`BufWipeout` autocmds trigger:
   - Full tree unmount (depth-first)
+  - After-render callbacks drained (registered during the unmount phase)
   - Buffer watcher cleanup
+- `renderer:unmount()` runs the same teardown on demand: fires all unmount
+  phases, restores pre-morph keymaps, clears morph extmarks, and resets
+  instance state. Buffer **content stays** — callers clear it themselves if
+  needed. Idempotent (a buffer deletion may already have run teardown), and
+  after unmounting, the same buffer/instance can be mounted again.
+- The `Portal` component manages the lifecycle of its inner document: it
+  unmounts it on Portal unmount and creates a fresh `Morph.new(bufnr)` on each
+  mount, so toggling a Portal off/on with a stable `bufnr` works.
 
 ### Textlock Handling
 

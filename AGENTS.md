@@ -35,6 +35,32 @@ This is why tests require manual `vim.cmd.doautocmd 'TextChanged'` calls - the c
 
 **Note**: Interactive nvim commands with input (like `nvim --headless -c "..."` where commands expect user input) will hang. Always use non-interactive commands or scripts.
 
+### Two Testing Modes for Text-Change (on_change) Behavior
+
+Text-change behavior (`on_change`, `TextChanged`-driven reconciliation) is
+tested in two different ways depending on what is under test:
+
+1. **In-process + fake autocmd** (`spec/morph_spec.lua`): The morph instance,
+   buffer, and event loop all live in the busted runner's own nvim. Because
+   `TextChanged` never fires in headless mode, the test itself triggers it
+   manually with `vim.cmd.doautocmd 'TextChanged'` after a programmatic buffer
+   change (`nvim_buf_set_text`/`nvim_buf_set_lines`). This is the right choice
+   when the *handler logic* is the subject under test (e.g., which elements
+   fire, bubbling, batching) and no real user-input timing matters.
+
+2. **Child-nvim + real input** (`spec/on_change_spec.lua`): A fresh child
+   nvim (via `lua/morph/_test/nvim.lua`) receives real typed input through
+   `nv:input`; real `TextChanged`/`TextChangedI` autocmds and `on_bytes` events
+   fire naturally, as do real undo/redo (`u`, `<C-r>`) and RPC round-trips that
+   act as the event-loop flush point. Choose this when the behavior depends on
+   real input timing or genuine autocmd firing (undo/redo granularity, typed
+   insert-mode changes). Programmatic child-side edits
+   (`nvim_buf_set_text`, `nvim_buf_set_lines`) still fire events on the next
+   round-trip; `M.drain(ms)` flushes scheduled re-renders.
+
+Choose per-test on a "what am I actually testing?" basis; when in doubt, prefer
+the child-nvim mode since it exercises the real autocmd path end to end.
+
 ## Code Style Guidelines
 
 ### Runtime
