@@ -825,6 +825,7 @@ end
 --- @field private buf_watcher morph.BufWatcher? -- Created lazily
 --- @field private _unmount? fun() -- Terminal teardown, set on mount
 --- @field private _mounted boolean -- True while mounted; stale rerenders no-op after unmount
+--- @field private undo? 'merge' -- undo = 'merge': render writes :undojoin with the current undo block
 local Morph = {}
 Morph.__index = Morph
 
@@ -1034,8 +1035,14 @@ end
 
 --- Create a new Morph instance bound to a buffer.
 --- @param bufnr integer? Buffer number (nil or 0 means current buffer)
+--- @param opts? { undo?: 'merge' }  `undo = 'merge'`: a render that answers
+---   an external buffer change merges into that change's undo entry via
+---   :undojoin, so `u' undoes the user edit and its rendered reflection as
+---   one unit. Renders with no causal change (timers, fold toggles, host
+---   updates) stay their own reversible entry.
 --- @return morph.Morph
-function Morph.new(bufnr)
+function Morph.new(bufnr, opts)
+  local undo_opts = opts or {}
   bufnr = (bufnr == nil or bufnr == 0) and vim.api.nvim_get_current_buf() or bufnr
 
   -- Each buffer gets its own namespace for extmarks
@@ -1046,13 +1053,21 @@ function Morph.new(bufnr)
   local self = setmetatable({
     bufnr = bufnr,
     ns = vim.b[bufnr]._renderer_ns,
-    changedtick = 0,
+    undo = undo_opts.undo,
+    -- A first render that :undojoins into an empty undo history creates a
+    -- single entry spanning empty -> content; `u' then reverts the whole
+    -- rendered tree to empty (verified: this is the mount-annihilation bug).
+    -- Seed changedtick to the buffer's current tick so the first render sees
+    -- no external change and skips the join -- the baseline becomes its own
+    -- entry by the same causation rule, no special-case flag. Non-merge keeps
+    -- 0 so the first render syncs any pre-existing buffer content as before.
+    changedtick = (undo_opts.undo == 'merge') and vim.b[bufnr].changedtick or 0,
     changing = false,
     textlock = false,
     original_keymaps = {},
     text_content = {
-      old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
-      curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      old = { lines = { '' }, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      curr = { lines = { '' }, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
     },
     component_tree = { old = nil },
     cleanup_hooks = {},
@@ -1149,7 +1164,11 @@ function Morph:render(tree)
   -- Ensure buffer watcher is created (for on_change handlers)
   self:_ensure_buf_watcher()
 
-  -- Detect if buffer changed externally since our last render
+  -- Detect if buffer changed externally since our last render.
+  -- Capture whether it did BEFORE syncing self.changedtick below: the merge
+  -- gate (undo = 'merge') keys off it to join only renders that actually
+  -- answer an external change.
+  local changed_externally = vim.b[self.bufnr].changedtick ~= self.changedtick
   local changedtick = vim.b[self.bufnr].changedtick
   if changedtick ~= self.changedtick then
     self.text_content.curr = {
@@ -1224,6 +1243,23 @@ function Morph:render(tree)
   vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
 
   self.changing = true
+  -- With undo = 'merge', fold the renderer's writes into the current undo
+  -- block so `u' undoes the user's edit and its rendered reflection as one
+  -- unit. The join is causation-driven: it only happens when an external
+  -- buffer change occurred since our last render (detected above as
+  -- changed_externally). Renders that answer nothing -- timers, fold toggles,
+  -- host updates -- never join.
+  --
+  -- The first (baseline) render also never joins: the constructor seeds
+  -- self.changedtick to the buffer's tick at creation time for merge
+  -- instances, so there is no external change to answer on the first pass.
+  -- That makes a stray `u' unable to revert the whole rendered tree to empty
+  -- -- a property that falls out of the causation rule, not a special-case
+  -- flag.
+  --
+  -- pcall: :undojoin raises E790 ("not allowed after undo"); after an undo/redo
+  -- the render falls back to a fresh entry instead of erroring.
+  if self.undo == 'merge' and changed_externally then pcall(vim.api.nvim_command, 'undojoin') end
   Morph.patch_lines(self.bufnr, self.text_content.old.lines, lines)
   self.changing = false
   self.changedtick = vim.b[self.bufnr].changedtick
