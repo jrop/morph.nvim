@@ -448,6 +448,8 @@ Building interactive UIs in Neovim traditionally requires managing buffer conten
 
 ## Similar Projects
 
+- [fibrous.nvim](https://github.com/mbrea-c/fibrous.nvim)
+- [neoink](https://github.com/NicholasZolton/neoink)
 - [reactive.nvim](https://github.com/rasulomaroff/reactive.nvim)
 - [nvim-react](https://github.com/s1n7ax/nvim-react)
 - [magenta.nvim](https://github.com/dlants/magenta.nvim) - [custom rendering engine](https://github.com/dlants/magenta.nvim/blob/main/node/tea/render.ts)
