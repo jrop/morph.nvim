@@ -7,11 +7,16 @@
 
 --- on_change integration tests.
 ---
---- Runs in a child `nvim --headless --embed` (real event loop) so
---- `TextChanged`/`TextChangedI` fire naturally from real keystrokes and
---- programmatic edits — no `vim.cmd.doautocmd` fakes.  Every `exec_func`
---- closure is self-contained (`string.dump` drops upvalues); requires go inside
---- the closure body and the Morph handle lives in the child global `_G.m`.
+--- Runs in a **child** `nvim --headless --embed` (real event loop, real
+--- autocmds, real input) so `TextChanged`/`TextChangedI` fire naturally from
+--- real keystrokes and programmatic edits — no `vim.cmd.doautocmd` fakes. The
+--- child is headless but is NOT subject to the host (busted runner) nvim's
+--- TextChanged-doesn't-fire / insert-pending-leak limitations; see AGENTS.md's
+--- "Test Environment Notes" host/child split. Every `exec_func` closure is
+--- self-contained (`string.dump` drops upvalues); requires go inside the
+--- closure body and the Morph handle lives in the child global `_G.m`.
+--- Programmatic mode changes / scheduled work are only observable across an
+--- RPC round-trip (a later `exec_func`), not within the same call.
 local Nvim = require 'morph._test.nvim'
 
 describe('on_change events', function()

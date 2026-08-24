@@ -2062,9 +2062,17 @@ local function restore_mode_and_wait(target_mode, callback)
 
   local mode_pattern = current_mode .. ':' .. target_mode
   local mode_changed_id
+  -- Defer the callback onto a clean event-loop tick so it runs OUTSIDE the
+  -- ModeChanged autocmd. Otherwise a nested action taken from the callback --
+  -- e.g. FloatingWindow's on_closed opening another float that calls
+  -- startinsert -- executes while the i:n transition is still on the autocmd
+  -- stack, and the nested startinsert does not stick (leaves the new float in
+  -- normal mode). Decoupling callback execution from the autocmd preserves the
+  -- autocmd's "wait until the mode change takes effect" timing semantics.
+  local function schedule_callback() vim.schedule(callback) end
   local fallback_timer = vim.defer_fn(function()
     pcall(vim.api.nvim_del_autocmd, mode_changed_id)
-    callback()
+    schedule_callback()
   end, 500)
 
   mode_changed_id = vim.api.nvim_create_autocmd('ModeChanged', {
@@ -2074,7 +2082,7 @@ local function restore_mode_and_wait(target_mode, callback)
     callback = function()
       fallback_timer:stop()
       pcall(vim.api.nvim_del_autocmd, mode_changed_id)
-      callback()
+      schedule_callback()
     end,
   })
 

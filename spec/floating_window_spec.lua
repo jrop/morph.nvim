@@ -1,6 +1,8 @@
 --- @diagnostic disable: need-check-nil, undefined-field
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: redundant-parameter
+--- @diagnostic disable: global-in-non-module
+--- @diagnostic disable: duplicate-require
 
 local Morph = require 'morph'
 local FloatingWindow = Morph.FloatingWindow
@@ -42,12 +44,15 @@ describe('FloatingWindow', function()
   end)
   teardown(function() vim.env.NVIM_TEST = saved_nvim_test end)
   after_each(function()
-    -- `:startinsert` leaves nvim's internal insert-pending state set even
-    -- though headless scripts never truly enter insert mode. The float-close
-    -- path short-circuits (mode() already reports 'n'), so `:stopinsert` is
-    -- never called and the state leaks into later specs, flipping how nvim
+    -- HOST-only artifact (the busted runner nvim, not the morph._test.nvim
+    -- child): `:startinsert` leaves nvim's internal insert-pending state set
+    -- even though the host never truly enters insert mode (mode() reports 'n').
+    -- The float-close path short-circuits (mode already 'n'), so `:stopinsert`
+    -- is never called and the state leaks into later specs, flipping how nvim
     -- anchors the cursor on subsequent nvim_buf_set_text calls. Clear it so
-    -- suite ordering cannot change later tests' behavior.
+    -- suite ordering cannot change later tests' behavior. The child harness is
+    -- unaffected (each child is fresh and torn down per test); see AGENTS.md's
+    -- "Test Environment Notes" host/child split.
     vim.cmd.stopinsert()
   end)
   it('should create floating window when open is true', function()
@@ -391,5 +396,109 @@ describe('FloatingWindow', function()
 
     close_all_floats()
     cleanup_buffers { display_buf }
+  end)
+end)
+
+-- Closing a float that was in insert mode restores the prior mode via
+-- `restore_mode_and_wait`, which fires the `on_closed` callback from inside
+-- the `i:n` ModeChanged autocmd. When `on_closed` opens a *second* float,
+-- that float's `on_win_create` -- and any `startinsert` issued there -- runs
+-- nested inside that autocmd and does not stick, leaving the second float in
+-- normal mode and uneditable.
+--
+-- The bug only manifests on the `i->n` ModeChanged route, so float A must be
+-- in insert at close time. A's own `on_win_create` calls `startinsert`; that
+-- suffices -- in the `morph._test.nvim` child (a real `--embed`ded nvim)
+-- programmatic `startinsert` DOES enter insert, it just is not visible within
+-- the same `exec_func` call. The mode change is only observable across an RPC
+-- round-trip (a later `exec_func`), which acts as the event-loop flush point
+-- (see AGENTS.md). So no real `nv:input 'i'` is needed to set up A.
+--
+-- The assertion is the user-facing symptom itself: after A closes and B
+-- opens (whose `on_win_create` calls `startinsert`), real input typed into B
+-- must land in B's buffer. With the bug, B's `startinsert` is swallowed by the
+-- still-on-stack ModeChanged autocmd, B stays in normal mode, and typed text
+-- is consumed as a normal-mode motion instead of inserted -- so B's buffer
+-- stays empty. `vim.fn.mode(1)` is NOT a reliable discriminator on its own:
+-- typing the input enters insert mode in both cases, so only the buffer
+-- content distinguishes bug from fix. Do not "simplify" this to a mode
+-- assertion.
+describe('FloatingWindow nested open from on_closed', function()
+  local Nvim = require 'morph._test.nvim'
+  local nv
+  before_each(function() nv = Nvim.start { columns = 60, rows = 20 } end)
+  after_each(function()
+    if nv then nv:stop() end
+    nv = nil
+  end)
+
+  it('second float opened from first on_closed is editable in insert mode', function()
+    nv:exec_func(function()
+      local Morph = require 'morph'
+      local h = Morph.h
+      local FloatingWindow = Morph.FloatingWindow
+      local util = require 'morph._test.util'
+      _G.m = Morph.new(util.scratch_buf { focus = true })
+      _G.b_buf = nil
+      _G.app = nil
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = { show_a = true, show_b = false }
+          _G.app = ctx
+        end
+        local s = ctx.state
+        local cfg = { relative = 'editor', row = 1, col = 1, width = 40, height = 5 }
+        if s.show_a then
+          return h(FloatingWindow, {
+            open = true,
+            config = cfg,
+            on_win_create = function() vim.cmd.startinsert() end,
+            on_closed = function() _G.app:update { show_a = false, show_b = true } end,
+          }, h('text', { id = 'qa' }, ''))
+        end
+        if s.show_b then
+          return h(FloatingWindow, {
+            open = true,
+            config = cfg,
+            on_win_create = function(_, bufnr)
+              _G.b_buf = bufnr
+              vim.cmd.startinsert()
+            end,
+          }, h('text', { id = 'qb' }, ''))
+        end
+        return {}
+      end
+      _G.m:mount(h(App, {}))
+    end)
+
+    -- Round-trip so A's on_win_create startinsert flushes: the child is a real
+    -- embedded nvim and programmatic startinsert DOES enter insert, but the
+    -- mode change is only visible across an RPC round-trip, not within the
+    -- same exec_func. This puts A in insert so the close takes the i->n
+    -- ModeChanged route (the only path the bug manifests on).
+    nv:exec_func(function()
+      vim.wait(300, function() return vim.fn.mode():sub(1, 1) == 'i' end, 5)
+    end)
+
+    -- Close A: its on_closed opens B, whose on_win_create startinsert is
+    -- deferred onto a clean tick by the fix. Round-trip flushes the child's
+    -- scheduled work so the deferred startinsert has run before we type.
+    nv:exec_func(function() _G.app:update { show_a = false } end)
+    nv:exec_func(function()
+      vim.wait(300, function() return _G.b_buf ~= nil end, 5)
+    end)
+
+    -- Real input into B: must land in B's buffer iff B entered insert mode.
+    nv:input 'w'
+
+    local b_buf = nv:exec_func(function() return _G.b_buf end)
+    local lines = nv:exec_func(function()
+      local b = _G.b_buf
+      if not (b and vim.api.nvim_buf_is_valid(b)) then return {} end
+      return vim.api.nvim_buf_get_lines(b, 0, -1, false)
+    end)
+
+    assert.is_not_nil(b_buf, 'second float on_win_create never ran')
+    assert.are.same({ 'w' }, lines, 'second float was not editable; startinsert was lost')
   end)
 end)

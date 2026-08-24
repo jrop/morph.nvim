@@ -4,6 +4,15 @@ local assert = require 'morph._test.assert'
 --- Nvim remote-control helper.
 --- Spawns a child `nvim --headless --embed` with RPC on stdio,
 --- drives it via msgpack-RPC, and snapshots structured screen-state.
+---
+--- This child is headless but is NOT subject to the host (busted runner) nvim's
+--- limitations: it has a real event loop driven by RPC, so `TextChanged`/
+--- `TextChangedI` autocmds fire naturally from real input, and programmatic
+--- `:startinsert` genuinely enters insert mode. The mode change (and any
+--- scheduled work) is only observable across an RPC round-trip (a later
+--- `exec_func`/`request`), NOT within the same `exec_func` that issued it — the
+--- round-trip is the event-loop flush point. See AGENTS.md's "Test Environment
+--- Notes" host/child split for the full distinction.
 
 --- @class morph._test.SnapshotWindow
 --- @field bufnr integer
