@@ -830,10 +830,11 @@ describe('Morph', function()
         assert.are.same(Pos00.new(0, 6), zero_elem.extmark.start)
         assert.are.same(Pos00.new(0, 6), zero_elem.extmark.stop)
 
-        -- Can detect zero-width extmark at its position
+        -- Can detect zero-width extmark at its position (top-level strings
+        -- also get implicit text tags now, so filter by id)
         local elements = r:get_elements_at { 0, 6 }
-        assert.are.same(1, #elements)
-        assert.are.same('zero-width', elements[1].attributes.id)
+        local ids = vim.tbl_map(function(el) return el.attributes.id end, elements)
+        assert.is_true(vim.tbl_contains(ids, 'zero-width'))
 
         -- Inserting text triggers on_change
         set_text(0, 6, 0, 6, { 'inserted' })
@@ -1664,7 +1665,7 @@ describe('Morph', function()
         -- Simulate the bug: clear the captured on_bytes args, then fire TextChanged.
         -- This can happen if TextChanged fires without a corresponding on_bytes event,
         -- e.g., when a plugin or user action triggers TextChanged without actual changes.
-        r.buf_watcher.last_on_bytes_args = nil
+        r.buf_watcher.last_user_bytes_args = nil
 
         -- This should NOT throw "attempt to perform arithmetic on local 'start_row0' (a nil value)"
         assert.has_no.errors(function() vim.cmd.doautocmd 'TextChanged' end)

@@ -306,12 +306,23 @@ Several attributes have special meaning in morph.nvim:
 
 - `id` - Unique identifier for the element (used with `renderer:get_element_by_id()`)
 - `hl` - Highlight group name for styling the text
+- `readonly` - 3-state edit guard. `true` locks the element's text (and its entire subtree): edits are detected, reverted, and the region flashes briefly. `false` carves an editable hole, even under a locked ancestor. Absent (nil) inherits from the enclosing region. Readonly elements never fire `on_change` -- their text cannot change by contract. With `Morph.new(bufnr, { readonly = true })` the entire rendered buffer is locked by default (top-level bare strings and numbers are wrapped in implicit `text` tags, so every rendered character is guarded). See ARCHITECTURE.md ("Readonly Guard") for the detection/revert mechanics.
 - `extmark` - Raw extmark options passed to `nvim_buf_set_extmark()`
 - `key` - Helps the reconciler identify matchup old elements in arrays with new ones during updates (similar to React keys)
 
 ```lua
 -- Basic text element
 h('text', { hl = 'Comment' }, 'Hello world')
+
+-- Readonly text (edits are reverted automatically)
+h('text', { readonly = true }, 'Name: ')
+
+-- Editable hole carved out of a locked-by-default app
+local r = Morph.new(bufnr, { readonly = true })
+r:render {
+  h('text', {}, 'Name: '), -- locked by the renderer default
+  h('text', { readonly = false, on_change = function(e) ... end }, ''), -- editable hole
+}
 
 -- Shorthand for highlight groups
 h.Comment({}, 'Hello world')  -- equivalent to above

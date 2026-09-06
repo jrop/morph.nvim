@@ -73,10 +73,19 @@ function M.cursor_to_extmark_start(morph, id)
   vim.api.nvim_win_set_cursor(0, { start[1] + 1, start[2] })
 end
 
---- Flush scheduled re-renders (replaces `vim.wait(ms, function() return false end)`).
---- @param ms? integer
+--- Flush scheduled re-renders.
+---
+--- A plain `vim.wait(ms, function() return false end)` always burns its full
+--- timeout, but the work being flushed here is `vim.schedule`'d, and schedule
+--- callbacks run in FIFO order. Queueing a sentinel AFTER the drain call means
+--- the sentinel cannot run until all previously scheduled work has run, so
+--- waiting on the sentinel releases as soon as the queue is drained (usually
+--- sub-millisecond) instead of after a fixed sleep. `ms` is only a safety cap.
+--- @param ms? integer  timeout cap (default 1000)
 function M.drain(ms)
-  vim.wait(ms or 50, function() return false end)
+  local done = false
+  vim.schedule(function() done = true end)
+  vim.wait(ms or 1000, function() return done end, 1)
 end
 
 return M

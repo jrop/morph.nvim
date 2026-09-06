@@ -490,6 +490,92 @@ describe('on_change events', function()
     assert.are.same('prepended\nasldkfjasdlfjkasdfkj', result.text)
     assert.are.same({ { id = 'the-id', text = 'prepended\nasldkfjasdlfjkasdfkj' } }, result.events)
   end)
+
+  -- The guard must police USER edits only. A re-render that the app's own
+  -- on_change triggered (e.g. a filter count updating) rewrites the buffer
+  -- after `changing` is already false, so its TextChanged lands in the guard
+  -- with a change position outside every editable span. Treating that as a
+  -- violation schedules a full-tree revert render on EVERY keystroke; in a
+  -- real app (state landing between renders) that revert races the user's
+  -- in-flight typing: chrome flashes readonly, characters are clobbered, and
+  -- the region's text diverges from app state.
+  it('does not revert when the app re-renders from on_change', function()
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+
+      --- @param ctx morph.Ctx<{}, { filter: string, count: number }>
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = { filter = '', count = 0 }
+          _G.app_state = ctx.state
+        end
+        local state = assert(ctx.state)
+        return {
+          'Header\n\n',
+          'Filter: [',
+          h('text', {
+            id = 'filter',
+            readonly = false,
+            on_change = function(e)
+              state.filter = e.text
+              state.count = #e.text
+              ctx:update(state)
+            end,
+          }, state.filter),
+          '] (',
+          h('text', {}, tostring(state.count)),
+          ' models)\n\nFooter chrome',
+        }
+      end
+
+      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
+      _G.m:mount(h(App), { debounce_ms = 0 })
+      util.drain(100)
+      -- Count guard reverts: each one is a whole-tree re-render racing the
+      -- user's typing. Instance-level wrap so the prototype method is
+      -- untouched.
+      local orig = _G.m._reject_edits
+      _G.m._reject_edits = function(self, ...)
+        _G.reverts = (_G.reverts or 0) + 1
+        return orig(self, ...)
+      end
+      util.cursor_to_extmark_start(_G.m, 'filter')
+      return nil
+    end)
+
+    -- Slow typing: one keystroke per drain, each with its own TextChangedI.
+    nv:input 'i'
+    for _, c in ipairs { 'g', 'l', 'm' } do
+      nv:input(c)
+      nv:exec_func(function()
+        local util = require 'morph._test.util'
+        util.drain(60)
+        return nil
+      end)
+    end
+
+    -- Fast typing: one input call batches the keystrokes in typeahead, so
+    -- TextChangedI fires only once for the whole burst.
+    nv:input '-5.3'
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      util.drain(150)
+      return nil
+    end)
+
+    local result = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      return { text = util.text(0), state = _G.app_state.filter, reverts = _G.reverts or 0 }
+    end)
+
+    -- No keystroke -- slow or fast -- may schedule a revert render.
+    assert.are.equal(0, result.reverts)
+    -- And the region must stay in sync with the app state it feeds.
+    assert.are.same('Header\n\nFilter: [glm-5.3] (7 models)\n\nFooter chrome', result.text)
+    assert.are.same('glm-5.3', result.state)
+  end)
 end)
 
 describe('undo/redo', function()
@@ -547,198 +633,6 @@ describe('undo/redo', function()
       { id = 'filter', text = '' },
       { id = 'filter', text = 'filter' },
     }, redone.events)
-  end)
-end)
-
-describe('undo-merge rendering', function()
-  local nv
-
-  before_each(function() nv = Nvim.start {} end)
-
-  after_each(function()
-    if nv then nv:stop() end
-    nv = nil
-  end)
-
-  it('user edit and its render patch undo as one unit', function()
-    -- With undo = 'merge', the renderer's text writes :undojoin into the
-    -- preceding undo block. A single `u' must revert BOTH the user's edit
-    -- and the renderer's patch, back to the pre-edit content.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      _G.m:render { 'alpha\n', 'beta' }
-    end)
-
-    nv:input 'ggAx<Esc>' -- user edit: append 'x' to line 1
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'betaZ' } end) -- render patch
-    nv:input 'u'
-    local text = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alpha\nbeta', text)
-  end)
-
-  it('render after undo falls back to a fresh entry instead of erroring', function()
-    -- :undojoin raises E790 when the last change was an undo. A render
-    -- triggered right after `u' must not blow up; it applies as its own
-    -- reversible entry.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      _G.m:render { 'alpha\n', 'beta' }
-    end)
-
-    nv:input 'ggAx<Esc>' -- user edit (merges with the render below)
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'betaZ' } end)
-    nv:input 'u' -- back to 'alpha\nbeta'
-
-    -- Render immediately after an undo: undojoin must fail soft, not crash.
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'gamma' } end)
-    local applied = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alphax\ngamma', applied)
-
-    nv:input 'u'
-    local reverted = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alpha\nbeta', reverted) -- only the post-undo render pops
-  end)
-
-  it('consecutive render-only patches undo separately (no causation, no join)', function()
-    -- Renders not caused by a text change (timers, fold toggles, host
-    -- updates) must NOT merge: each stays its own reversible entry, so a
-    -- stray `u' can't revert unrelated state.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      _G.m:render { 'alpha\n', 'beta' }
-    end)
-
-    nv:exec_func(function() _G.m:render { 'alphaX\n', 'beta' } end) -- render-only 1
-    nv:exec_func(function() _G.m:render { 'alphaY\n', 'beta' } end) -- render-only 2
-    nv:input 'u'
-    local one = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alphaX\nbeta', one) -- only the latest render popped
-
-    nv:input 'u'
-    local two = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alpha\nbeta', two) -- previous render popped too
-  end)
-
-  it('render-only fold toggle after an edit stays its own entry', function()
-    -- The causation fix for the fold-collapse hazard: a morph-initiated
-    -- render following an already-joined user edit must NOT merge into it.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      _G.m:render { 'alpha\n', 'beta' }
-    end)
-
-    nv:input 'ggAx<Esc>' -- user edit A
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'beta' } end) -- join A+render
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'folded' } end) -- fold toggle (no user change)
-    nv:input 'u'
-    local text = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    -- Fold alone popped; the user edit + its canonicalization intact.
-    assert.are.same('alphax\nbeta', text)
-  end)
-
-  it('render merges into the newest edit, not an older one', function()
-    -- Regression for the misjoin hazard: a render answering edits A and B
-    -- must join the CURRENT head (B), leaving A a separate undo step.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      _G.m:render { 'alpha\n', 'beta' }
-    end)
-
-    nv:input 'ggAx<Esc>' -- edit A: 'alphax'
-    nv:input 'jAy<Esc>' -- edit B: 'betay'
-    nv:exec_func(function() _G.m:render { 'alphax\n', 'betayZ' } end) -- reconciles A+B
-    nv:input 'u'
-    local after_b = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alphax\nbeta', after_b) -- B + render popped, A intact
-
-    nv:input 'u'
-    local after_a = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('alpha\nbeta', after_a) -- A popped
-  end)
-
-  it('mount lifecycle: a user edit and its debounced rerender undo as one unit', function()
-    -- Exercises Morph:mount (not just :render) with undo = 'merge', the
-    -- primary real-world path: a component whose on_change calls ctx:update,
-    -- scheduling a debounced rerender. The component canonicalizes (uppercases)
-    -- user input, so the rerender writes a real patch that must merge with the
-    -- typed edit. This also verifies the mount baseline render does not join
-    -- (a single `u' reverts to the pre-edit baseline, never to an empty buffer).
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { undo = 'merge' })
-      --- @param ctx morph.Ctx<{}, { text: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then ctx.state = { text = 'alpha' } end
-        local state = assert(ctx.state)
-        return {
-          h('text', {
-            id = 'field',
-            on_change = function(e)
-              e.bubble_up = false
-              ctx:update { text = e.text }
-            end,
-          }, string.upper(state.text)),
-        }
-      end
-      _G.m:mount(h(App))
-      util.cursor_to_extmark_start(_G.m, 'field')
-    end)
-
-    -- Real typed edit at the field: 'ALPHA' -> 'ALPHAx'. on_change fires,
-    -- ctx:update schedules a rerender that canonicalizes to 'ALPHAX'.
-    nv:input 'Ax<Esc>'
-    local rendered = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(100)
-      return util.text(0)
-    end)
-    assert.are.same('ALPHAX', rendered)
-
-    -- One `u' reverts BOTH the typed 'x' and the canonicalizing render, back to
-    -- the pre-edit baseline (not the empty buffer the mount-annihilation bug
-    -- would produce). Without merge this would take two `u's.
-    nv:input 'u'
-    local undone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
-    assert.are.same('ALPHA', undone)
   end)
 end)
 

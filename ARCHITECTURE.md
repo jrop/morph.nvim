@@ -4,7 +4,7 @@ This document describes the internal architecture of morph.nvim, a React-like co
 
 ## Overview
 
-morph.nvim is implemented as a single file (`lua/morph.lua`, < 1000 SLoC) for easy vendoring by plugin authors. It provides a declarative, component-based API for building interactive text UIs in Neovim buffers.
+morph.nvim is implemented as a single file (`lua/morph.lua`, < 1500 SLoC) for easy vendoring by plugin authors. It provides a declarative, component-based API for building interactive text UIs in Neovim buffers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -245,6 +245,38 @@ The algorithm:
    - Compares cached `tag.curr_text` with current extmark text
    - Fires `on_change` handlers from innermost to outermost with bubbling
 
+### Readonly Guard
+
+The 3-state `readonly` attribute is enforced by the same text-change path.
+General principle: **the buffer must always match the tree** -- locked text
+belongs to the app, editable holes belong to the user. A running example
+anchors the pieces: an app renders `Filter: [<hole>]` plus a heading that
+re-renders as `## Containers (filter: fl)` whenever the hole's filter
+changes.
+
+- **Detection**: the guard sweeps every rendered element's span text on each
+  buffer-change batch and compares it with the snapshot cached at render time
+  (`tag.curr_text`); span decisions use `tag.curr_span`, stored in PRE-change
+  coordinates so they never depend on where mark adjustment has since moved
+  the live extmarks. Example: typing `f` in the hole changes its live text to
+  `f` while its snapshot still says '' (empty) -- that mismatch is the edit.
+  O(elements) per batch; at TUI scale this is negligible.
+- **Violation**: a locked element whose text changed with no explaining
+  editable hole (one whose accepted span brackets the edit AND sits inside
+  the locked element's span) triggers a full-tree revert via the normal
+  render pipeline. Example: typing into the `Filter: [` chrome changes locked
+  text no hole explains -- the guard reverts it. The violated spans flash
+  (`Search` highlight) and the cursor is restored to where the rejected edit
+  found it -- sampled before nvim's own cursor adjustment, so line deletes
+  recover the pre-clamp column. The restore targets the first window showing
+  the buffer; with the buffer displayed in multiple windows simultaneously
+  the non-originating window's cursor is not tracked.
+- **Bounded exception**: an edit whose pre-edit range is exactly a hole's
+  last-accepted span is positionally indistinguishable from a whole-content
+  change and is accepted. Example: `ciw` on the hole's whole content and a
+  visual-select of exactly the hole content produce the same pre-edit range;
+  the former must be accepted, so the latter is too. Any edit touching bytes
+  outside the hole reverts.
 ## Buffer Management
 
 ### Per-Buffer State

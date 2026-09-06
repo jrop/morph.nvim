@@ -143,8 +143,14 @@ describe('Portal screenshot', function()
       '                                                                                ',
     }, 'parent update: count=1')
 
+    -- The app's own defer_fn (~200ms after mount) updates the count; wait for
+    -- that update to land rather than sleeping a fixed 500ms.
     nv:exec_func(function()
-      vim.wait(500, function() return false end)
+      vim.wait(
+        2000,
+        function() return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find 'Parent: 2' ~= nil end,
+        10
+      )
     end)
 
     nv:assert_screenshot({
