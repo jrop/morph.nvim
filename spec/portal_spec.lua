@@ -1,5 +1,6 @@
---- @diagnostic disable: need-check-nil, undefined-field
+--- @diagnostic disable: need-check-nil
 --- @diagnostic disable: param-type-mismatch
+--- @diagnostic disable: undefined-field
 
 local Morph = require 'morph'
 local Portal = Morph.Portal

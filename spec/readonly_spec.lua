@@ -1,5 +1,12 @@
---- @diagnostic disable: assign-type-mismatch, global-in-non-module
---- @diagnostic disable: inject-field, missing-fields, need-check-nil, param-type-mismatch, undefined-field
+--- @diagnostic disable: assign-type-mismatch
+--- @diagnostic disable: duplicate-require
+--- @diagnostic disable: global-in-non-module
+--- @diagnostic disable: inject-field
+--- @diagnostic disable: missing-fields
+--- @diagnostic disable: need-check-nil
+--- @diagnostic disable: param-type-mismatch
+--- @diagnostic disable: undefined-field
+
 local Nvim = require 'morph._test.nvim'
 local util = require 'morph._test.util'
 
@@ -734,7 +741,7 @@ describe('readonly regions', function()
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.Row = function(ctx)
+      _G.Row = function(_ctx)
         return { 'name: ', h('text', { id = 'hole', readonly = false }, 'value') }
       end
       _G.m:render { h(_G.Row, {}, {}) }

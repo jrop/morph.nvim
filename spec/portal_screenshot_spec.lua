@@ -1,5 +1,7 @@
---- @diagnostic disable: need-check-nil, global-in-non-module
---- @diagnostic disable: param-type-mismatch, undefined-field
+--- @diagnostic disable: global-in-non-module
+--- @diagnostic disable: need-check-nil
+--- @diagnostic disable: param-type-mismatch
+--- @diagnostic disable: undefined-field
 
 --- Portal screen-snapshot test.
 --- Spawns a child nvim, mounts a Portal component with a parent that renders

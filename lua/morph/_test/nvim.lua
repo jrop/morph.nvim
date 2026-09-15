@@ -1,4 +1,5 @@
 ---@diagnostic disable: global-in-non-module
+
 local assert = require 'morph._test.assert'
 
 --- Nvim remote-control helper.

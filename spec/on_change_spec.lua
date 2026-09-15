@@ -1,4 +1,6 @@
---- @diagnostic disable: assign-type-mismatch, global-in-non-module
+--- @diagnostic disable: assign-type-mismatch
+--- @diagnostic disable: duplicate-set-field
+--- @diagnostic disable: global-in-non-module
 --- @diagnostic disable: inject-field
 --- @diagnostic disable: missing-fields
 --- @diagnostic disable: need-check-nil

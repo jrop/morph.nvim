@@ -1,8 +1,9 @@
---- @diagnostic disable: need-check-nil, undefined-field
+--- @diagnostic disable: duplicate-require
+--- @diagnostic disable: global-in-non-module
+--- @diagnostic disable: need-check-nil
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: redundant-parameter
---- @diagnostic disable: global-in-non-module
---- @diagnostic disable: duplicate-require
+--- @diagnostic disable: undefined-field
 
 local Morph = require 'morph'
 local FloatingWindow = Morph.FloatingWindow
