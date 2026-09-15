@@ -59,6 +59,7 @@ local function cursor_to_r(nv)
 end
 
 describe('region-aware undo', function()
+  --- @type morph._test.Nvim
   local nv
 
   before_each(function() nv = Nvim.start {} end)
@@ -757,7 +758,7 @@ describe('region-aware undo', function()
       local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function App(_ctx)
         return {
           'X:[',
@@ -1336,7 +1337,7 @@ describe('region-aware undo', function()
       local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function Field(_ctx) return h('text', { id = 'r', readonly = false }, 'base') end
       -- No renderer-level readonly: only the nested hole makes a region.
       _G.m = Morph.new(util.scratch_buf { focus = true })

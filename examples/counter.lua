@@ -34,7 +34,7 @@ end
 
 -- Counter component with its own state
 -- Each instance maintains independent count state
---- @param ctx morph.Ctx<{ count: integer }>
+--- @param ctx morph.Ctx<any, { count: integer }>
 local function Counter(ctx)
   -- Initialize state only on first render (mount phase)
   if ctx.phase == 'mount' then ctx.state = { count = 1 } end
@@ -67,7 +67,7 @@ end
 
 -- Main App component that renders the entire UI
 -- Demonstrates component composition and multiple instances
---- @param _ctx morph.Ctx
+--- @param _ctx morph.Ctx<any, any>
 --- @return morph.Tree
 local function App(_ctx)
   return {

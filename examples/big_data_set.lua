@@ -8,7 +8,7 @@ local H = {}
 --- useful test. This `Table` component (inefficiently implemented) makes the
 --- UI stutter.
 ---
---- @param ctx morph.Ctx<{ cells: morph.Tree[][] }>
+--- @param ctx morph.Ctx<{ cells: morph.Tree[][] }, any>
 local function Table(ctx)
   local cells = ctx.props.cells
   local max_widths = {}
@@ -122,7 +122,7 @@ end
 -- /_/   \_\ .__/| .__/
 --         |_|   |_|
 
---- @param _ctx morph.Ctx
+--- @param _ctx morph.Ctx<any, any>
 local function App(_ctx)
   return h('text', {}, {
     --

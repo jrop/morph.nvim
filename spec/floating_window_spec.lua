@@ -38,6 +38,7 @@ describe('FloatingWindow', function()
   -- These tests drive open/close transitions via app_ctx:update and assert
   -- synchronously, so run with debounce off (NVIM_TEST=true) like the suite
   -- does. Save/restore so other specs are unaffected.
+  --- @type string?
   local saved_nvim_test
   setup(function()
     saved_nvim_test = vim.env.NVIM_TEST
@@ -100,6 +101,7 @@ describe('FloatingWindow', function()
     local original_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_cursor(original_win, { 5, 3 })
 
+    --- @type morph.Ctx<any, any>
     local app_ctx
     local function App(ctx)
       if ctx.phase == 'mount' then ctx.state = { open = false } end
@@ -144,6 +146,7 @@ describe('FloatingWindow', function()
     local original_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_cursor(original_win, { 2, 2 })
 
+    --- @type morph.Ctx<any, any>
     local app_ctx
     local function App(ctx)
       if ctx.phase == 'mount' then ctx.state = { open = true } end
@@ -269,6 +272,7 @@ describe('FloatingWindow', function()
     local fired = 0
     local fire_win, fire_mode, fire_floats
 
+    --- @type morph.Ctx<any, any>
     local app_ctx
     local function App(ctx)
       if ctx.phase == 'mount' then ctx.state = { open = true } end
@@ -319,6 +323,7 @@ describe('FloatingWindow', function()
     vim.api.nvim_set_current_win(w1)
 
     local morph_buf = create_test_buffer()
+    --- @type morph.Ctx<any, any>
     local app_ctx
     local function App(ctx)
       if ctx.phase == 'mount' then ctx.state = { open = true } end
@@ -426,6 +431,7 @@ end)
 -- assertion.
 describe('FloatingWindow nested open from on_closed', function()
   local Nvim = require 'morph._test.nvim'
+  --- @type morph._test.Nvim?
   local nv
   before_each(function() nv = Nvim.start { columns = 60, rows = 20 } end)
   after_each(function()
@@ -441,6 +447,7 @@ describe('FloatingWindow nested open from on_closed', function()
       local util = require 'morph._test.util'
       _G.m = Morph.new(util.scratch_buf { focus = true })
       _G.b_buf = nil
+      --- @type morph.Ctx<any, any>
       _G.app = nil
       local function App(ctx)
         if ctx.phase == 'mount' then
@@ -484,7 +491,11 @@ describe('FloatingWindow nested open from on_closed', function()
     -- Close A: its on_closed opens B, whose on_win_create startinsert is
     -- deferred onto a clean tick by the fix. Round-trip flushes the child's
     -- scheduled work so the deferred startinsert has run before we type.
-    nv:exec_func(function() _G.app:update { show_a = false } end)
+    -- _G.app rides the dump boundary: exec_func string.dumps its callback into
+    -- the child nvim, so a host-side local could not carry the ctx across.
+    nv:exec_func(function()
+      (_G.app --[[@as morph.Ctx<any, any>]]):update { show_a = false }
+    end)
     nv:exec_func(function()
       vim.wait(300, function() return _G.b_buf ~= nil end, 5)
     end)

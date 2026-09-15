@@ -6,6 +6,9 @@
 --- @diagnostic disable: redundant-parameter
 --- @diagnostic disable: undefined-field
 
+-- Real nvim makes vim.version callable via a __call metatable, which the
+-- analyzer's bundled std does not model, so the call is typed as a plain table.
+--- @diagnostic disable-next-line: call-non-callable
 vim.print(tostring(vim.version()))
 
 -- Set NVIM_TEST to enable testing of internal functions
@@ -78,7 +81,7 @@ end
 --------------------------------------------------------------------------------
 
 --- Creates a component that captures its context for later inspection.
---- @param captured_contexts table<string, morph.Ctx> Table to store contexts by id
+--- @param captured_contexts table<string, morph.Ctx<any, any>> Table to store contexts by id
 --- @return fun(ctx: morph.Ctx<{id: string}, {count: integer}>): morph.Tree
 local function make_counter(captured_contexts)
   return function(ctx)
@@ -1479,6 +1482,7 @@ describe('Morph', function()
   describe('keymap management', function()
     it('cleans up keymaps without error when no original mapping existed', function()
       with_buf({}, function()
+        --- @type morph.Ctx<any, any>
         local leaked_context
         local function TestComponent(ctx)
           leaked_context = ctx
@@ -1517,6 +1521,7 @@ describe('Morph', function()
         end
         vim.keymap.set('n', '<Leader>abc', my_orig_callback, { buffer = true })
 
+        --- @type morph.Ctx<any, any>
         local leaked_context
         local function TestComponent(ctx)
           leaked_context = ctx
@@ -1579,6 +1584,7 @@ describe('Morph', function()
         end, { buffer = buf_a })
 
         -- Create Morph document in buffer A
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         local function TestComponent(ctx)
           if ctx.phase == 'mount' then
@@ -1697,6 +1703,7 @@ describe('Morph', function()
     it('correctly identifies same component across renders', function()
       with_buf({}, function()
         local mount_count = {}
+        --- @type morph.Ctx<any, any>
         local app_ctx
 
         --- @param ctx morph.Ctx<{ key: string }, { count: integer }>
@@ -1708,7 +1715,7 @@ describe('Morph', function()
           return h('text', { key = ctx.props.key }, { 'Count: ' .. ctx.state.count })
         end
 
-        --- @param ctx morph.Ctx<{}, { items: {key: string, comp: morph.Component}[] }>
+        --- @param ctx morph.Ctx<{}, { items: {key: string, comp: morph.Component<any, any>}[] }>
         local function App(ctx)
           app_ctx = ctx
           if ctx.phase == 'mount' then
@@ -1745,6 +1752,7 @@ describe('Morph', function()
           b = 2,
           c = 3,
         }
+        --- @type morph.Ctx<any, any>
         local app_ctx
 
         --- @param ctx morph.Ctx<{ key: string }, { value: integer }>
@@ -1858,7 +1866,7 @@ describe('Morph', function()
           local callback_executed = false
           local callback_execution_order = {}
 
-          --- @param ctx morph.Ctx
+          --- @param ctx morph.Ctx<any, any>
           local function TestComponent(ctx)
             if ctx.phase == 'mount' then
               ctx:do_after_render(function()
@@ -1888,7 +1896,7 @@ describe('Morph', function()
           local r = Morph.new(0)
           local execution_order = {}
 
-          --- @param ctx morph.Ctx
+          --- @param ctx morph.Ctx<any, any>
           local function TestComponent(ctx)
             if ctx.phase == 'mount' then
               ctx:do_after_render(function() table.insert(execution_order, 'first') end)
@@ -1909,6 +1917,7 @@ describe('Morph', function()
         function()
           with_buf({}, function()
             local callback_executed = false
+            --- @type morph.Ctx<any, any>
             local capture_ctx
 
             --- @param ctx morph.Ctx<{}, { open: boolean, updated: boolean }>
@@ -1972,7 +1981,7 @@ describe('Morph', function()
       it('re-renders components when state changes', function()
         with_buf({}, function()
           --- @diagnostic disable-next-line: assign-type-mismatch
-          local leaked_ctx = { app = {}, c1 = {}, c2 = {} } --- @type table<string, morph.Ctx>
+          local leaked_ctx = { app = {}, c1 = {}, c2 = {} } --- @type table<string, morph.Ctx<any, any>>
           local Counter = make_counter(leaked_ctx)
 
           --- @param ctx morph.Ctx<{}, { toggle1: boolean, show2: boolean }>
@@ -2022,6 +2031,7 @@ describe('Morph', function()
 
       it('persists child state across parent re-renders', function()
         with_buf({}, function()
+          --- @type morph.Ctx<any, any>
           local child_ctx_ref
 
           --- @param ctx morph.Ctx<{}, { count: number }>
@@ -2031,6 +2041,7 @@ describe('Morph', function()
             return { 'Count: ' .. ctx.state.count }
           end
 
+          --- @type morph.Ctx<any, any>
           local parent_ctx_ref
           --- @param ctx morph.Ctx<{}, { label: string }>
           local function Parent(ctx)
@@ -2062,6 +2073,7 @@ describe('Morph', function()
         -- the Levenshtein algorithm can match the wrong arrays together, causing
         -- components inside to be unmounted/remounted and lose state.
         with_buf({}, function()
+          --- @type morph.Ctx<any, any>
           local services_ctx_ref
           local services_mount_count = 0
 
@@ -2075,9 +2087,10 @@ describe('Morph', function()
             return { 'Filter: [' .. ctx.state.filter .. ']' }
           end
 
-          --- @param _ctx morph.Ctx
+          --- @param _ctx morph.Ctx<any, any>
           local function Help(_ctx) return { 'Help content' } end
 
+          --- @type morph.Ctx<any, any>
           local parent_ctx_ref
           --- @param ctx morph.Ctx<{}, { show_help: boolean }>
           local function App(ctx)
@@ -2127,6 +2140,7 @@ describe('Morph', function()
       it('handles Ctx:update when on_change is nil without errors', function()
         with_buf({}, function()
           local r = Morph.new(0)
+          --- @type morph.Ctx<any, any>
           local leaked_context = nil
           local called = 0
 
@@ -2186,18 +2200,19 @@ describe('Morph', function()
           local phases_a = {}
           local phases_b = {}
 
-          --- @param ctx morph.Ctx
+          --- @param ctx morph.Ctx<any, any>
           local function CompA(ctx)
             table.insert(phases_a, ctx.phase)
             return { 'CompA' }
           end
 
-          --- @param ctx morph.Ctx
+          --- @param ctx morph.Ctx<any, any>
           local function CompB(ctx)
             table.insert(phases_b, ctx.phase)
             return { 'CompB' }
           end
 
+          --- @type morph.Ctx<any, any>
           local parent_ctx
           --- @param ctx morph.Ctx<{}, { use_b: boolean }>
           local function App(ctx)
@@ -2295,7 +2310,7 @@ describe('Morph', function()
         local r = Morph.new(bufnr)
         local order = {}
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function TestComponent(ctx)
           if ctx.phase == 'unmount' then
             table.insert(order, 'unmount')
@@ -2318,7 +2333,7 @@ describe('Morph', function()
         local r = Morph.new(bufnr)
         local unmount_calls = 0
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function TestComponent(ctx)
           if ctx.phase == 'unmount' then unmount_calls = unmount_calls + 1 end
           return { 'Hello' }
@@ -2340,7 +2355,7 @@ describe('Morph', function()
         local r = Morph.new(bufnr)
         local unmount_calls = 0
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function TestComponent(ctx)
           if ctx.phase == 'unmount' then unmount_calls = unmount_calls + 1 end
           return { 'Hello' }
@@ -2360,7 +2375,7 @@ describe('Morph', function()
         local r = Morph.new(bufnr)
         local order = {}
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function TestComponent(ctx)
           if ctx.phase == 'unmount' then
             table.insert(order, 'unmount')
@@ -2507,6 +2522,7 @@ describe('Morph', function()
         with_buf({}, function()
           local r = Morph.new(0)
           local unmount_calls = {}
+          --- @type morph.Ctx<any, any>
           local app_ctx = nil
 
           --- @param ctx morph.Ctx<{ name: string }, {}>
@@ -2566,6 +2582,7 @@ describe('Morph', function()
             return { id }
           end
 
+          --- @type morph.Ctx<any, any>
           local leaked_ctx
           --- @param ctx morph.Ctx<{}, { items: string[] }>
           local function App(ctx)
@@ -2611,6 +2628,7 @@ describe('Morph', function()
     it('fires at most once per debounce_ms under streaming updates', function()
       with_buf({}, function()
         local render_count = 0
+        --- @type morph.Ctx<any, any>
         local ctx_ref
         local function Counter(ctx)
           if ctx.phase == 'mount' then ctx.state = { count = 0 } end
@@ -2644,6 +2662,7 @@ describe('Morph', function()
     it('debounces refresh() calls with same timer', function()
       with_buf({}, function()
         local render_count = 0
+        --- @type morph.Ctx<any, any>
         local ctx_ref
         local function Counter(ctx)
           if ctx.phase == 'mount' then ctx.state = { count = 0 } end
@@ -2669,6 +2688,7 @@ describe('Morph', function()
     it('updates synchronously when debounce_ms is 0 (default)', function()
       with_buf({}, function()
         local render_count = 0
+        --- @type morph.Ctx<any, any>
         local ctx_ref
         local function Counter(ctx)
           if ctx.phase == 'mount' then ctx.state = { count = 0 } end
@@ -2692,6 +2712,7 @@ describe('Morph', function()
       -- with_buf helper deletes the buffer on exit; pending timer should be
       -- cleaned up by the BufDelete autocmd without errors
       with_buf({}, function()
+        --- @type morph.Ctx<any, any>
         local ctx_ref
         local function Counter(ctx)
           if ctx.phase == 'mount' then ctx.state = { count = 0 } end
@@ -2708,6 +2729,7 @@ describe('Morph', function()
 
     it('renders with latest state after coalescing', function()
       with_buf({}, function()
+        --- @type morph.Ctx<any, any>
         local ctx_ref
         local function Counter(ctx)
           if ctx.phase == 'mount' then ctx.state = { count = 0 } end
@@ -2738,7 +2760,7 @@ describe('Morph', function()
   describe('component children', function()
     it('passes children via ctx.children', function()
       with_buf({}, function()
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function Wrapper(ctx) return { '[', ctx.children, ']' } end
 
         local r = Morph.new(0)
@@ -2749,7 +2771,7 @@ describe('Morph', function()
 
     it('handles component returning empty table', function()
       with_buf({}, function()
-        --- @param _ctx morph.Ctx
+        --- @param _ctx morph.Ctx<any, any>
         local function EmptyComponent(_ctx) return {} end
 
         local r = Morph.new(0)
@@ -2760,7 +2782,7 @@ describe('Morph', function()
 
     it('handles component returning nil', function()
       with_buf({}, function()
-        --- @param _ctx morph.Ctx
+        --- @param _ctx morph.Ctx<any, any>
         local function NilComponent(_ctx) return nil end
 
         local r = Morph.new(0)
@@ -2803,6 +2825,7 @@ describe('Morph', function()
           return { ctx.props.id }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { items: string[] }>
         local function App(ctx)
@@ -2853,6 +2876,7 @@ describe('Morph', function()
           return { ctx.props.id }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { items: string[] }>
         local function App(ctx)
@@ -2895,6 +2919,7 @@ describe('Morph', function()
           return { ctx.props.id }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { items: string[] }>
         local function App(ctx)
@@ -2942,6 +2967,7 @@ describe('Morph', function()
           return { ctx.props.id }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { show_first: boolean }>
         local function App(ctx)
@@ -2970,7 +2996,7 @@ describe('Morph', function()
     it('preserves component context when re-rendering with same key', function()
       with_buf({}, function()
         local lifecycle_events = {} --- @type { id: string, phase: string }[]
-        local component_ctxs = {} --- @type table<string, morph.Ctx>
+        local component_ctxs = {} --- @type table<string, morph.Ctx<any, any>>
 
         --- @param ctx morph.Ctx<{ id: string }, { value: integer }>
         local function TrackedComponent(ctx)
@@ -2982,6 +3008,7 @@ describe('Morph', function()
           return { ctx.props.id .. ': ' .. ctx.state.value }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { counter: integer }>
         local function App(ctx)
@@ -3036,6 +3063,7 @@ describe('Morph', function()
           return { ctx.props.id }
         end
 
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { show_variant: string }>
         local function App(ctx)
@@ -3089,9 +3117,10 @@ describe('Morph', function()
     it('handles transitioning from string to array', function()
       with_buf({}, function()
         local r = Morph.new(0)
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
 
-        --- @param ctx morph.Ctx<{show_array: boolean}>
+        --- @param ctx morph.Ctx<any, {show_array: boolean}>
         local function Root(ctx)
           if ctx.phase == 'mount' then
             leaked_ctx = ctx
@@ -3115,9 +3144,10 @@ describe('Morph', function()
     it('handles transitioning from array to string', function()
       with_buf({}, function()
         local r = Morph.new(0)
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
 
-        --- @param ctx morph.Ctx<{show_array: boolean}>
+        --- @param ctx morph.Ctx<any, {show_array: boolean}>
         local function Root(ctx)
           if ctx.phase == 'mount' then
             leaked_ctx = ctx
@@ -3141,10 +3171,11 @@ describe('Morph', function()
     it('unmounts component when transitioning from component to array', function()
       with_buf({}, function()
         local r = Morph.new(0)
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         local child_unmounted = false
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function Child(ctx)
           if ctx.phase == 'unmount' then child_unmounted = true end
           return 'child component'
@@ -3176,10 +3207,11 @@ describe('Morph', function()
     it('unmounts old tree BEFORE reconciling new array', function()
       with_buf({}, function()
         local r = Morph.new(0)
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         local events = {}
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function Child(ctx)
           if ctx.phase == 'mount' then
             table.insert(events, 'child:mount')
@@ -3189,7 +3221,7 @@ describe('Morph', function()
           return 'child'
         end
 
-        --- @param ctx morph.Ctx
+        --- @param ctx morph.Ctx<any, any>
         local function ArrayItem(ctx)
           if ctx.phase == 'mount' then table.insert(events, 'array-item:mount') end
           return 'array item'
@@ -3218,6 +3250,7 @@ describe('Morph', function()
 
     it('handles render when buffer is deleted before scheduled update', function()
       local render_error = nil
+      --- @type morph.Ctx<any, any>
       local leaked_ctx
 
       --- @param ctx morph.Ctx<{}, {}>
@@ -3252,6 +3285,7 @@ describe('Morph', function()
     it('handles mount when buffer is deleted before scheduled update', function()
       local schedule_called = false
       local update_error = nil
+      --- @type morph.Ctx<any, any>
       local leaked_ctx
 
       --- @param ctx morph.Ctx<{}, {}>
@@ -3328,6 +3362,7 @@ describe('Morph', function()
 
     it('handles conditional rendering with nil holes', function()
       with_buf({}, function()
+        --- @type morph.Ctx<any, any>
         local leaked_ctx
         --- @param ctx morph.Ctx<{}, { show_optional: boolean }>
         local function App(ctx)
@@ -3827,19 +3862,19 @@ describe('RenderError', function()
   it('nested component error has string names in render_trace', function()
     local RenderError = Morph.RenderError
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function DeepChild(ctx)
       ctx.name = 'DeepChild'
       error 'deep error'
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function Middle(ctx)
       ctx.name = 'Middle'
       return h(DeepChild)
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function Root(ctx)
       ctx.name = 'Root'
       return h(Middle)
@@ -3874,9 +3909,10 @@ describe('error messages', function()
   end)
 
   it('includes component name and update phase when component throws during update', function()
+    --- @type morph.Ctx<any, any>
     local captured_ctx
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function UpdatingComponent(ctx)
       ctx.name = 'UpdatingComponent'
       if ctx.phase == 'mount' then
@@ -3905,16 +3941,17 @@ describe('error messages', function()
   end)
 
   it('includes component name and unmount phase when component throws during unmount', function()
+    --- @type morph.Ctx<any, any>
     local parent_ctx
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function UnmountingComponent(ctx)
       ctx.name = 'UnmountingComponent'
       if ctx.phase == 'unmount' then error 'unmount error' end
       return { 'ok' }
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function App(ctx)
       if ctx.phase == 'mount' then
         ctx.state = { show = true }
@@ -3942,19 +3979,19 @@ describe('error messages', function()
   end)
 
   it('includes render trace for nested components', function()
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function DeepChild(ctx)
       ctx.name = 'DeepChild'
       error 'deep error'
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function Middle(ctx)
       ctx.name = 'Middle'
       return h(DeepChild)
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function Root(ctx)
       ctx.name = 'Root'
       return h(Middle)
@@ -3976,7 +4013,7 @@ describe('error messages', function()
   end)
 
   it('uses explicit ctx.name when set by component', function()
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function NamedComponent(ctx)
       ctx.name = 'MyCustomName'
       error 'named error'
@@ -3994,7 +4031,7 @@ describe('error messages', function()
   end)
 
   it('includes component name and mount phase when component throws during mount', function()
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function CrashyComponent(ctx)
       ctx.name = 'CrashyComponent'
       error 'something went wrong'
@@ -4076,7 +4113,7 @@ end)
 
 describe('error boundaries', function()
   it('catches child mount error and renders fallback', function()
-    --- @param _ctx morph.Ctx
+    --- @param _ctx morph.Ctx<any, any>
     local function CrashyComponent(_ctx) error 'mount error' end
 
     with_buf({}, function()
@@ -4097,9 +4134,10 @@ describe('error boundaries', function()
   end)
 
   it('catches child update error and renders fallback', function()
+    --- @type morph.Ctx<any, any>
     local child_ctx
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function CrashyComponent(ctx)
       if ctx.phase == 'mount' then
         ctx.state = {}
@@ -4122,15 +4160,16 @@ describe('error boundaries', function()
   end)
 
   it('catches child unmount error', function()
+    --- @type morph.Ctx<any, any>
     local parent_ctx
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function CrashyChild(ctx)
       if ctx.phase == 'unmount' then error 'unmount error' end
       return { 'child' }
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function App(ctx)
       if ctx.phase == 'mount' then
         ctx.state = { show = true }
@@ -4168,9 +4207,10 @@ describe('error boundaries', function()
   end)
 
   it('passes error info to fallback function', function()
+    --- @type morph.RenderError
     local captured_error
 
-    --- @param _ctx morph.Ctx
+    --- @param _ctx morph.Ctx<any, any>
     local function CrashyComponent(_ctx) error 'boom' end
 
     with_buf({}, function()
@@ -4192,15 +4232,16 @@ describe('error boundaries', function()
   end)
 
   it('passes structured error info with component_name and phase to fallback', function()
+    --- @type morph.RenderError
     local captured_error
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function CrashyComponent(ctx)
       ctx.name = 'CrashyComponent'
       error 'boom'
     end
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function App(ctx)
       ctx.name = 'App'
       return h(Morph.ErrorBoundary, {
@@ -4229,7 +4270,7 @@ describe('error boundaries', function()
   end)
 
   it('shows default error UI when no fallback prop', function()
-    --- @param _ctx morph.Ctx
+    --- @param _ctx morph.Ctx<any, any>
     local function CrashyComponent(_ctx) error 'default ui test' end
 
     with_buf({}, function()
@@ -4244,7 +4285,7 @@ describe('error boundaries', function()
   end)
 
   it('does not interfere with normal rendering', function()
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function StableComponent(ctx)
       if ctx.phase == 'mount' then ctx.state = { text = 'hello' } end
       return { h('text', {}, ctx.state.text) }
@@ -4262,7 +4303,7 @@ describe('error boundaries', function()
   it('retries child rendering on state update', function()
     local child_attempts = 0
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function SometimesCrashy(ctx)
       if ctx.phase == 'mount' then
         ctx.state = {}
@@ -4272,9 +4313,10 @@ describe('error boundaries', function()
       return { 'attempt ' .. child_attempts }
     end
 
+    --- @type morph.Ctx<any, any>
     local boundary_ctx
 
-    --- @param ctx morph.Ctx
+    --- @param ctx morph.Ctx<any, any>
     local function App(ctx)
       if ctx.phase == 'mount' then
         ctx.state = {}
@@ -4302,7 +4344,7 @@ describe('error boundaries', function()
     with_buf({}, function()
       local r = Morph.new(0)
 
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function InnerCrashy(_ctx) error 'inner error' end
 
       r:mount(h(Morph.ErrorBoundary, {

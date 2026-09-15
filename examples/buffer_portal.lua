@@ -100,7 +100,7 @@ end
 
 -- Counter component (same as counter example)
 -- Each instance maintains independent state even across buffer portals
---- @param ctx morph.Ctx<{ count: integer }>
+--- @param ctx morph.Ctx<any, { count: integer }>
 local function Counter(ctx)
   if ctx.phase == 'mount' then ctx.state = { count = 1 } end
   local state = assert(ctx.state)

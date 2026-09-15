@@ -184,6 +184,7 @@ describe('Portal', function()
     local portal_buf = create_test_buffer()
 
     local state = { text = 'v1' }
+    --- @type morph.Ctx<any, any>
     local app_ctx
     --- @param ctx morph.Ctx<any, any>
     local function App(ctx)

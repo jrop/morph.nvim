@@ -13,6 +13,7 @@
 local Nvim = require 'morph._test.nvim'
 
 describe('Portal screenshot', function()
+  --- @type morph._test.Nvim?
   local nv
 
   before_each(function() nv = Nvim.start { columns = 80, rows = 24 } end)

@@ -22,6 +22,7 @@
 local Nvim = require 'morph._test.nvim'
 
 describe('on_change events', function()
+  --- @type morph._test.Nvim
   local nv
 
   before_each(function() nv = Nvim.start {} end)
@@ -199,7 +200,7 @@ describe('on_change events', function()
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
       local rec = util.create_event_recorder 'the-id'
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function App(_ctx)
         return {
           h('text', {
@@ -230,7 +231,7 @@ describe('on_change events', function()
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
       local rec = util.create_event_recorder 'the-id'
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function App(_ctx)
         return {
           h('text', {
@@ -581,6 +582,7 @@ describe('on_change events', function()
 end)
 
 describe('undo/redo', function()
+  --- @type morph._test.Nvim
   local nv
 
   before_each(function() nv = Nvim.start {} end)
@@ -639,6 +641,7 @@ describe('undo/redo', function()
 end)
 
 describe('morph._test.util', function()
+  --- @type morph._test.Nvim
   local nv
 
   before_each(function() nv = Nvim.start {} end)

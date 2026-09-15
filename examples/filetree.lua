@@ -195,7 +195,7 @@ function Tree:rename(path, new_base_name)
 end
 -- }}}
 
---- @param ctx morph.Ctx<{ path: morph.examples.Path, tree: morph.examples.Tree, level: integer, refresh: function }>
+--- @param ctx morph.Ctx<{ path: morph.examples.Path, tree: morph.examples.Tree, level: integer, refresh: function }, {}>
 --- @return morph.Tree
 local function FsNode(ctx)
   if ctx.phase == 'mount' then
@@ -279,7 +279,7 @@ local function FsNode(ctx)
     -- Indent this entry:
     ('  '):rep(ctx.props.level),
 
-    h('text', { key = path, hl = hl }, { icon }),
+    h('text', { key = path._path, hl = hl }, { icon }),
     ' ',
 
     -- Show the entry name:

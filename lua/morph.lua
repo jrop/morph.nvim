@@ -135,7 +135,7 @@
 --- @field name string | morph.Component<any, any>
 --- @field attributes morph.TagAttributes
 --- @field children morph.Tree
---- @field private ctx? morph.Ctx
+--- @field private ctx? morph.Ctx<any, any>
 --- @field private curr_text? string
 --- @field private curr_span? { start: morph.Pos00, stop: morph.Pos00 } Span of the
 ---   region curr_text describes, as of the last render/accepted edit. Mark
@@ -253,7 +253,7 @@ end
 --   h.Comment({}, { 'Hello' })                  -- shorthand: h.<highlight>
 --   h(MyComponent, { prop = 1 }, { ... })       -- component tag
 
---- @type table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>
+--- @type table<string, fun(attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag> & fun(name: string | morph.Component<any, any>, attributes?: morph.TagAttributes, children?: morph.Tree): morph.Tag>
 --- @diagnostic disable-next-line: assign-type-mismatch
 local h = setmetatable({}, {
   -- h('text', attrs, children) - create a tag directly
@@ -760,7 +760,7 @@ Morph.__index = Morph
 --- @field document morph.Morph The renderer instance this mount renders into
 --- @field tree morph.Tree The root tree passed to mount; rerenders re-reconcile against it
 --- @field old_tree morph.Tree? The last tree this mount reconciled (nil until the first render)
---- @field trace morph.Ctx[] Component ancestry stack, feeding RenderError traces
+--- @field trace morph.Ctx<any, any>[] Component ancestry stack, feeding RenderError traces
 --- @field after_render_callbacks function[] Queued ctx:do_after_render callbacks
 --- @field debounce_ms integer Resolved debounce for this mount (0 = synchronous)
 --- @field debounce_timer table? Pending maxWait debounce timer
@@ -869,7 +869,7 @@ function Reconciler:_unmount_tree(old_tree)
     self:_unmount_tree((old_tree --[[@as morph.Tag]]).children)
   elseif node_type == 'component' then
     local tag = old_tree --[[@as morph.Tag]]
-    local Component = tag.name --[[@as morph.Component]]
+    local Component = tag.name --[[@as morph.Component<any, any>]]
 
     -- Skip if already unmounted (prevents double-unmount on old_tree not
     -- being updated due to a prior unmount error during reconciliation)
@@ -989,7 +989,7 @@ end
 --- @param old_tree morph.Tree
 --- @param new_tag morph.Tag
 function Reconciler:reconcile_component(old_tree, new_tag)
-  local Component = new_tag.name --[[@as morph.Component]]
+  local Component = new_tag.name --[[@as morph.Component<any, any>]]
 
   -- Try to reuse existing context from old tree
   local ctx
@@ -1043,11 +1043,15 @@ function Reconciler:reconcile_component(old_tree, new_tag)
       --- @diagnostic disable: need-check-nil
       ctx.state.has_error = true
       local is_render_error = getmetatable(res) == RenderError
+      -- The short-circuits below only read RenderError fields after the
+      -- metatable check proved the shape; the cast records that for the
+      -- analyzer, which cannot narrow through getmetatable.
+      local render_error = res --[[@as morph.RenderError]]
       ctx.state.error = {
-        message = is_render_error and res.message or tostring(res),
-        component_name = is_render_error and res.component_name or '',
-        phase = is_render_error and res.phase or '',
-        render_trace = is_render_error and res.render_trace or self:_trace_names(),
+        message = is_render_error and render_error.message or tostring(res),
+        component_name = is_render_error and render_error.component_name or '',
+        phase = is_render_error and render_error.phase or '',
+        render_trace = is_render_error and render_error.render_trace or self:_trace_names(),
       }
       rendered_children = ctx:build_error_fallback()
       result = self:reconcile(ctx.prev_rendered_children, rendered_children)
@@ -1245,7 +1249,7 @@ local function levenshtein(opts)
   -- This prefers removing items over substituting them, which produces more
   -- intuitive results for keyed list reconciliation (e.g., removing 'b' from
   -- ['a','b'] should delete 'b', not substitute 'b' for 'a' and delete 'a').
-  local changes = {} --- @type morph.LevenshteinChange[]
+  local changes = {} --- @type morph.LevenshteinChange<any>[]
   local i, j = m, n
 
   while i > 0 or j > 0 do
@@ -1390,7 +1394,7 @@ function Morph.markup_to_lines(opts)
       if opts.on_tag then opts.on_tag(tag, start0, stop0) end
     elseif node_type == 'component' then
       local tag = node --[[@as morph.Tag]]
-      local Component = tag.name --[[@as morph.Component]]
+      local Component = tag.name --[[@as morph.Component<any, any>]]
       local ctx = Ctx.new(nil, nil, tag.attributes, nil, tag.children)
 
       local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
@@ -1743,6 +1747,9 @@ function Morph:render(tree)
 
       -- Register keymaps for any mode handlers (nmap, imap, vmap, xmap, omap)
       for i = 1, 5 do
+        -- The loop index hides which of the five keymap attributes is being
+        -- read, so field tracking cannot prove the key exists.
+        --- @diagnostic disable-next-line: undefined-field
         local handlers = tag.attributes[KEYMAP_ATTRS[i]]
         local mode = KEYMAP_MODES[i]
         for lhs, _ in pairs(handlers or {}) do

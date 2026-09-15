@@ -11,6 +11,7 @@ local Nvim = require 'morph._test.nvim'
 local util = require 'morph._test.util'
 
 describe('readonly regions', function()
+  --- @type morph._test.Nvim
   local nv
 
   before_each(function() nv = Nvim.start {} end)
@@ -1024,7 +1025,7 @@ describe('readonly regions (in-process)', function()
     with_buf(function()
       local r = Morph.new(0)
       local events = {}
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function Field(_ctx)
         return h('text', {
           id = 'field-inner',
@@ -1045,7 +1046,7 @@ describe('readonly regions (in-process)', function()
     with_buf(function()
       local r = Morph.new(0, { readonly = true })
       local events = {}
-      --- @param _ctx morph.Ctx
+      --- @param _ctx morph.Ctx<any, any>
       local function Field(_ctx)
         return h('text', {
           id = 'field-inner',

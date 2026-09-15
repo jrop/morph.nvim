@@ -27,7 +27,7 @@ local function show_term(cmd, pos)
   vim.cmd.startinsert()
 end
 
---- @param ctx morph.Ctx<{ cells: morph.Tree[][] }>
+--- @param ctx morph.Ctx<{ cells: morph.Tree[][] }, any>
 local function Table(ctx)
   local cells = ctx.props.cells
   local max_widths = {}
