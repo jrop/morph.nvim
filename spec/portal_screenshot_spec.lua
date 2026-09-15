@@ -477,7 +477,10 @@ describe('Portal screenshot', function()
       vim.bo[portal_buf].buflisted = false
 
       --- @param ctx morph.Ctx<any, any>
-      local function Label(ctx) return h('text', {}, { 'Label: ', ctx.children }) end
+      local function Label(ctx)
+        local children = { 'Label: ', ctx.children }
+        return h('text', {}, children --[[@as morph.Tree]])
+      end
 
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
@@ -778,10 +781,16 @@ describe('Portal screenshot', function()
       vim.bo[portal_buf].buflisted = false
 
       --- @param ctx morph.Ctx<any, any>
-      local function Label(ctx) return h('text', {}, { '[', ctx.children, ']' }) end
+      local function Label(ctx)
+        local children = { '[', ctx.children, ']' }
+        return h('text', {}, children --[[@as morph.Tree]])
+      end
 
       --- @param ctx morph.Ctx<any, any>
-      local function Greeting(ctx) return h('text', {}, { 'Hello, ', ctx.children, '!' }) end
+      local function Greeting(ctx)
+        local children = { 'Hello, ', ctx.children, '!' }
+        return h('text', {}, children --[[@as morph.Tree]])
+      end
 
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)

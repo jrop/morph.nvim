@@ -48,6 +48,43 @@ describe('readonly regions', function()
     assert.are.same({}, result.events)
   end)
 
+  it('accepts an insert claimed by two multi-line editable spans (rank tie)', function()
+    -- Regression: the settle phase's winner tie-break compares span sizes,
+    -- and size_of read math.maxinteger -- nil under LuaJIT -- for multi-line
+    -- spans, so any two same-rank claimants crashed the guard mid-keystroke.
+    -- Two nested editable tags share their start, so an insert there makes
+    -- both rank-2 claimants.
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+      _G.m = Morph.new(util.scratch_buf { focus = true })
+      _G.m:render {
+        h('text', { id = 'outer', on_change = util.create_event_recorder 'outer' }, {
+          h(
+            'text',
+            { id = 'inner', on_change = util.create_event_recorder 'inner' },
+            'alpha\nbeta'
+          ),
+          '\ngamma',
+        }),
+      }
+    end)
+
+    local result = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      vim.api.nvim_buf_set_text(0, 0, 0, 0, 0, { 'X' })
+      -- pcall guards the guard: pre-fix, the nil size crashed it here.
+      local ok, err = pcall(function() vim.cmd.doautocmd 'TextChanged' end)
+      util.drain(100)
+      return { ok = ok, err = tostring(err), text = util.text(0), events = util.events() }
+    end)
+    assert.is_true(result.ok)
+    assert.are.equal('nil', result.err)
+    assert.are.equal('Xalpha\nbeta\ngamma', result.text)
+    assert.is_true(#result.events > 0)
+  end)
+
   it('reverts a typed edit inside a readonly region', function()
     nv:exec_func(function()
       local util = require 'morph._test.util'
@@ -358,6 +395,55 @@ describe('readonly regions', function()
     assert.truthy(string.find(result.text, 'Filter: [fl]', 1, true) ~= nil)
     -- the 'f' event was consumed by the first phase's read+clear
     assert.are.same({ { id = 'filter', text = 'fl' } }, result.events)
+  end)
+
+  -- Regression: an insert at an editable hole's TAIL is absorbed by the
+  -- hole's end mark (the hole grows -- nvim says the hole is the edit
+  -- target), but the winner ranking preferred a merely-containing editable
+  -- region over the ending span. The container claimed the keystroke, the
+  -- hole was snapped back onto its stale span, and the hole's on_change
+  -- never fired -- a controlled filter's state lagged the buffer, and its
+  -- next debounce render wiped the characters the user had typed.
+  it('attributes tail-typed chars to the hole, not the containing region', function()
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+      _G.m = Morph.new(util.scratch_buf { focus = true })
+      -- An editable CONTAINER around the hole: the shape of an App that
+      -- wraps its whole UI in one big text tag (examples/big_data_set.lua).
+      _G.m:render {
+        h('text', { id = 'outer' }, {
+          'Name: [',
+          h('text', { id = 'hole', on_change = util.create_event_recorder 'hole' }, 'w'),
+          ']',
+        }),
+      }
+    end)
+
+    -- Two keystrokes, each in its own TextChanged window, both inserted at
+    -- the hole's tail: 'w' -> 'wX' -> 'wXY'. This is typing at the end of a
+    -- filter, one keystroke per guard window.
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local line = vim.api.nvim_buf_get_lines(0, 0, 1, true)[1]
+      local col = line:find '%]' - 1 -- the hole's tail == the ']' column
+      vim.api.nvim_buf_set_text(0, 0, col, 0, col, { 'X' })
+      util.drain(100)
+    end)
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local line = vim.api.nvim_buf_get_lines(0, 0, 1, true)[1]
+      local col = line:find '%]' - 1 -- the hole's tail == the ']' column
+      vim.api.nvim_buf_set_text(0, 0, col, 0, col, { 'Y' })
+      util.drain(100)
+    end)
+    local result = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      return { text = util.text(0), events = util.events() }
+    end)
+    assert.are.same('Name: [wXY]', result.text)
+    assert.are.same({ { id = 'hole', text = 'wX' }, { id = 'hole', text = 'wXY' } }, result.events)
   end)
 
   -- On revert, the cursor returns to where the rejected keystroke found it:

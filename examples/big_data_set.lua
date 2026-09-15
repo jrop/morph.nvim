@@ -103,6 +103,7 @@ local function Users(ctx)
   return {
     'Filter: [',
     h.String({
+      readonly = false,
       on_change = function(e)
         state.filter = e.text
         ctx:update(state)
@@ -124,7 +125,7 @@ end
 
 --- @param _ctx morph.Ctx<any, any>
 local function App(_ctx)
-  return h('text', {}, {
+  return h('text', { readonly = true }, {
     --
     -- List of items
     --

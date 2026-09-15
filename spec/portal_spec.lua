@@ -123,7 +123,12 @@ describe('Portal', function()
 
     -- Create a custom component to test nesting
     --- @param ctx morph.Ctx<any, any>
-    local function CustomComponent(ctx) return h('text', {}, { 'Custom: ', ctx.children }) end
+    local function CustomComponent(ctx)
+      -- Splicing ctx.children nests a tree one level deep; the reconciler
+      -- flattens it, but the Tree alias only models one level, so assert it.
+      local children = { 'Custom: ', ctx.children }
+      return h('text', {}, children --[[@as morph.Tree]])
+    end
 
     local r = Morph.new(source_buf)
     r:mount(h(Portal, { bufnr = portal_buf }, h(CustomComponent, {}, { 'Outer' })))

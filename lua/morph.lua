@@ -128,6 +128,9 @@
 ---   extmark?: vim.api.keyset.set_extmark
 --- }
 
+--- A (0,0)-indexed half-open region of buffer text.
+--- @alias morph.Span { start: morph.Pos00, stop: morph.Pos00 }
+
 --- A tag is the result of calling h(...): it is a recipe for creating an
 --- element.
 --- @class morph.Tag
@@ -137,7 +140,7 @@
 --- @field children morph.Tree
 --- @field private ctx? morph.Ctx<any, any>
 --- @field private curr_text? string
---- @field private curr_span? { start: morph.Pos00, stop: morph.Pos00 } Span of the
+--- @field private curr_span? morph.Span Span of the
 ---   region curr_text describes, as of the last render/accepted edit. Mark
 ---   adjustment moves extmarks on every buffer change, so this snapshot is
 ---   the only stable record of "where the content lived" -- used to judge
@@ -159,7 +162,10 @@
 --- @field extmark morph.Extmark
 
 --- @alias morph.Node nil | boolean | string | number | morph.Tag
---- @alias morph.Tree morph.Node | morph.Node[]
+--- One level of array nesting: a subtree may be spliced in as a single child
+--- (e.g. `{ 'label: ', ctx.children }`), which the reconciler flattens like a
+--- directly written nested literal.
+--- @alias morph.Tree morph.Node | (morph.Node | morph.Node[])[]
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
 --- One swept span mismatch: the live extmark, its tag, the live text, and --
@@ -197,7 +203,10 @@ local function tree_type(node)
   if type(node) == 'string' then return 'string' end
   if type(node) == 'number' then return 'number' end
   if type(node) == 'function' then
-    local name = debug.getinfo(node, 'n').name or '<anonymous>'
+    -- getinfo returns nil when the function has no debug info; degrade to a
+    -- placeholder name rather than crashing inside the error builder.
+    local info = debug.getinfo(node, 'n')
+    local name = (info and info.name) or '<anonymous>'
     error(
       'morph.nvim: raw component function "'
         .. name
@@ -425,8 +434,12 @@ function Extmark.new(bufnr, ns, start, stop, opts)
     right_gravity = false,
     end_right_gravity = true,
   }
-  for k, v in next, opts or {} do
-    extmark_opts[k] = v
+  if opts then
+    for k, v in next, opts do
+      -- Caller opts may override any keyset field; the dynamic key defeats
+      -- per-field checking, so the value is trusted as-is.
+      extmark_opts[k] = v --[[@as any]]
+    end
   end
 
   local id = vim.api.nvim_buf_set_extmark(bufnr, ns, start[1], start[2], extmark_opts)
@@ -454,7 +467,8 @@ end
 --- @param id integer
 --- @param start_row0 integer
 --- @param start_col0 integer
---- @param details vim.api.keyset.extmark_details
+--- @param details vim.api.keyset.extmark_details? Present when the source API
+---   call requested details; the body treats absent details as "no known end".
 --- Construct an Extmark from raw API data, normalizing bounds that extend past buffer end.
 function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
   local start = Pos00.new(start_row0, start_col0)
@@ -642,15 +656,15 @@ function Ctx:build_error_fallback()
   if fallback ~= nil then return fallback end
 
   --- @diagnostic disable: need-check-nil
-  local name_part = self.state.error.component_name ~= ''
-      and (' in ' .. self.state.error.component_name .. '@' .. self.state.error.phase)
-    or ''
+  local render_error = self.state.error --[[@as morph.RenderError]]
   --- @diagnostic enable: need-check-nil
+  local name_part = render_error.component_name ~= ''
+      and (' in ' .. render_error.component_name .. '@' .. render_error.phase)
+    or ''
   return {
     h('text', { hl = 'ErrorMsg' }, 'Error' .. name_part),
     '\n',
-    --- @diagnostic disable-next-line: need-check-nil
-    h('text', { hl = 'Comment' }, self.state.error.message),
+    h('text', { hl = 'Comment' }, render_error.message),
   }
 end
 
@@ -1353,11 +1367,19 @@ function Morph.markup_to_lines(opts)
       -- implicit text tag so locked defaults cover ALL content; under a
       -- classic (unlocked) default the implicit tag is editable and inert.
       if #text_accumulators == 0 then return visit(Morph.h('text', {}, node), parent_readonly) end
-      -- Split on newlines and emit each part
-      local parts = vim.split(node --[[@as string]], '\n')
-      for i, part in ipairs(parts) do
-        if i > 1 then emit_newline() end
-        emit_text(part)
+      -- Split on newlines and emit each part. The fast path matters: trees
+      -- like big tables emit one single-line string per cell, and vim.split
+      -- spins up a gsplit closure plus segment bookkeeping for every one of
+      -- them. A plain find skips all of that when there is nothing to split.
+      local s = node --[[@as string]]
+      if not s:find('\n', 1, true) then
+        emit_text(s)
+      else
+        local parts = vim.split(s, '\n')
+        for i, part in ipairs(parts) do
+          if i > 1 then emit_newline() end
+          emit_text(part)
+        end
       end
     elseif node_type == 'number' then
       -- Convert number to string and emit; same implicit-tag treatment as
@@ -1751,7 +1773,7 @@ function Morph:render(tree)
         -- read, so field tracking cannot prove the key exists.
         --- @diagnostic disable-next-line: undefined-field
         local handlers = tag.attributes[KEYMAP_ATTRS[i]]
-        local mode = KEYMAP_MODES[i]
+        local mode = KEYMAP_MODES[i] --[[@as string]]
         for lhs, _ in pairs(handlers or {}) do
           vim.keymap.set(mode, lhs, function()
             local result = self:_dispatch_keypress(mode, lhs)
@@ -2104,7 +2126,7 @@ end
 --- Create a buffer watcher that calls `callback` after text changes.
 --- @param bufnr integer
 --- @param callback function Called with on_bytes args after TextChanged fires
---- @param is_rendering fun() Whether morph is mid-render (its own writes)
+--- @param is_rendering fun(): boolean Whether morph is mid-render (its own writes)
 --- @return morph.BufWatcher
 local function create_buf_watcher(bufnr, callback, is_rendering)
   -- Guard: buffer API must be ready for nvim_buf_attach to work
@@ -2295,8 +2317,8 @@ function Morph:_on_bytes_after_autocmd(
   old_end_row_off,
   old_end_col_off,
   _, -- old end byte length
-  _, -- new end row offset (the guard decides in the pre-change frame)
-  _, -- new end col offset
+  new_end_row_off,
+  new_end_col_off,
   _ -- new end byte length
 )
   -- Ignore changes we're making ourselves during render
@@ -2315,10 +2337,19 @@ function Morph:_on_bytes_after_autocmd(
     start_row0 + old_end_row_off,
     old_end_row_off == 0 and start_col0 + old_end_col_off or old_end_col_off
   )
+  -- Same geometry rule as old_end (:h nvim_buf_attach on_bytes): the column
+  -- offset is relative to start_col0 when the change stayed on one line and
+  -- absolute in the end row otherwise. The sweep needs it to translate the
+  -- snapshots of spans the change never touched.
+  local new_end = Pos00.new(
+    start_row0 + new_end_row_off,
+    new_end_row_off == 0 and start_col0 + new_end_col_off or new_end_col_off
+  )
 
   -- Phase 1 -- sweep: compare every rendered span's live text against its
   -- snapshot.
-  local editable, locked, in_editable_span = self:_sweep_span_mismatches(change_start)
+  local editable, locked, in_editable_span =
+    self:_sweep_span_mismatches(change_start, old_end, new_end)
 
   -- Phase 2 -- decide: every locked mismatch must be explained by an
   -- editable hole; one unexplained mismatch reverts the whole tree.
@@ -2359,42 +2390,175 @@ end
 --- change's start sits in a rendered editable span regardless of any text
 --- change -- the no-mismatch fallback uses that to tell an edit that landed
 --- inside an editable region from one that landed outside the tree.
---- @param change_start morph.Pos00
+--- @param change_start morph.Pos00 Change start (pre-change frame)
+--- @param old_end morph.Pos00 Change end (pre-change frame); == change_start for pure inserts
+--- @param new_end morph.Pos00 Change end in the post-change frame (window == start for pure deletes)
 --- @return morph.SpanMismatch[] editable
 --- @return morph.SpanMismatch[] locked
 --- @return boolean in_editable_span
-function Morph:_sweep_span_mismatches(change_start)
-  -- Detect mismatches by sweeping EVERY rendered element's span text rather
-  -- than querying the changed region: nvim's mark adjustment can move spans
-  -- entirely out of the changed region (inverted or collapsed by line
-  -- deletes), and a position-based query would silently miss them. The sweep
-  -- is position-independent, so mark jumping cannot hide a violation.
+function Morph:_sweep_span_mismatches(change_start, old_end, new_end)
+  -- Detect mismatches by sweeping every rendered SPAN rather than querying
+  -- the changed region: nvim's mark adjustment can move spans entirely out
+  -- of the changed region (inverted or collapsed by line deletes), and a
+  -- position-based query would silently miss them.
+  --
+  -- Per-span cost is the budget here: big tables put tens of thousands of
+  -- spans on screen and every keystroke sweeps all of them, so bulk extmark
+  -- reads and per-span text reads are out. The workload divides by whether
+  -- the span's STORED territory touches the change window [change_start,
+  -- old_end), tested inclusively in the shared pre-change frame:
+  --
+  --   Untouched: text provably unchanged -- it is exactly the text nvim's
+  --     mark adjustment preserves. Both endpoints sit strictly outside the
+  --     window, so nvim moves them by the on_bytes deltas alone (no gravity
+  --     ambiguity at the boundaries), and the snapshot is refreshed by
+  --     translating the stored span. Zero API traffic per span.
+  --   Touching: re-read the live extmark by id and compare text. Boundaries
+  --     count as touching on purpose -- a false positive costs one read
+  --     while a false negative would be a missed violation.
+  --
+  -- Every event leaves every snapshot in the live frame -- translated or
+  -- re-read -- which is what lets batched events in one TextChanged window
+  -- decide against up-to-date geometry.
   local editable = {} --- @type morph.SpanMismatch[]
   local locked = {} --- @type morph.SpanMismatch[]
   local in_editable_span = false
-  local raw_extmarks = vim.api.nvim_buf_get_extmarks(self.bufnr, self.ns, 0, -1, { details = true })
-  for _, ext in ipairs(raw_extmarks) do
-    local id, row0, col0, details = ext[1], ext[2], ext[3], ext[4]
-    local tag = self.text_content.curr.extmark_ids_to_tag[id]
+
+  local change_row, change_col = change_start[1], change_start[2]
+  local old_end_row, old_end_col = old_end[1], old_end[2]
+  local is_insert = change_row == old_end_row and change_col == old_end_col
+
+  -- Translation deltas for positions strictly after the window. A position
+  -- on the window's end row also shifts by the column delta; lower rows
+  -- shift by the row delta. This mirrors nvim's adjustment of marks outside
+  -- a deleted region.
+  local d_row = new_end[1] - old_end_row
+  local d_col = new_end[2] - old_end_col
+
+  local tag_by_id = self.text_content.curr.extmark_ids_to_tag
+  local id_by_tag = self.text_content.curr.tags_to_extmark_ids
+
+  for _, ext in ipairs(self.text_content.curr.extmarks) do
+    local tag = tag_by_id[ext.id]
     if tag then
-      local extmark = Extmark._from_raw(self.bufnr, self.ns, id, row0, col0, details)
-      if not tag.readonly and extmark.start <= change_start and change_start <= extmark.stop then
-        in_editable_span = true
+      local span = tag.curr_span
+      local s_row, s_col = span.start[1], span.start[2]
+      local e_row, e_col = span.stop[1], span.stop[2]
+
+      local intersects
+      if is_insert then
+        -- A pure insert consumes nothing, so it can only grow a span whose
+        -- territory holds the position.
+        intersects = (s_row < change_row or (s_row == change_row and s_col <= change_col))
+          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
+      else
+        -- Exclusive-range overlap, widened to inclusive: a change bleeding
+        -- onto either boundary can reach the span's text.
+        intersects = (s_row < old_end_row or (s_row == old_end_row and s_col <= old_end_col))
+          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
       end
-      local new_text = extmark:_text()
-      if tag.curr_text ~= new_text then
-        local mismatch = { extmark = extmark, tag = tag, text = new_text }
-        if tag.readonly then
-          table.insert(locked, mismatch)
-        else
-          table.insert(editable, mismatch)
+
+      if not intersects then
+        -- in_editable_span answers "did the edit land in an editable span,
+        -- text change or not"; for untouched spans the snapshot IS the live
+        -- span, so test it directly.
+        if
+          not tag.readonly
+          and (s_row < change_row or (s_row == change_row and s_col <= change_col))
+          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
+        then
+          in_editable_span = true
+        end
+
+        -- Refresh the snapshot so it tracks mark movement caused by edits
+        -- elsewhere (a change before this element slides its marks without
+        -- touching its content). Strictly-before spans cannot have moved;
+        -- strictly-after spans move by the deltas. Reuse the stored span
+        -- object when nothing moved.
+        if s_row > old_end_row or (s_row == old_end_row and s_col > old_end_col) then
+          local ns_row = s_row + d_row
+          local ns_col = s_row == old_end_row and s_col + d_col or s_col
+          local ne_row = e_row + d_row
+          local ne_col = e_row == old_end_row and e_col + d_col or e_col
+          if ns_row ~= s_row or ns_col ~= s_col or ne_row ~= e_row or ne_col ~= e_col then
+            tag.curr_span = { start = Pos00.new(ns_row, ns_col), stop = Pos00.new(ne_row, ne_col) }
+          end
         end
       else
-        -- Content unchanged, so the live span is exactly where curr_text
-        -- lives. Refresh the snapshot so it tracks mark movement caused by
-        -- edits to other elements (a change before this element slides its
-        -- marks without touching its content).
-        tag.curr_span = { start = extmark.start, stop = extmark.stop }
+        local id = id_by_tag[tag]
+        local raw = id
+            and vim.api.nvim_buf_get_extmark_by_id(self.bufnr, self.ns, id, { details = true })
+          or nil
+        if raw and raw[1] then
+          local row0, col0, details = raw[1], raw[2], raw[3]
+          local end_row = details.end_row or row0
+          local end_col = details.end_col or col0
+
+          -- change_start sits inside this editable live span (boundaries
+          -- included)?
+          if
+            not tag.readonly
+            and (row0 < change_row or (row0 == change_row and col0 <= change_col))
+            and (change_row < end_row or (change_row == end_row and change_col <= end_col))
+          then
+            in_editable_span = true
+          end
+
+          -- Same clamp as Extmark._from_raw: a span can overshoot past EOF
+          -- when its rows were deleted in this very change. Rare enough to
+          -- justify reading the last line only once, on first overshoot.
+          local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
+          if row0 > last_row or end_row > last_row then
+            local last_line_len = #(
+              vim.api.nvim_buf_get_lines(self.bufnr, last_row, last_row + 1, true)[1] or ''
+            )
+            if row0 > last_row then
+              row0, col0 = last_row, last_line_len
+            end
+            if end_row > last_row then
+              end_row, end_col = last_row, last_line_len
+            end
+          end
+
+          -- Exclusive-end read, mirroring Extmark:_text(): equal and
+          -- inverted positions read empty, and nvim_buf_get_text's
+          -- end_col == 0 row slice is '', so a stop on column 0 yields
+          -- exactly the trailing newline the original appends.
+          local new_text
+          if row0 > end_row or (row0 == end_row and col0 >= end_col) then
+            -- Collapsed or inverted span (mark adjustment after deletions).
+            new_text = ''
+          else
+            new_text = table.concat(
+              vim.api.nvim_buf_get_text(self.bufnr, row0, col0, end_row, end_col, {}),
+              '\n'
+            )
+          end
+
+          if tag.curr_text ~= new_text then
+            -- Real Extmark objects are built only for the (rare) mismatching
+            -- spans the later phases inspect.
+            local extmark = Extmark._from_raw(self.bufnr, self.ns, id, row0, col0, details)
+            local mismatch = { extmark = extmark, tag = tag, text = new_text }
+            if tag.readonly then
+              table.insert(locked, mismatch)
+            else
+              table.insert(editable, mismatch)
+            end
+          elseif
+            span.start[1] ~= row0
+            or span.start[2] ~= col0
+            or span.stop[1] ~= end_row
+            or span.stop[2] ~= end_col
+          then
+            -- Touched but content-equal: same snapshot bookkeeping as the
+            -- untouched branch, from the live marks.
+            tag.curr_span = { start = Pos00.new(row0, col0), stop = Pos00.new(end_row, end_col) }
+          end
+        end
+        -- raw nil: the extmark was invalidated (its lines deleted). The old
+        -- position-based sweep never saw it either, so leave the snapshot
+        -- for the next render to rebuild.
       end
     end
   end
@@ -2445,8 +2609,8 @@ function Morph._decide_locked_mismatches(editable, locked, change_start, old_end
       -- curr_span is structurally guaranteed: every tag in the
       -- extmark_ids_to_tag map went through visit(), which sets it alongside
       -- curr_text at render time.
-      local hole_span = hole.tag.curr_span
-      local suspect_span = suspect.tag.curr_span
+      local hole_span = hole.tag.curr_span --[[@as morph.Span]]
+      local suspect_span = suspect.tag.curr_span --[[@as morph.Span]]
       -- hole_span contains [change_start, old_end) ...
       local inside = hole_span.start <= change_start and old_end <= hole_span.stop
       -- ... and hole_span sits inside the locked element's span (an
@@ -2519,7 +2683,11 @@ function Morph:_settle_editable_mismatches(editable, change_start, old_end)
   -- it (innermost first), then one ending there.
   local function size_of(span)
     if span.start[1] == span.stop[1] then return span.stop[2] - span.start[2] end
-    return math.maxinteger
+    -- LuaJIT has no math.maxinteger (a Lua 5.3 addition): under it this read
+    -- as nil and any two multi-line claimants of the same keystroke crashed
+    -- the rank comparison. math.huge orders identically for both uses (the
+    -- tie-break below and the negated rank-4 form).
+    return math.huge
   end
 
   -- Read the buffer text on a (0,0)-indexed span. Rows are clamped to the
@@ -2548,7 +2716,7 @@ function Morph:_settle_editable_mismatches(editable, change_start, old_end)
 
   local winner, winner_rank, winner_size
   for _, changed in ipairs(editable) do
-    local span = changed.tag.curr_span
+    local span = changed.tag.curr_span --[[@as morph.Span]]
     changed.commit = false
     if not claims_change(span) then
       -- Boundary noise; the snap-back pass below decides.
@@ -2562,10 +2730,21 @@ function Morph:_settle_editable_mismatches(editable, change_start, old_end)
         rank, size_ = 1, 0
       elseif span.start == change_start then
         rank, size_ = 2, size_of(span)
-      elseif span.start < change_start and change_start < span.stop then
-        rank, size_ = 3, size_of(span)
+      elseif change_start == span.stop then
+        -- A tail insert: editable end marks keep right gravity, so nvim
+        -- grew THIS span around the inserted text -- it is the span the
+        -- cursor was typing into. A containing region mismatches only
+        -- because its inner region's text did, and it commits as real
+        -- growth further down regardless. The old order ranked containing
+        -- above ending, which let the container claim tail-typed
+        -- characters, snap the hole back onto its stale span, and leave
+        -- the hole's on_change unfired -- a controlled filter's state
+        -- lagged the buffer and its next debounce render wiped the
+        -- characters (examples/big_data_set.lua fast-typing bug).
+        rank, size_ = 3, -size_of(span)
       else
-        rank, size_ = 4, -size_of(span)
+        -- Strictly containing (start < change < stop): innermost wins.
+        rank, size_ = 4, size_of(span)
       end
       if not winner or rank < winner_rank or (rank == winner_rank and size_ < winner_size) then
         winner, winner_rank, winner_size = changed, rank, size_
@@ -2575,7 +2754,7 @@ function Morph:_settle_editable_mismatches(editable, change_start, old_end)
   if winner then winner.commit = true end
 
   for _, changed in ipairs(editable) do
-    local span = changed.tag.curr_span
+    local span = changed.tag.curr_span --[[@as morph.Span]]
     local ext = changed.extmark
     if changed.commit then
       -- A yielding start mark can land PAST the change: a replacement at the
@@ -2747,6 +2926,7 @@ end
 --- @field baseline integer Probe `seq_cur` at mount; the undo floor
 --- @field last_main_seq integer Main `seq_cur` as of the last mirror/replay
 --- @field entry_open boolean Whether the probe tip matches the main's current entry
+--- @field private _tip_cache? {[string]: string} Last written tip states; see _texts()
 local Probe = {}
 Probe.__index = Probe
 
@@ -2767,8 +2947,15 @@ function Probe:_mint(taken, tip)
 end
 
 --- The region states currently stored in the probe: id -> text.
+-- The probe buffer is only ever written by _write (which refreshes the
+-- cache below) and by replay's undo traversal (which clears it), so the
+-- cache is authoritative in between. Decode-on-read used to round-trip a
+-- JSON document the size of the ENTIRE region set on every keystroke and
+-- every render; with tens of thousands of editable regions that dominates
+-- the typing path.
 --- @return {[string]: string}
 function Probe:_texts()
+  if self._tip_cache then return self._tip_cache end
   -- A fresh buffer holds one empty line (not zero lines); treat both that
   -- and a truly empty read as an empty store.
   local line = vim.api.nvim_buf_get_lines(self.bufnr, 0, 1, false)[1] or ''
@@ -2791,6 +2978,9 @@ function Probe:_write(states, join)
     vim.api.nvim_buf_set_lines(self.bufnr, 0, -1, false, { vim.json.encode(states) })
   end)
   self.entry_open = true
+  -- The written states ARE the new tip; keep them so later reads never
+  -- decode what we just encoded.
+  self._tip_cache = states
 end
 
 --- Create the probe buffer and record the initial region set as one entry.
@@ -2936,6 +3126,9 @@ function Probe:replay(direction, abs_target)
   -- the probe disconnected from the current main entry so the next user edit
   -- opens a fresh probe entry rather than joining a stale one.
   self.entry_open = false
+  -- Undo moved the probe's content out from under the tip cache; the next
+  -- read must decode the entry the traversal landed on.
+  self._tip_cache = nil
   return self:_texts()
 end
 
@@ -3210,7 +3403,7 @@ end
 --- @field on_buf_create? fun(bufnr: integer, document: morph.Morph): any
 
 --- Portal component: Renders children to a different buffer (like React portals)
---- @param ctx morph.Ctx<morph.PortalProps, { document: morph.Morph, update: fun(children: morph.Tree?) }>
+--- @param ctx morph.Ctx<morph.PortalProps, { document: morph.Morph, update?: fun(children: morph.Tree?) }>
 function Morph.Portal(ctx)
   if ctx.phase == 'mount' then
     local bufnr = ctx.props.bufnr
@@ -3236,14 +3429,15 @@ function Morph.Portal(ctx)
     return nil
   end
 
-  if ctx.phase == 'update' and ctx.state.update then
-    ctx.state.update(ctx.children)
+  local portal_state = ctx.state
+  if ctx.phase == 'update' and portal_state and portal_state.update then
+    portal_state.update(ctx.children)
   elseif ctx.phase == 'unmount' then
     -- Release the inner document. Content stays in the portal buffer; a fresh
     -- Morph.new(bufnr) + mount is legal on re-mount because unmount cleared the
     -- buffer's mounted flag.
     --- @diagnostic disable-next-line: need-check-nil
-    ctx.state.document:unmount()
+    portal_state.document:unmount()
   end
 
   return nil
@@ -3299,7 +3493,9 @@ local function restore_mode_and_wait(target_mode, callback)
   -- autocmd's "wait until the mode change takes effect" timing semantics.
   local function schedule_callback() vim.schedule(callback) end
   local fallback_timer = vim.defer_fn(function()
-    pcall(vim.api.nvim_del_autocmd, mode_changed_id)
+    -- mode_changed_id reads as nil here because the closure may run before the
+    -- autocmd below is created; the pcall swallows that (and any close race).
+    pcall(vim.api.nvim_del_autocmd, mode_changed_id --[[@as integer]])
     schedule_callback()
   end, 500)
 
@@ -3309,7 +3505,7 @@ local function restore_mode_and_wait(target_mode, callback)
     nested = true,
     callback = function()
       fallback_timer:stop()
-      pcall(vim.api.nvim_del_autocmd, mode_changed_id)
+      pcall(vim.api.nvim_del_autocmd, mode_changed_id --[[@as integer]])
       schedule_callback()
     end,
   })
@@ -3371,15 +3567,15 @@ function Morph.FloatingWindow(ctx)
       prev_cursor = nil,
       prev_mode = nil,
       prev_open_cell = mk_prev_value_cell(false),
-      prev_config_cell = mk_prev_value_cell(nil),
+      prev_config_cell = mk_prev_value_cell(nil) --[[@as morph._internal.hooks.PrevValueCell<vim.api.keyset.win_config>]],
     }
   end
 
   --- @type components.FloatingWindowState
   local state = assert(ctx.state)
   local prev_open = state.prev_open_cell:get(open)
-  --- @type vim.api.keyset.win_config
-  local config = type(ctx.props.config) == 'function' and ctx.props.config() or ctx.props.config
+  local config = ctx.props.config
+  if type(config) == 'function' then config = config() end
 
   --- Shared open→closed teardown for both the prop-driven close transition
   --- and unmount. Closes over ctx/state/prev_open. When the float still holds
@@ -3453,9 +3649,11 @@ function Morph.FloatingWindow(ctx)
       state.prev_config_cell:get(config)
       -- Call on_win_create callback if provided
       if ctx.props.on_win_create then
-        ctx:do_after_render(
-          function() ctx.props.on_win_create(state.winnr, state.bufnr, state.document) end
-        )
+        ctx:do_after_render(function()
+          -- document is set by the Portal child's on_buf_create during this
+          -- same render, which always precedes do_after_render callbacks.
+          ctx.props.on_win_create(state.winnr, state.bufnr, state.document --[[@as morph.Morph]])
+        end)
       end
     elseif prev_open and not open then
       close_transition()

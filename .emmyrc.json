@@ -17,7 +17,8 @@
     "library": [
       "$VIMRUNTIME",
       "library/busted",
-      "library/luv"
+      "library/luv",
+      "library/vim-iter"
     ]
   }
 }

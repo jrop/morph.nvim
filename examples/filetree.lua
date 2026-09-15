@@ -331,7 +331,7 @@ local function App(ctx)
     end
   end
 
-  local tree = assert(state.tree)
+  local tree = state.tree
   return h(FsNode, {
     path = tree._root,
     tree = tree,
