@@ -1048,7 +1048,7 @@ describe('Morph', function()
       local start_row, start_col, details = raw[1], raw[2], raw[3]
 
       -- BUG: _from_raw clamps stop to buffer bounds but NOT start
-      local extmark = Extmark._from_raw(0, ns, ext_id, start_row, start_col, details)
+      local extmark = Extmark._from_raw(0, ext_id, start_row, start_col, details)
 
       -- start should be clamped to valid buffer line
       local last_line_idx = line_count() - 1
@@ -3512,7 +3512,7 @@ describe('Morph', function()
       assert.is_false(Pos00.new(0, 0) < Pos00.new(0, 0))
     end)
 
-    it('compares with __gt correctly', function()
+    it('compares greater-than correctly (routes through __lt)', function()
       assert.is_true(Pos00.new(0, 1) > Pos00.new(0, 0))
       assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 0))
       assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 5))

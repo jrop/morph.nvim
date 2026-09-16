@@ -128,9 +128,6 @@
 ---   extmark?: vim.api.keyset.set_extmark
 --- }
 
---- A (0,0)-indexed half-open region of buffer text.
---- @alias morph.Span { start: morph.Pos00, stop: morph.Pos00 }
-
 --- A tag is the result of calling h(...): it is a recipe for creating an
 --- element.
 --- @class morph.Tag
@@ -138,14 +135,11 @@
 --- @field name string | morph.Component<any, any>
 --- @field attributes morph.TagAttributes
 --- @field children morph.Tree
+--- @field parent? morph.Tag Enclosing tag recorded at render time; the guard
+---   walks it to ask "is this editable tag inside that readonly one?"
+--- @field literal? boolean True on the implicit tag wrapping a bare literal
 --- @field private ctx? morph.Ctx<any, any>
 --- @field private curr_text? string
---- @field private curr_span? morph.Span Span of the
----   region curr_text describes, as of the last render/accepted edit. Mark
----   adjustment moves extmarks on every buffer change, so this snapshot is
----   the only stable record of "where the content lived" -- used to judge
----   whether a change that collapsed an editable hole (ciw/cc of its whole
----   content) stayed inside the hole's territory.
 --- @field private readonly? boolean
 --- @field private stamp? string Hex sequence id minted by the reconciler and
 ---   copied along matches: the node's identity chain, unique within its
@@ -168,10 +162,10 @@
 --- @alias morph.Tree morph.Node | (morph.Node | morph.Node[])[]
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
---- One swept span mismatch: the live extmark, its tag, the live text, and --
---- once the settle phase runs -- whether that mismatch was committed. The
---- guard's sweep produces these; its decide/settle phases consume them.
---- @alias morph.SpanMismatch { extmark: morph.Extmark, tag: morph.Tag, text: string, commit?: boolean }
+--- One changed tag: its live extmark and the tag's new (live or recovered)
+--- content. The collector produces these; the guard's decide and dispatch
+--- phases consume them.
+--- @alias morph.TagChange { extmark: morph.Extmark, tag: morph.Tag, text: string }
 
 --------------------------------------------------------------------------------
 -- Tree Utilities
@@ -392,13 +386,6 @@ function Pos00:__le(other)
   return self[2] <= other[2]
 end
 
---- @param other unknown
-function Pos00:__gt(other)
-  if type(other) ~= 'table' then return false end
-  if self[1] ~= other[1] then return self[1] > other[1] end
-  return self[2] > other[2]
-end
-
 --------------------------------------------------------------------------------
 -- Extmark: Wrapper Around Neovim's Extmark API
 --------------------------------------------------------------------------------
@@ -412,8 +399,6 @@ end
 --- @field id integer
 --- @field start morph.Pos00
 --- @field stop morph.Pos00
---- @field raw vim.api.keyset.extmark_details
---- @field private ns integer
 --- @field private bufnr integer
 local Extmark = {}
 Extmark.__index = Extmark
@@ -443,10 +428,7 @@ function Extmark.new(bufnr, ns, start, stop, opts)
   end
 
   local id = vim.api.nvim_buf_set_extmark(bufnr, ns, start[1], start[2], extmark_opts)
-  return setmetatable(
-    { id = id, start = start, stop = stop, raw = opts, ns = ns, bufnr = bufnr },
-    Extmark
-  )
+  return setmetatable({ id = id, start = start, stop = stop, bufnr = bufnr }, Extmark)
 end
 --- Retrieve an existing extmark by its ID.
 --- @param bufnr integer
@@ -458,19 +440,18 @@ function Extmark.by_id(bufnr, ns, id)
   if not raw then return nil end
 
   local start_row0, start_col0, details = unpack(raw)
-  return Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, assert(details))
+  return Extmark._from_raw(bufnr, id, start_row0, start_col0, assert(details))
 end
 
 --- @private
 --- @param bufnr integer
---- @param ns integer
 --- @param id integer
 --- @param start_row0 integer
 --- @param start_col0 integer
 --- @param details vim.api.keyset.extmark_details? Present when the source API
 ---   call requested details; the body treats absent details as "no known end".
 --- Construct an Extmark from raw API data, normalizing bounds that extend past buffer end.
-function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
+function Extmark._from_raw(bufnr, id, start_row0, start_col0, details)
   local start = Pos00.new(start_row0, start_col0)
   local stop = Pos00.new(start_row0, start_col0)
 
@@ -478,10 +459,7 @@ function Extmark._from_raw(bufnr, ns, id, start_row0, start_col0, details)
     stop = Pos00.new(details.end_row --[[@as integer]], details.end_col --[[@as integer]])
   end
 
-  local extmark = setmetatable(
-    { id = id, start = start, stop = stop, raw = details, ns = ns, bufnr = bufnr },
-    Extmark
-  )
+  local extmark = setmetatable({ id = id, start = start, stop = stop, bufnr = bufnr }, Extmark)
 
   -- Clamp extmark bounds to actual buffer size (extmarks can overshoot after deletions)
   local last_line_idx = math.max(0, vim.api.nvim_buf_line_count(bufnr) - 1)
@@ -513,7 +491,7 @@ function Extmark._get_in_range(bufnr, ns, start, stop)
     .iter(raw_extmarks)
     :map(function(ext)
       local id, line0, col0, details = unpack(ext)
-      return Extmark._from_raw(bufnr, ns, id, line0, col0, assert(details))
+      return Extmark._from_raw(bufnr, id, line0, col0, assert(details))
     end)
     :totable()
 end
@@ -726,7 +704,6 @@ end
 
 --- @alias morph.MorphTextState {
 ---   lines: string[],
----   extmarks: morph.Extmark[],
 ---   tags_to_extmark_ids: table<morph.Tag, integer?>,
 ---   extmark_ids_to_tag: table<integer, morph.Tag?>,
 ---   top_level_tag?: morph.Tag,
@@ -1315,9 +1292,9 @@ end
 -- From Tree to Lines
 --------------------------------------------------------------------------------
 -- markup_to_lines flattens a tree into buffer lines, caching every tag's
--- text (curr_text) and span (curr_span) along the way -- the snapshots the
--- guard later decides with. Why here: the reconciler has decided WHAT to
--- draw; this decides how it reads, and Part V writes it.
+-- text (curr_text) along the way -- the snapshot the guard later decides
+-- with. Why here: the reconciler has decided WHAT to draw; this decides how
+-- it reads, and Part V writes it.
 
 --- Convert a tree to an array of lines, optionally calling on_tag for each tag.
 --- This is the core "rendering" logic that flattens the tree into text.
@@ -1331,6 +1308,11 @@ function Morph.markup_to_lines(opts)
   -- Stack of text accumulators - each tag tracks its own text content
   -- so we can cache it for on_change handlers later
   local text_accumulators = {} --- @type { text: string[] }[]
+
+  -- Stack of tags currently being rendered. A tag records its enclosing tag
+  -- as `parent`, so the guard can later ask whether a changed editable tag
+  -- sits inside a changed readonly one (content question, no positions).
+  local tag_stack = {} --- @type morph.Tag[]
 
   --- @param s string
   local function emit_text(s)
@@ -1364,9 +1346,19 @@ function Morph.markup_to_lines(opts)
       -- A string with no enclosing tag (top-level in the render tree, or
       -- directly inside a component's output) would otherwise produce no
       -- extmark and be invisible to the readonly sweep. Wrap it in an
-      -- implicit text tag so locked defaults cover ALL content; under a
-      -- classic (unlocked) default the implicit tag is editable and inert.
-      if #text_accumulators == 0 then return visit(Morph.h('text', {}, node), parent_readonly) end
+      -- implicit text tag so locked defaults cover ALL content. The wrap also
+      -- applies under a READONLY parent, where the guard must see the region's
+      -- OWN text change even when an editable hole inside it also changed (a
+      -- write spanning the hole's edge). Under an editable parent the literal
+      -- belongs to the surrounding region and needs no tag of its own --
+      -- wrapping there would mint spurious editable regions.
+      local wrap = #text_accumulators == 0 or parent_readonly
+      local enclosing = tag_stack[#tag_stack]
+      if wrap and not (enclosing and enclosing.literal) then
+        local lit = Morph.h('text', {}, node)
+        lit.literal = true
+        return visit(lit, parent_readonly)
+      end
       -- Split on newlines and emit each part. The fast path matters: trees
       -- like big tables emit one single-line string per cell, and vim.split
       -- spins up a gsplit closure plus segment bookkeeping for every one of
@@ -1383,9 +1375,15 @@ function Morph.markup_to_lines(opts)
       end
     elseif node_type == 'number' then
       -- Convert number to string and emit; same implicit-tag treatment as
-      -- strings so top-level numbers are guarded too
+      -- strings so top-level numbers and readonly-parent literals are guarded
       local text = tostring(node --[[@as number]])
-      if #text_accumulators == 0 then return visit(Morph.h('text', {}, text), parent_readonly) end
+      local wrap = #text_accumulators == 0 or parent_readonly
+      local enclosing = tag_stack[#tag_stack]
+      if wrap and not (enclosing and enclosing.literal) then
+        local lit = Morph.h('text', {}, text)
+        lit.literal = true
+        return visit(lit, parent_readonly)
+      end
       emit_text(text)
     elseif node_type == 'array' then
       for i = 1, table.maxn(node) do
@@ -1402,16 +1400,19 @@ function Morph.markup_to_lines(opts)
       -- hole even under a locked ancestor.
       tag.readonly = resolve_readonly(tag, parent_readonly)
 
+      tag.parent = tag_stack[#tag_stack]
+      tag_stack[#tag_stack + 1] = tag
+
       local start0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
       visit(tag.children, tag.readonly)
       local stop0 = Pos00.new(curr_line1 - 1, curr_col1 - 1)
 
-      -- Cache the rendered text on the tag, plus the span it covers: mark
-      -- adjustment invalidates extmark positions on every edit, so the guard
-      -- needs this stable snapshot to reason about later changes.
+      tag_stack[#tag_stack] = nil
+
+      -- Cache the rendered text on the tag: the guard decides what changed
+      -- by comparing live content against this expectation.
       local acc = table.remove(text_accumulators)
       tag.curr_text = table.concat(acc.text)
-      tag.curr_span = { start = start0, stop = stop0 }
 
       if opts.on_tag then opts.on_tag(tag, start0, stop0) end
     elseif node_type == 'component' then
@@ -1643,8 +1644,8 @@ function Morph.new(bufnr, opts)
     _probe_cmdline_autocmd = nil,
     original_keymaps = {},
     text_content = {
-      old = { lines = { '' }, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
-      curr = { lines = { '' }, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      old = { lines = { '' }, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+      curr = { lines = { '' }, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
     },
     cleanup_hooks = {},
     buf_watcher = nil, -- Created lazily in _ensure_buf_watcher()
@@ -1712,7 +1713,6 @@ function Morph:render(tree)
   local changedtick = vim.b[self.bufnr].changedtick
   if changedtick ~= self.changedtick then
     self.text_content.curr = {
-      extmarks = {},
       lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false),
       tags_to_extmark_ids = {},
       extmark_ids_to_tag = {},
@@ -1800,8 +1800,7 @@ function Morph:render(tree)
   -- Update buffer text with minimal edits
   --- @diagnostic disable-next-line: assign-type-mismatch
   self.text_content.old = self.text_content.curr
-  self.text_content.curr =
-    { lines = lines, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
+  self.text_content.curr = { lines = lines, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
 
   -- Clear extmarks BEFORE patching to avoid Neovim's auto-deletion overhead
   -- when lines with extmarks are deleted by patch_lines
@@ -1818,14 +1817,27 @@ function Morph:render(tree)
   -- keystroke at the seam joins the span to the left instead of being claimed
   -- by both (the guard's attribution below settles leftovers). Zero-width
   -- spans never yield their start: typing at an empty hole's position must
-  -- enter the hole. Ends keep Extmark.new's yielding default, because a
-  -- replacement that touches a span's end gets its end mark dragged to the
-  -- change start by nvim and can only recover its span by yielding over the
-  -- inserted text.
+  -- enter the hole.
+  --
+  -- Ends: Extmark.new's yielding default (end_right_gravity=true) makes a
+  -- span's end ride over inserted text -- right for typing at a span's own
+  -- tail, but wrong when a ZERO-WIDTH editable span starts at the same
+  -- position: the hole's start never yields, so its bytes must go only to
+  -- the hole, and a left span whose end also rode over them would grow its
+  -- live span across the hole's text (the guard accepts the overlap, but the
+  -- undo probe then writes the left region's snapshot over the inflated span
+  -- and erases the hole's bytes). So an editable span's end holds when a
+  -- zero-width editable span starts exactly there. Non-zero-width starts are
+  -- excluded: they yield (rule above), so the left end's ride is what claims
+  -- the seam bytes for the span to the left.
   local editable_stop_keys = {}
+  local editable_zero_start_keys = {}
   for _, pending in ipairs(pending_extmarks) do
     if not pending.tag.readonly then
       editable_stop_keys[('%d:%d'):format(pending.stop[1], pending.stop[2])] = true
+      if pending.start[1] == pending.stop[1] and pending.start[2] == pending.stop[2] then
+        editable_zero_start_keys[('%d:%d'):format(pending.start[1], pending.start[2])] = true
+      end
     end
   end
   for _, pending in ipairs(pending_extmarks) do
@@ -1837,6 +1849,13 @@ function Morph:render(tree)
     then
       pending.opts = vim.tbl_extend('force', pending.opts, { right_gravity = true })
     end
+    if
+      not pending.tag.readonly
+      and not zero_width -- a zero-width span's stop is its own start, not a neighbor's
+      and editable_zero_start_keys[('%d:%d'):format(pending.stop[1], pending.stop[2])]
+    then
+      pending.opts = vim.tbl_extend('force', pending.opts, { end_right_gravity = false })
+    end
   end
 
   -- Create extmarks for the new tree
@@ -1844,7 +1863,6 @@ function Morph:render(tree)
     local extmark = Extmark.new(self.bufnr, self.ns, pending.start, pending.stop, pending.opts)
     self.text_content.curr.extmark_ids_to_tag[extmark.id] = pending.tag
     self.text_content.curr.tags_to_extmark_ids[pending.tag] = extmark.id
-    table.insert(self.text_content.curr.extmarks, extmark)
   end
   -- First pending_extmark is the outermost <text> node (DFS order).
   -- If it spans the full buffer, it's the top-level tag.
@@ -1946,8 +1964,8 @@ function Morph:_release_mount_resources()
   -- would leak a hidden buffer (and its undo tree) every mount/unmount cycle.
   self:_teardown_probe()
   self.text_content = {
-    old = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
-    curr = { lines = {}, extmarks = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+    old = { lines = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
+    curr = { lines = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} },
   }
 end
 
@@ -2181,11 +2199,12 @@ local function create_buf_watcher(bufnr, callback, is_rendering)
         -- Drain in ARRIVAL order: each event's geometry is exact for the
         -- frame its own change created, and the FIRST event's region is
         -- stated in the pre-window frame -- the frame the stored spans live
-        -- in. The first keystroke therefore claims the hole and commits the
-        -- full live text (batched chars included), and the remaining events
-        -- find no mismatch and benignly no-op. Judging the window by only
-        -- the last event (the old behavior) measured trailing keystrokes
-        -- against a snapshot they had already outgrown, so a locked ancestor
+        -- in. The first keystroke therefore lands in the hole and updates
+        -- its content to the full live text (batched chars included), and
+        -- the remaining events find no mismatch and benignly no-op. Judging
+        -- the window by only the last event (the old behavior) measured
+        -- trailing keystrokes against a snapshot they had already outgrown,
+        -- so a locked ancestor
         -- read the whole batch as a violation and reverted legitimate fast
         -- typing.
         for _, user_args in ipairs(queue) do
@@ -2246,29 +2265,30 @@ end
 --------------------------------------------------------------------------------
 -- The Guard
 --------------------------------------------------------------------------------
--- Polices text changes: rejects edits that touched locked text or landed
--- outside the tree (flash + revert), attributes accepted edits to the
--- editable spans that claim them, and fires their on_change handlers.
+-- Polices text changes: reverts edits that touched locked text or landed
+-- outside the tree (flash + full-tree restore), attributes accepted edits to
+-- the editable tags that own them, and fires their on_change handlers.
 -- State model (each piece justified by a spec):
---   tag.curr_text/curr_span  accepted content and its pre-change location --
---                   the only frame the guard decides with; live extmark
---                   positions locate text, they never decide.
+--   tag.curr_text  the accepted content per tag -- the only frame the guard
+--                   decides with; live extmark positions locate the text,
+--                   they never decide.
 --   watcher.cursor_sample/user_bytes_queue  the pre-edit cursor snapshot
 --                   and the pending user edit; render-owned writes never
 --                   open a guard window.
 
 --- @private
---- Reject edits that touched locked text or landed outside the tree: flash
---- the violated regions, then restore the buffer to the tree's content. The
---- tree is the source of truth: instead of surgically repairing the buffer
---- (which fights extmark mark-adjustment), the normal render pipeline rebuilds
---- every span from scratch. Runs on a scheduler tick so it never mutates the
---- buffer mid-handler.
+--- @private
+--- Revert an edit that violated the tree: flash the touched regions, then
+--- restore the buffer to the tree's content. The tree is the source of
+--- truth: instead of surgically repairing the buffer (which fights extmark
+--- mark-adjustment), the normal render pipeline rebuilds every span from
+--- scratch. Runs on a scheduler tick so it never mutates the buffer
+--- mid-handler.
 --- @param violated morph.Extmark[] Spans to flash (pre-render geometry); may be
 ---   empty when the edit landed outside every span and nothing can be flashed
 --- @param restore_cursor? integer[] Cursor (win_get_cursor format) to restore
----   after the revert: where the rejected edit found the cursor.
-function Morph:_reject_edits(violated, restore_cursor)
+---   after the revert: where the reverted edit found the cursor.
+function Morph:_revert_violation(violated, restore_cursor)
   for _, extmark in ipairs(violated) do
     self:_flash_readonly(extmark.start, extmark.stop)
   end
@@ -2286,7 +2306,7 @@ function Morph:_reject_edits(violated, restore_cursor)
 end
 
 --- @private
---- Flash a readonly region that just rejected an edit. Best effort: hl
+--- Flash a readonly region that just got reverted. Best effort: hl
 --- signature variations across nvim versions must never break the guard.
 --- @param start morph.Pos00
 --- @param stop morph.Pos00
@@ -2302,11 +2322,11 @@ end
 
 --- @private
 --- Called after TextChanged autocmd fires, with the on_bytes info. The
---- guard's four phases run in order: sweep every rendered span for text
---- mismatches, decide the locked ones (any unexplained mismatch reverts
---- the whole tree), settle the editable ones (commit claims, snap back
---- boundary noise), then dispatch the committed edits to their on_change
---- handlers.
+--- guard's phases run in order: collect the tags whose live content differs
+--- from the tree's expectation, decide (any readonly tag whose change no
+--- editable descendant explains reverts the whole tree), accept (every
+--- changed tag's expectation moves to its new content), then dispatch the
+--- owned edits to their on_change handlers.
 function Morph:_on_bytes_after_autocmd(
   _,
   _,
@@ -2314,8 +2334,9 @@ function Morph:_on_bytes_after_autocmd(
   start_row0,
   start_col0,
   _, -- byte offset of the change from buffer start
-  old_end_row_off,
-  old_end_col_off,
+  _, -- old end row offset (unused: the content model never reasons in the
+  -- pre-change frame)
+  _, -- old end col offset (unused, same reason)
   _, -- old end byte length
   new_end_row_off,
   new_end_col_off,
@@ -2324,483 +2345,238 @@ function Morph:_on_bytes_after_autocmd(
   -- Ignore changes we're making ourselves during render
   if self.changing then return end
 
-  -- The change's range in PRE-change coordinates: [change_start, old_end).
-  -- Per :h nvim_buf_attach on_bytes, old_end_col_off is relative to start_col0
-  -- when the change stays on one line (old_end_row_off == 0) and is the
-  -- ABSOLUTE column in the end row otherwise. This is the only geometry the
-  -- guard DECIDES with -- tag.curr_span snapshots live in the same frame, so
-  -- decisions never depend on where nvim has since moved the live extmarks.
-  -- (Live extmark positions are still read below, but only to locate which
-  -- text to compare.)
+  -- The change's start and post-change end. Per :h nvim_buf_attach
+  -- on_bytes, a column offset is relative to start_col0 when the change
+  -- stays on one line (the matching row offset is 0) and is the ABSOLUTE
+  -- column in the end row otherwise. change_start begins the guard's zone
+  -- query; new_end ends it and bounds the collapse recovery's read.
   local change_start = Pos00.new(start_row0, start_col0)
-  local old_end = Pos00.new(
-    start_row0 + old_end_row_off,
-    old_end_row_off == 0 and start_col0 + old_end_col_off or old_end_col_off
-  )
-  -- Same geometry rule as old_end (:h nvim_buf_attach on_bytes): the column
-  -- offset is relative to start_col0 when the change stayed on one line and
-  -- absolute in the end row otherwise. The sweep needs it to translate the
-  -- snapshots of spans the change never touched.
   local new_end = Pos00.new(
     start_row0 + new_end_row_off,
     new_end_row_off == 0 and start_col0 + new_end_col_off or new_end_col_off
   )
 
-  -- Phase 1 -- sweep: compare every rendered span's live text against its
-  -- snapshot.
-  local editable, locked, in_editable_span =
-    self:_sweep_span_mismatches(change_start, old_end, new_end)
+  -- Phase 1 -- collect: which tags' LIVE content differs from the tree's
+  -- expectation? A zone query around [change_start, new_end] returns every
+  -- extmark nudged by this change; reading its live text and comparing to
+  -- `curr_text` is the entire change test. No spans, no frame arithmetic.
+  local changed = self:_collect_changed(change_start, new_end)
+  local editable, locked = changed.editable, changed.locked
+  local in_editable_span = changed.in_editable_span
 
-  -- Phase 2 -- decide: every locked mismatch must be explained by an
-  -- editable hole; one unexplained mismatch reverts the whole tree.
-  local readonly_violations =
-    self._decide_locked_mismatches(editable, locked, change_start, old_end)
-
-  if #readonly_violations > 0 then
-    -- Restore the cursor to where the rejected edit found it, from the
-    -- pre-edit snapshot: by handler time nvim has already adjusted (and
-    -- often clamped) the cursor, so the live position cannot be trusted.
-    -- No sample yet (no navigation since mount): nothing to restore.
+  -- Phase 2 -- decide: a readonly tag whose content changed is a violation
+  -- unless a changed editable tag sits INSIDE it (that descendant's edit
+  -- explains the ancestor's growth). Content and nesting, never position.
+  if self:_readonly_violated(editable, locked) then
+    -- Flash and restore where the reverted edit found the cursor: by handler
+    -- time nvim has already adjusted (and often clamped) it, so the live
+    -- position cannot be trusted.
+    local violated = {} --- @type morph.Extmark[]
+    for _, m in ipairs(locked) do
+      table.insert(violated, m.extmark)
+    end
     local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
-    self:_reject_edits(readonly_violations, restore_cursor)
+    self:_revert_violation(violated, restore_cursor)
     return
   end
 
-  -- Phase 3 -- settle: commit the editable spans that claim the change and
-  -- snap the rest back onto their snapshots.
-  self:_settle_editable_mismatches(editable, change_start, old_end)
+  -- Phase 3 -- accept: every changed tag's expectation moves to its live
+  -- content -- editable ones so dispatch announces the new text, locked ones
+  -- so the next window does not re-read them as fresh violations.
+  for _, list in ipairs { editable, locked } do
+    for _, m in ipairs(list) do
+      m.tag.curr_text = m.text
+    end
+  end
 
   -- Mirror the accepted edit into the undo probe, so probe entries track main
   -- entries. Runs before on_change fires: the probe then reflects the exact
   -- change the app is about to be told about.
   if self.probe then self.probe:mirror(undotree(self.bufnr).seq_cur) end
 
-  -- Phase 4 -- dispatch: route committed edits to their on_change handlers,
-  -- falling back to the out-of-tree handling when nothing was claimed.
+  -- Phase 4 -- dispatch: editable tags whose content changed OWN the edit --
+  -- fire their handlers so the app hears the new content. When none does,
+  -- the change is unowned: tolerate it (an app-owned write inside editable
+  -- territory) or classify it (outside the tree: locked apps revert, classic
+  -- apps route it to the whole-buffer handler).
   if #editable == 0 then
-    self:_handle_unclaimed_change(in_editable_span)
+    self:_handle_unowned_change(in_editable_span)
     return
   end
-  self:_fire_committed_changes(editable)
+  self:_dispatch_owned_changes(editable)
 end
 
 --- @private
---- Phase 1 of the guard: compare every rendered span's live text against its
---- snapshot. Returns the mismatches split by locked state, plus whether the
---- change's start sits in a rendered editable span regardless of any text
---- change -- the no-mismatch fallback uses that to tell an edit that landed
---- inside an editable region from one that landed outside the tree.
---- @param change_start morph.Pos00 Change start (pre-change frame)
---- @param old_end morph.Pos00 Change end (pre-change frame); == change_start for pure inserts
---- @param new_end morph.Pos00 Change end in the post-change frame (window == start for pure deletes)
---- @return morph.SpanMismatch[] editable
---- @return morph.SpanMismatch[] locked
---- @return boolean in_editable_span
-function Morph:_sweep_span_mismatches(change_start, old_end, new_end)
-  -- Detect mismatches by sweeping every rendered SPAN rather than querying
-  -- the changed region: nvim's mark adjustment can move spans entirely out
-  -- of the changed region (inverted or collapsed by line deletes), and a
-  -- position-based query would silently miss them.
-  --
-  -- Per-span cost is the budget here: big tables put tens of thousands of
-  -- spans on screen and every keystroke sweeps all of them, so bulk extmark
-  -- reads and per-span text reads are out. The workload divides by whether
-  -- the span's STORED territory touches the change window [change_start,
-  -- old_end), tested inclusively in the shared pre-change frame:
-  --
-  --   Untouched: text provably unchanged -- it is exactly the text nvim's
-  --     mark adjustment preserves. Both endpoints sit strictly outside the
-  --     window, so nvim moves them by the on_bytes deltas alone (no gravity
-  --     ambiguity at the boundaries), and the snapshot is refreshed by
-  --     translating the stored span. Zero API traffic per span.
-  --   Touching: re-read the live extmark by id and compare text. Boundaries
-  --     count as touching on purpose -- a false positive costs one read
-  --     while a false negative would be a missed violation.
-  --
-  -- Every event leaves every snapshot in the live frame -- translated or
-  -- re-read -- which is what lets batched events in one TextChanged window
-  -- decide against up-to-date geometry.
-  local editable = {} --- @type morph.SpanMismatch[]
-  local locked = {} --- @type morph.SpanMismatch[]
+--- Read the live text of a (0,0)-indexed span. Rows past the buffer end are
+--- clamped first -- nvim_buf_get_text ERRORS there, and extmark ends land on
+--- the buffer-end row after truncating edits. The degenerate/inverted check
+--- reads empty, mirroring Extmark:_text()'s exclusive-end contract. The
+--- trailing-newline behavior (an end on the next line's column 0 includes
+--- the previous line's newline) comes from nvim_buf_get_text itself -- no
+--- code here implements it. File-local: the collector is the only reader.
+--- @param bufnr integer
+--- @param row0 integer
+--- @param col0 integer
+--- @param end_row integer
+--- @param end_col integer
+--- @return string
+local function live_span_text(bufnr, row0, col0, end_row, end_col)
+  local last_row = vim.api.nvim_buf_line_count(bufnr) - 1
+  if row0 > last_row or end_row > last_row then
+    local last_line_len = #(
+      vim.api.nvim_buf_get_lines(bufnr, last_row, last_row + 1, true)[1] or ''
+    )
+    if row0 > last_row then
+      row0, col0 = last_row, last_line_len
+    end
+    if end_row > last_row then
+      end_row, end_col = last_row, last_line_len
+    end
+  end
+  if row0 > end_row or (row0 == end_row and col0 >= end_col) then return '' end
+  return table.concat(vim.api.nvim_buf_get_text(bufnr, row0, col0, end_row, end_col, {}), '\n')
+end
+
+--- @private
+--- Collect the tags whose live content differs from the tree's expectation,
+--- using the change window only to decide WHERE to look. Mark adjustment
+--- converges every affected mark onto the change region, so a zone query
+--- over [change_start, new_end] (inclusive on both edges; verified) returns
+--- every candidate plus harmless neighbors. Comparing live text against
+--- `curr_text` is the whole change test.
+--- @param change_start morph.Pos00
+--- @param new_end morph.Pos00
+--- @return { editable: morph.TagChange[], locked: morph.TagChange[], in_editable_span: boolean }
+function Morph:_collect_changed(change_start, new_end)
+  local editable = {} --- @type morph.TagChange[]
+  local locked = {} --- @type morph.TagChange[]
   local in_editable_span = false
-
   local change_row, change_col = change_start[1], change_start[2]
-  local old_end_row, old_end_col = old_end[1], old_end[2]
-  local is_insert = change_row == old_end_row and change_col == old_end_col
 
-  -- Translation deltas for positions strictly after the window. A position
-  -- on the window's end row also shifts by the column delta; lower rows
-  -- shift by the row delta. This mirrors nvim's adjustment of marks outside
-  -- a deleted region.
-  local d_row = new_end[1] - old_end_row
-  local d_col = new_end[2] - old_end_col
-
-  local tag_by_id = self.text_content.curr.extmark_ids_to_tag
-  local id_by_tag = self.text_content.curr.tags_to_extmark_ids
-
-  for _, ext in ipairs(self.text_content.curr.extmarks) do
-    local tag = tag_by_id[ext.id]
+  local raw = vim.api.nvim_buf_get_extmarks(
+    self.bufnr,
+    self.ns,
+    { change_row, change_col },
+    { new_end[1], new_end[2] },
+    { details = true, overlap = true }
+  )
+  for _, ext in ipairs(raw) do
+    local id, row0, col0, details = ext[1], ext[2], ext[3], ext[4]
+    local tag = self.text_content.curr.extmark_ids_to_tag[id]
     if tag then
-      local span = tag.curr_span
-      local s_row, s_col = span.start[1], span.start[2]
-      local e_row, e_col = span.stop[1], span.stop[2]
+      local end_row = details.end_row or row0
+      local end_col = details.end_col or col0
 
-      local intersects
-      if is_insert then
-        -- A pure insert consumes nothing, so it can only grow a span whose
-        -- territory holds the position.
-        intersects = (s_row < change_row or (s_row == change_row and s_col <= change_col))
-          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
-      else
-        -- Exclusive-range overlap, widened to inclusive: a change bleeding
-        -- onto either boundary can reach the span's text.
-        intersects = (s_row < old_end_row or (s_row == old_end_row and s_col <= old_end_col))
-          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
+      -- change_start sits inside this editable live span (boundaries
+      -- included)? The no-change fallback uses this to tell an edit inside an
+      -- editable region from one outside the tree.
+      if
+        not tag.readonly
+        and (row0 < change_row or (row0 == change_row and col0 <= change_col))
+        and (change_row < end_row or (change_row == end_row and change_col <= end_col))
+      then
+        in_editable_span = true
       end
 
-      if not intersects then
-        -- in_editable_span answers "did the edit land in an editable span,
-        -- text change or not"; for untouched spans the snapshot IS the live
-        -- span, so test it directly.
-        if
-          not tag.readonly
-          and (s_row < change_row or (s_row == change_row and s_col <= change_col))
-          and (change_row < e_row or (change_row == e_row and change_col <= e_col))
-        then
-          in_editable_span = true
-        end
-
-        -- Refresh the snapshot so it tracks mark movement caused by edits
-        -- elsewhere (a change before this element slides its marks without
-        -- touching its content). Strictly-before spans cannot have moved;
-        -- strictly-after spans move by the deltas. Reuse the stored span
-        -- object when nothing moved.
-        if s_row > old_end_row or (s_row == old_end_row and s_col > old_end_col) then
-          local ns_row = s_row + d_row
-          local ns_col = s_row == old_end_row and s_col + d_col or s_col
-          local ne_row = e_row + d_row
-          local ne_col = e_row == old_end_row and e_col + d_col or e_col
-          if ns_row ~= s_row or ns_col ~= s_col or ne_row ~= e_row or ne_col ~= e_col then
-            tag.curr_span = { start = Pos00.new(ns_row, ns_col), stop = Pos00.new(ne_row, ne_col) }
-          end
-        end
+      -- Read the tag's content over its LIVE marks. The live marks are the
+      -- truth under morph's gravity scheme for every shape but one: a
+      -- replace touching the span's END drags the end mark onto the change
+      -- start, so the live span degenerates to a point and reads '' while
+      -- the actual replacement text sits at the change window -- the guard's
+      -- [change_start, new_end) is the only witness to it. For every other
+      -- shape (edited span stays healthy and reads its new bytes; a whole
+      -- delete collapses it to '' which IS the new content; a shift leaves
+      -- untouched spans reading their own bytes) widening by the stored span
+      -- would re-import positional attribution and report bytes gravity
+      -- gave to a neighbor as changed content: a typed char at a hole's
+      -- tail made the shifted ']' tag report "f]", and a mid-word delete
+      -- made a tag read "suf" from the following literal.
+      local collapsed = row0 == end_row and col0 == end_col
+      local new_text
+      if collapsed then
+        -- Collapsed live span: the replacement text at the change window is
+        -- the tag's new content. A pure delete has new_end == change_start,
+        -- so the read yields '' -- the correct content for a fully deleted
+        -- span.
+        new_text = live_span_text(self.bufnr, change_row, change_col, new_end[1], new_end[2])
       else
-        local id = id_by_tag[tag]
-        local raw = id
-            and vim.api.nvim_buf_get_extmark_by_id(self.bufnr, self.ns, id, { details = true })
-          or nil
-        if raw and raw[1] then
-          local row0, col0, details = raw[1], raw[2], raw[3]
-          local end_row = details.end_row or row0
-          local end_col = details.end_col or col0
-
-          -- change_start sits inside this editable live span (boundaries
-          -- included)?
-          if
-            not tag.readonly
-            and (row0 < change_row or (row0 == change_row and col0 <= change_col))
-            and (change_row < end_row or (change_row == end_row and change_col <= end_col))
-          then
-            in_editable_span = true
-          end
-
-          -- Same clamp as Extmark._from_raw: a span can overshoot past EOF
-          -- when its rows were deleted in this very change. Rare enough to
-          -- justify reading the last line only once, on first overshoot.
-          local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
-          if row0 > last_row or end_row > last_row then
-            local last_line_len = #(
-              vim.api.nvim_buf_get_lines(self.bufnr, last_row, last_row + 1, true)[1] or ''
-            )
-            if row0 > last_row then
-              row0, col0 = last_row, last_line_len
-            end
-            if end_row > last_row then
-              end_row, end_col = last_row, last_line_len
-            end
-          end
-
-          -- Exclusive-end read, mirroring Extmark:_text(): equal and
-          -- inverted positions read empty, and nvim_buf_get_text's
-          -- end_col == 0 row slice is '', so a stop on column 0 yields
-          -- exactly the trailing newline the original appends.
-          local new_text
-          if row0 > end_row or (row0 == end_row and col0 >= end_col) then
-            -- Collapsed or inverted span (mark adjustment after deletions).
-            new_text = ''
-          else
-            new_text = table.concat(
-              vim.api.nvim_buf_get_text(self.bufnr, row0, col0, end_row, end_col, {}),
-              '\n'
-            )
-          end
-
-          if tag.curr_text ~= new_text then
-            -- Real Extmark objects are built only for the (rare) mismatching
-            -- spans the later phases inspect.
-            local extmark = Extmark._from_raw(self.bufnr, self.ns, id, row0, col0, details)
-            local mismatch = { extmark = extmark, tag = tag, text = new_text }
-            if tag.readonly then
-              table.insert(locked, mismatch)
-            else
-              table.insert(editable, mismatch)
-            end
-          elseif
-            span.start[1] ~= row0
-            or span.start[2] ~= col0
-            or span.stop[1] ~= end_row
-            or span.stop[2] ~= end_col
-          then
-            -- Touched but content-equal: same snapshot bookkeeping as the
-            -- untouched branch, from the live marks.
-            tag.curr_span = { start = Pos00.new(row0, col0), stop = Pos00.new(end_row, end_col) }
-          end
+        new_text = live_span_text(self.bufnr, row0, col0, end_row, end_col)
+      end
+      if tag.curr_text ~= new_text then
+        local extmark = Extmark._from_raw(self.bufnr, id, row0, col0, details)
+        local mismatch = { extmark = extmark, tag = tag, text = new_text }
+        if tag.readonly then
+          table.insert(locked, mismatch)
+        else
+          table.insert(editable, mismatch)
         end
-        -- raw nil: the extmark was invalidated (its lines deleted). The old
-        -- position-based sweep never saw it either, so leave the snapshot
-        -- for the next render to rebuild.
       end
     end
   end
-  return editable, locked, in_editable_span
+  return { editable = editable, locked = locked, in_editable_span = in_editable_span }
 end
 
 --- @private
---- Phase 2 of the guard: decide the locked mismatches. Returns the
---- unexplained ones' extmarks as violations; when there are none, the
---- explained locked snapshots are refreshed here so later events in the same
---- TextChanged window do not re-read the stale pre-edit text as a fresh
---- violation.
---- @param editable morph.SpanMismatch[]
---- @param locked morph.SpanMismatch[]
---- @param change_start morph.Pos00
---- @param old_end morph.Pos00
---- @return morph.Extmark[] readonly_violations
-function Morph._decide_locked_mismatches(editable, locked, change_start, old_end)
-  -- A locked element is a violation unless an editable hole explains the edit
-  -- that caused it. Example tree:
-  -- `Filter: [myword] Up`
-  --  0000000000111111111
-  --  0123456789012345678
-  -- ... hole `myword` with stored span [9,15), locked row spanning [0,19):
-  --
-  --   type `n` inside the hole  change [9,9)  inside [9,15)  -> explained:
-  --       the row's text changed only because the hole's content did, so the
-  --       row's mismatch is accepted and its curr_text refreshed
-  --   `ciw` the whole hole      change [9,15) inside [9,15)  -> explained:
-  --       nvim collapses the hole's LIVE extmark to [9,9) once its content
-  --       is gone; the STORED span still brackets the edit -- this is why
-  --       decisions run on stored spans instead of live extmarks
-  --   delete `[` + content      change [8,15) not inside [9,15)  -> violation:
-  --       the edit reached outside the hole's accepted territory
-  --   type into the chrome      no editable mismatch exists  -> violation:
-  --       nothing explains the locked element's text change
-  --
-  -- The hole must also sit INSIDE the locked element's span: an editable
-  -- ancestor contains everything and must never excuse its locked children.
-  -- Nothing is committed until the decision is made: when any violation
-  -- fires, the whole-tree revert overwrites the buffer, so committing
-  -- hole text (or firing its on_change) would only announce text about to
-  -- be undone.
-  local readonly_violations = {} --- @type morph.Extmark[]
+--- True when some readonly tag's content changed and no changed editable tag
+--- sits inside it. This is the whole guard: nesting, not position. A hole's
+--- own edit explains every readonly ancestor whose growth it caused, but
+--- never an editable tag it is not part of -- which is exactly how a write
+--- spanning the hole's edge is caught (the chrome literal is a readonly
+--- sibling with no changed editable child). Example:
+---
+---   `Name: [x]`
+---   0000000000
+---   0123456789
+---   A="Name: [" readonly  B="x" editable  C="]" readonly
+---
+---   write [5,8)->'Y'  ->  A's content changed (it lost " ["); B is not
+---   inside A (sibling) -> violation. ciw on B alone leaves A unchanged ->
+---   accepted.
+--- @param editable morph.TagChange[]
+--- @param locked morph.TagChange[]
+--- @return boolean
+function Morph:_readonly_violated(editable, locked)
   for _, suspect in ipairs(locked) do
     local explained = false
     for _, hole in ipairs(editable) do
-      -- curr_span is structurally guaranteed: every tag in the
-      -- extmark_ids_to_tag map went through visit(), which sets it alongside
-      -- curr_text at render time.
-      local hole_span = hole.tag.curr_span --[[@as morph.Span]]
-      local suspect_span = suspect.tag.curr_span --[[@as morph.Span]]
-      -- hole_span contains [change_start, old_end) ...
-      local inside = hole_span.start <= change_start and old_end <= hole_span.stop
-      -- ... and hole_span sits inside the locked element's span (an
-      -- editable ancestor contains everything and must not justify skipping
-      -- a revert)
-      local contained = hole_span.start >= suspect_span.start
-        and hole_span.stop <= suspect_span.stop
-      if inside and contained then
+      if Morph._is_inside(hole.tag, suspect.tag) then
         explained = true
         break
       end
     end
-    if not explained then table.insert(readonly_violations, suspect.extmark) end
+    if not explained then return true end
   end
-
-  if #readonly_violations > 0 then return readonly_violations end
-
-  -- No violations, so every locked mismatch was explained by an editable
-  -- hole, and the live text -- hole growth included -- is the accepted
-  -- truth. The hole's own commit in the settle phase refreshes only the
-  -- hole; refresh each explained locked snapshot here, so a later event in
-  -- the same TextChanged window (drained before any scheduled render can
-  -- re-sync from the tree) does not re-read the stale pre-edit text as a
-  -- fresh violation.
-  for _, suspect in ipairs(locked) do
-    -- Same snapshot bookkeeping as the settle phase's commit pass; the
-    -- fields are class-private, so mirror its lint suppression.
-    --- @diagnostic disable-next-line: access-invisible
-    suspect.tag.curr_text = suspect.text
-    --- @diagnostic disable-next-line: access-invisible
-    suspect.tag.curr_span = { start = suspect.extmark.start, stop = suspect.extmark.stop }
-  end
-
-  return readonly_violations
+  return false
 end
 
 --- @private
---- Phase 3 of the guard: commit or snap back each editable mismatch.
---- @param editable morph.SpanMismatch[]
---- @param change_start morph.Pos00
---- @param old_end morph.Pos00
-function Morph:_settle_editable_mismatches(editable, change_start, old_end)
-  -- Accepted: attribute the change to the editable spans that claim it, then
-  -- commit the claimants and snap the rest back. nvim's mark adjustment is
-  -- generous at span seams: a boundary keystroke can inflate a neighbor's
-  -- span without the edit belonging to it (an end mark yields forward; a
-  -- deletion drags a start mark onto the change). Every mismatch whose STORED
-  -- span claims the change region commits its new text; the rest is boundary
-  -- noise -- unless the noise is real growth (a containing region widened
-  -- because an inner region's edit added text, so the snapshot text no longer
-  -- sits at the stored span), which commits too. Snap-back re-places the
-  -- extmark on the stored span so the next sweep sees the region exactly
-  -- where its snapshot says.
-  local is_insert = change_start == old_end
-
-  --- @param span { start: morph.Pos00, stop: morph.Pos00 }
-  --- @return boolean
-  local function claims_change(span)
-    if is_insert then
-      -- A pure insert consumes nothing, so any span the position touches
-      -- (boundaries included) could be the target.
-      return span.start <= change_start and change_start <= span.stop
-    end
-    return span.start <= change_start and old_end <= span.stop
+--- True when `inner` descends from `outer`, walking the parent links recorded
+--- at render time.
+--- @param inner morph.Tag
+--- @param outer morph.Tag
+--- @return boolean
+function Morph._is_inside(inner, outer)
+  local tag = inner.parent
+  while tag do
+    if tag == outer then return true end
+    tag = tag.parent
   end
-
-  -- For inserts, several boundary spans can claim the same keystroke; pick
-  -- the one the cursor was typing into: an empty span at the position first,
-  -- then a span starting there (shortest first), then one strictly containing
-  -- it (innermost first), then one ending there.
-  local function size_of(span)
-    if span.start[1] == span.stop[1] then return span.stop[2] - span.start[2] end
-    -- LuaJIT has no math.maxinteger (a Lua 5.3 addition): under it this read
-    -- as nil and any two multi-line claimants of the same keystroke crashed
-    -- the rank comparison. math.huge orders identically for both uses (the
-    -- tie-break below and the negated rank-4 form).
-    return math.huge
-  end
-
-  -- Read the buffer text on a (0,0)-indexed span. Rows are clamped to the
-  -- buffer: a stored span can reach past EOF when a coalesced edit earlier
-  -- in the same TextChanged window deleted the rows it lived on (e.g. a
-  -- visual paste drains as delete-then-insert), and the clamped read then
-  -- disagrees with the snapshot, sending the stub down its commit-live
-  -- branch -- the correct outcome -- instead of erroring.
-  --- @param start morph.Pos00
-  --- @param stop morph.Pos00
-  --- @return string
-  local function span_text(start, stop)
-    local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
-    return table.concat(
-      vim.api.nvim_buf_get_text(
-        self.bufnr,
-        math.min(start[1], last_row),
-        start[2],
-        math.min(stop[1], last_row),
-        stop[2],
-        {}
-      ),
-      '\n'
-    )
-  end
-
-  local winner, winner_rank, winner_size
-  for _, changed in ipairs(editable) do
-    local span = changed.tag.curr_span --[[@as morph.Span]]
-    changed.commit = false
-    if not claims_change(span) then
-      -- Boundary noise; the snap-back pass below decides.
-    elseif not is_insert then
-      -- The change consumed text inside this span: an exact replace of the
-      -- span's own content, or real growth of a containing region.
-      changed.commit = true
-    else
-      local rank, size_
-      if span.start == change_start and span.stop == change_start then
-        rank, size_ = 1, 0
-      elseif span.start == change_start then
-        rank, size_ = 2, size_of(span)
-      elseif change_start == span.stop then
-        -- A tail insert: editable end marks keep right gravity, so nvim
-        -- grew THIS span around the inserted text -- it is the span the
-        -- cursor was typing into. A containing region mismatches only
-        -- because its inner region's text did, and it commits as real
-        -- growth further down regardless. The old order ranked containing
-        -- above ending, which let the container claim tail-typed
-        -- characters, snap the hole back onto its stale span, and leave
-        -- the hole's on_change unfired -- a controlled filter's state
-        -- lagged the buffer and its next debounce render wiped the
-        -- characters (examples/big_data_set.lua fast-typing bug).
-        rank, size_ = 3, -size_of(span)
-      else
-        -- Strictly containing (start < change < stop): innermost wins.
-        rank, size_ = 4, size_of(span)
-      end
-      if not winner or rank < winner_rank or (rank == winner_rank and size_ < winner_size) then
-        winner, winner_rank, winner_size = changed, rank, size_
-      end
-    end
-  end
-  if winner then winner.commit = true end
-
-  for _, changed in ipairs(editable) do
-    local span = changed.tag.curr_span --[[@as morph.Span]]
-    local ext = changed.extmark
-    if changed.commit then
-      -- A yielding start mark can land PAST the change: a replacement at the
-      -- span's start drags the start onto the change, and yielding over the
-      -- inserted text pushes it out the far side, so the live span reads
-      -- empty. The true territory is the stored span's origin widened to
-      -- wherever the live marks settled; the buffer is the text truth.
-      local repaired = {
-        start = ext.start < span.start and ext.start or span.start,
-        stop = ext.stop,
-      }
-      if ext.start > span.start then
-        repaired.stop = ext.stop > span.stop and ext.stop or span.stop
-      end
-      local text = span_text(repaired.start, repaired.stop)
-      changed.tag.curr_text = text
-      changed.tag.curr_span = repaired
-      changed.text = text
-    else
-      if span_text(span.start, span.stop) == changed.tag.curr_text then
-        Extmark.new(self.bufnr, self.ns, span.start, span.stop, {
-          id = ext.id,
-          right_gravity = ext.raw.right_gravity == true,
-          end_right_gravity = ext.raw.end_right_gravity == true,
-        })
-      else
-        changed.tag.curr_text = changed.text
-        changed.tag.curr_span = { start = ext.start, stop = ext.stop }
-        changed.commit = true
-      end
-    end
-  end
+  return false
 end
 
 --- @private
---- Phase 4 of the guard, fallback branch: no editable span claimed the
---- change. The change either landed outside every rendered span or already
---- matches a snapshot (the undo probe's writeback); locked apps revert the
---- former, and classic apps route it to the top-level tag's on_change.
+--- Phase 4 of the guard, unowned branch: no editable tag's content changed,
+--- so the edit belongs to no hole. It either landed outside every rendered
+--- span or was already accounted for (the undo probe's writeback, an app's
+--- own re-render); locked apps revert the former and tolerate the latter,
+--- and classic apps route the former to the top-level tag's on_change.
 --- @param in_editable_span boolean
-function Morph:_handle_unclaimed_change(in_editable_span)
+function Morph:_handle_unowned_change(in_editable_span)
   if in_editable_span then return end
   if self.readonly_default then
     -- See the decision phase above: restore from the pre-edit snapshot
     local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
-    self:_reject_edits({}, restore_cursor)
+    self:_revert_violation({}, restore_cursor)
     return
   end
 
@@ -2809,14 +2585,6 @@ function Morph:_handle_unclaimed_change(in_editable_span)
     local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
     if tag.curr_text ~= content then
       tag.curr_text = content
-      local line_count_now = vim.api.nvim_buf_line_count(self.bufnr)
-      local last_line = vim.api.nvim_buf_get_lines(
-        self.bufnr,
-        line_count_now - 1,
-        line_count_now,
-        false
-      )[1] or ''
-      tag.curr_span = { start = Pos00.new(0, 0), stop = Pos00.new(line_count_now - 1, #last_line) }
       local prev_textlock = self.textlock
       self.textlock = true
       Morph._fire_tag_on_change(tag, content)
@@ -2826,12 +2594,12 @@ function Morph:_handle_unclaimed_change(in_editable_span)
 end
 
 --- @private
---- Phase 4 of the guard, dispatch branch: fire the committed editable
---- regions' on_change handlers, innermost first, holding the textlock so
---- handler-triggered re-renders defer instead of mutating spans mid-loop,
---- then refresh the watcher's cursor sample.
---- @param editable morph.SpanMismatch[]
-function Morph:_fire_committed_changes(editable)
+--- Phase 4 of the guard, owned branch: each changed editable tag OWNS the
+--- edit, so fire its on_change handler with the new content -- innermost
+--- first, holding the textlock so handler-triggered re-renders defer instead
+--- of mutating spans mid-loop -- then refresh the watcher's cursor sample.
+--- @param editable morph.TagChange[]
+function Morph:_dispatch_owned_changes(editable)
   -- Sort innermost first
   sort_innermost_first(editable)
 
@@ -2852,11 +2620,9 @@ function Morph:_fire_committed_changes(editable)
   self.textlock = true
 
   for _, changed in ipairs(editable) do
-    if changed.commit then
-      local tag = self.text_content.curr.extmark_ids_to_tag[changed.extmark.id]
-      local event = tag and Morph._fire_tag_on_change(tag, changed.text)
-      if event and not event.bubble_up then break end
-    end
+    local tag = self.text_content.curr.extmark_ids_to_tag[changed.extmark.id]
+    local event = tag and Morph._fire_tag_on_change(tag, changed.text)
+    if event and not event.bubble_up then break end
   end
 
   self.textlock = prev_textlock
@@ -3320,7 +3086,6 @@ function Morph:_write_region_text(tag, text)
   -- semantics stay defined in exactly one place.
   Extmark.new(self.bufnr, self.ns, extmark.start, Pos00.new(end_row, end_col), { id = extmark.id })
   tag.curr_text = text
-  tag.curr_span = { start = extmark.start, stop = Pos00.new(end_row, end_col) }
 end
 
 --- @private

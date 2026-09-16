@@ -539,8 +539,8 @@ describe('on_change events', function()
       -- Count guard reverts: each one is a whole-tree re-render racing the
       -- user's typing. Instance-level wrap so the prototype method is
       -- untouched.
-      local orig = _G.m._reject_edits
-      _G.m._reject_edits = function(self, ...)
+      local orig = _G.m._revert_violation
+      _G.m._revert_violation = function(self, ...)
         _G.reverts = (_G.reverts or 0) + 1
         return orig(self, ...)
       end

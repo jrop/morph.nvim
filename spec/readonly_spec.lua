@@ -235,12 +235,12 @@ describe('readonly regions', function()
 
   -- Regression: fast typing batches SEVERAL keystrokes into one TextChanged
   -- window, and the guard once judged the whole window by the LAST event's
-  -- geometry. When an earlier keystroke had already committed (advancing the
-  -- snapshot span), the batched chars grew the live text past that snapshot,
-  -- so the last char read as escaping the hole, the locked ancestor's
-  -- mismatch looked unexplained, and the whole edit was reverted (models.dev
-  -- filter: type "glm-" fast, watch it flash back). Two phases reproduce the
-  -- field shape: 'f' gets its own window, then 'lm' arrives batched.
+  -- geometry. When an earlier keystroke had already moved the snapshot
+  -- forward, the batched chars grew the live text past that snapshot, so the
+  -- last char read as escaping the hole, the locked ancestor's mismatch
+  -- looked unexplained, and the whole edit was reverted (models.dev filter:
+  -- type "glm-" fast, watch it flash back). Two phases reproduce the field
+  -- shape: 'f' gets its own window, then 'lm' arrives batched.
   it('accepts batched multi-char typing into a hole under a locked ancestor', function()
     nv:exec_func(function()
       local util = require 'morph._test.util'
