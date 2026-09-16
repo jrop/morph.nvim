@@ -136,7 +136,14 @@
 --- @field attributes morph.TagAttributes
 --- @field children morph.Tree
 --- @field parent? morph.Tag Enclosing tag recorded at render time; the guard
----   walks it to ask "is this editable tag inside that readonly one?"
+---   walks it to ask "is this editable tag inside that readonly one?" The
+---   relation must be STRUCTURAL, not positional. Live bounds cannot answer
+---   it: a deleted line collapses EVERY tag's marks to the same point, so
+---   bounds-containment (vacuously true between any two zero-width spans)
+---   would let a destroyed editable sibling 'explain' a destroyed readonly
+---   tag and skip the revert (readonly_spec:114, dd of a locked line). The
+---   walk is also transitive by necessity: an edit inside a hole grows every
+---   ancestor that embeds it, and each must be explained separately.
 --- @field literal? boolean True on the implicit tag wrapping a bare literal
 --- @field private ctx? morph.Ctx<any, any>
 --- @field private curr_text? string
@@ -2362,7 +2369,6 @@ function Morph:_on_bytes_after_autocmd(
   -- `curr_text` is the entire change test. No spans, no frame arithmetic.
   local changed = self:_collect_changed(change_start, new_end)
   local editable, locked = changed.editable, changed.locked
-  local in_editable_span = changed.in_editable_span
 
   -- Phase 2 -- decide: a readonly tag whose content changed is a violation
   -- unless a changed editable tag sits INSIDE it (that descendant's edit
@@ -2394,16 +2400,52 @@ function Morph:_on_bytes_after_autocmd(
   -- change the app is about to be told about.
   if self.probe then self.probe:mirror(undotree(self.bufnr).seq_cur) end
 
-  -- Phase 4 -- dispatch: editable tags whose content changed OWN the edit --
-  -- fire their handlers so the app hears the new content. When none does,
-  -- the change is unowned: tolerate it (an app-owned write inside editable
-  -- territory) or classify it (outside the tree: locked apps revert, classic
-  -- apps route it to the whole-buffer handler).
-  if #editable == 0 then
-    self:_handle_unowned_change(in_editable_span)
+  -- Phase 4 -- dispatch. A changed editable tag OWNS the edit: fire each
+  -- owner's on_change so the app hears the new content, innermost first. The
+  -- textlock defers handler-triggered re-renders, so the tag<->extmark
+  -- correlation this loop walks cannot shift mid-iteration.
+  if #editable > 0 then
+    sort_innermost_first(editable)
+    local prev_textlock = self.textlock
+    self.textlock = true
+    for _, m in ipairs(editable) do
+      local tag = self.text_content.curr.extmark_ids_to_tag[m.extmark.id]
+      local event = tag and Morph._fire_tag_on_change(tag, m.text)
+      if event and not event.bubble_up then break end
+    end
+    self.textlock = prev_textlock
+    -- The accepted edit's own cursor movement was gated out of the snapshot
+    -- (it fired while a change was pending), so refresh it: the next revert
+    -- should restore to here, not before this batch.
+    if self.buf_watcher and vim.fn.bufwinid(self.bufnr) ~= -1 then
+      self.buf_watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
+    end
     return
   end
-  self:_dispatch_owned_changes(editable)
+
+  -- No editable tag owns the change. A leftover event from a batched
+  -- TextChanged window sits inside editable territory and is already covered
+  -- by the tree -- tolerate it (reverting would undo every keystroke after
+  -- the first in the batch). Anything else landed outside every rendered
+  -- span: locked apps revert it, since the tree is the whole document.
+  if changed.in_editable_span then return end
+  if self.readonly_default then
+    local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
+    self:_revert_violation({}, restore_cursor)
+    return
+  end
+
+  -- Classic apps have no locked tree to enforce: the whole buffer is the top
+  -- level tag's content, so hand the change to its on_change.
+  local top = self.text_content.curr.top_level_tag
+  if not (top and vim.is_callable(top.attributes.on_change)) then return end
+  local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
+  if top.curr_text == content then return end
+  top.curr_text = content
+  local prev_textlock = self.textlock
+  self.textlock = true
+  Morph._fire_tag_on_change(top, content)
+  self.textlock = prev_textlock
 end
 
 --- @private
@@ -2562,78 +2604,6 @@ function Morph._is_inside(inner, outer)
     tag = tag.parent
   end
   return false
-end
-
---- @private
---- Phase 4 of the guard, unowned branch: no editable tag's content changed,
---- so the edit belongs to no hole. It either landed outside every rendered
---- span or was already accounted for (the undo probe's writeback, an app's
---- own re-render); locked apps revert the former and tolerate the latter,
---- and classic apps route the former to the top-level tag's on_change.
---- @param in_editable_span boolean
-function Morph:_handle_unowned_change(in_editable_span)
-  if in_editable_span then return end
-  if self.readonly_default then
-    -- See the decision phase above: restore from the pre-edit snapshot
-    local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
-    self:_revert_violation({}, restore_cursor)
-    return
-  end
-
-  local tag = self.text_content.curr.top_level_tag
-  if tag and vim.is_callable(tag.attributes.on_change) then
-    local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
-    if tag.curr_text ~= content then
-      tag.curr_text = content
-      local prev_textlock = self.textlock
-      self.textlock = true
-      Morph._fire_tag_on_change(tag, content)
-      self.textlock = prev_textlock
-    end
-  end
-end
-
---- @private
---- Phase 4 of the guard, owned branch: each changed editable tag OWNS the
---- edit, so fire its on_change handler with the new content -- innermost
---- first, holding the textlock so handler-triggered re-renders defer instead
---- of mutating spans mid-loop -- then refresh the watcher's cursor sample.
---- @param editable morph.TagChange[]
-function Morph:_dispatch_owned_changes(editable)
-  -- Sort innermost first
-  sort_innermost_first(editable)
-
-  -- Fire on_change handlers with bubbling.
-  -- NOTE: Sometimes we can lose the correlation of tag <=> extmark. Don't we
-  -- track all extmarks/tags in our bookkeeping? Yes: yes we do. However, we
-  -- operate on the assumption that the buffer could have changed outside of
-  -- our (Morph's) control. In fact, this does frequently happen. It can even
-  -- happen in this block because as we iterate through the list, calling
-  -- on_change, the on_change handler can update state => cause a re-render.
-  -- This is why we set the textlock, which Ctx:update checks to see if it can
-  -- apply the update immediately, or if it needs to vim.schedule(...) it. By
-  -- setting the text lock, we make sure we can iterate through the list,
-  -- maintaining whatever tag <=> extmark correlations exist at the beginning
-  -- of this loop, and we can maintain that all the correct handlers are
-  -- called (at least, the ones we CAN guarantee).
-  local prev_textlock = self.textlock
-  self.textlock = true
-
-  for _, changed in ipairs(editable) do
-    local tag = self.text_content.curr.extmark_ids_to_tag[changed.extmark.id]
-    local event = tag and Morph._fire_tag_on_change(tag, changed.text)
-    if event and not event.bubble_up then break end
-  end
-
-  self.textlock = prev_textlock
-
-  -- The accepted edits' own cursor movements were gated out of the snapshot
-  -- (they fired while a change was pending), so refresh it with the settled
-  -- position: the next violation should restore to here, not before this
-  -- batch.
-  if self.buf_watcher and vim.fn.bufwinid(self.bufnr) ~= -1 then
-    self.buf_watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
-  end
 end
 
 --------------------------------------------------------------------------------

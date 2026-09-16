@@ -162,3 +162,19 @@ the child-nvim mode since it exercises the real autocmd path end to end.
 - Initialize state in `ctx.phase == 'mount'` condition
 - Use `ctx:update(new_state)` to trigger re-renders (`ctx:refresh()` is short-hand for `ctx:update(ctx.state)`)
 - Return arrays/tables of elements, not strings with concatenation
+
+### ASCII/Index Diagrams
+- When a comment or doc needs to show a sample line alongside the indices of
+  its characters, "diagram" it with three stacked lines: the text, then the
+  tens digit of each character's index, then the ones digit. An example of
+  this is a 20-character sample whose columns run 0-19:
+
+  ```text
+  The quick brown fox 
+  00000000001111111111
+  01234567890123456789
+  ```
+
+  The tens line stays `0` across the first ten columns and then turns to `1`;
+  the ones line cycles `0` through `9`. Pad the text line with spaces so every
+  digit sits directly under the character it indexes.
