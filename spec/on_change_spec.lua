@@ -540,9 +540,9 @@ describe('on_change events', function()
       -- user's typing. Instance-level wrap so the prototype method is
       -- untouched.
       local orig = _G.m._revert_violation
-      _G.m._revert_violation = function(self, ...)
+      _G.m._revert_violation = function(...)
         _G.reverts = (_G.reverts or 0) + 1
-        return orig(self, ...)
+        return orig(...)
       end
       util.cursor_to_extmark_start(_G.m, 'filter')
       return nil

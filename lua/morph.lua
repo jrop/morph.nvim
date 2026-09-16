@@ -2263,7 +2263,14 @@ function Morph:_ensure_buf_watcher()
 
   self.buf_watcher = create_buf_watcher(
     self.bufnr,
-    function(...) self:_on_bytes_after_autocmd(...) end,
+    -- nvim's on_bytes argument order is (…, start_row, start_col, byte_offset,
+    -- old_end_row, old_end_col, old_end_len, new_end_row, new_end_col,
+    -- new_end_len). The content model only ever reasons from the change's
+    -- START and its POST-change END, so name exactly those here and give the
+    -- handler a four-argument signature instead of threading nvim's twelve.
+    function(_, _, _, start_row0, start_col0, _, _, _, _, new_end_row, new_end_col)
+      self:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row, new_end_col)
+    end,
     function() return self.changing end
   )
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
@@ -2291,14 +2298,17 @@ end
 --- mark-adjustment), the normal render pipeline rebuilds every span from
 --- scratch. Runs on a scheduler tick so it never mutates the buffer
 --- mid-handler.
---- @param violated morph.Extmark[] Spans to flash (pre-render geometry); may be
----   empty when the edit landed outside every span and nothing can be flashed
---- @param restore_cursor? integer[] Cursor (win_get_cursor format) to restore
----   after the revert: where the reverted edit found the cursor.
-function Morph:_revert_violation(violated, restore_cursor)
-  for _, extmark in ipairs(violated) do
-    self:_flash_readonly(extmark.start, extmark.stop)
+--- @param violated morph.TagChange[] Changed readonly tags whose extmarks get
+---   flashed; empty when the edit landed outside every span and nothing can be
+---   flashed.
+function Morph:_revert_violation(violated)
+  for _, m in ipairs(violated) do
+    self:_flash_readonly(m.extmark.start, m.extmark.stop)
   end
+  -- Restore the cursor to the pre-edit snapshot: by handler time nvim has
+  -- already adjusted (and often clamped) it, so the live position cannot be
+  -- trusted.
+  local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
   vim.schedule(function()
     if self.reconciler then
       self.reconciler:schedule_rerender()
@@ -2334,89 +2344,58 @@ end
 --- editable descendant explains reverts the whole tree), accept (every
 --- changed tag's expectation moves to its new content), then dispatch the
 --- owned edits to their on_change handlers.
-function Morph:_on_bytes_after_autocmd(
-  _,
-  _,
-  _,
-  start_row0,
-  start_col0,
-  _, -- byte offset of the change from buffer start
-  _, -- old end row offset (unused: the content model never reasons in the
-  -- pre-change frame)
-  _, -- old end col offset (unused, same reason)
-  _, -- old end byte length
-  new_end_row_off,
-  new_end_col_off,
-  _ -- new end byte length
-)
-  -- Ignore changes we're making ourselves during render
+function Morph:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row_off, new_end_col_off)
+  -- Belt-and-suspenders: the watcher already drops morph's own writes at
+  -- capture, but a re-entrant call during a render must never reach the guard.
   if self.changing then return end
 
-  -- The change's start and post-change end. Per :h nvim_buf_attach
-  -- on_bytes, a column offset is relative to start_col0 when the change
-  -- stays on one line (the matching row offset is 0) and is the ABSOLUTE
-  -- column in the end row otherwise. change_start begins the guard's zone
-  -- query; new_end ends it and bounds the collapse recovery's read.
+  -- The change's start and post-change end. Per :h nvim_buf_attach on_bytes, a
+  -- column offset is relative to start_col0 on a single-line change (row
+  -- offset 0) and absolute in the end row otherwise.
   local change_start = Pos00.new(start_row0, start_col0)
   local new_end = Pos00.new(
     start_row0 + new_end_row_off,
     new_end_row_off == 0 and start_col0 + new_end_col_off or new_end_col_off
   )
 
-  -- Phase 1 -- collect: which tags' LIVE content differs from the tree's
-  -- expectation? A zone query around [change_start, new_end] returns every
-  -- extmark nudged by this change; reading its live text and comparing to
-  -- `curr_text` is the entire change test. No spans, no frame arithmetic.
+  -- Which tags' live content changed? (see _collect_changed for the test)
   local changed = self:_collect_changed(change_start, new_end)
   local editable, locked = changed.editable, changed.locked
 
-  -- Phase 2 -- decide: a readonly tag whose content changed is a violation
-  -- unless a changed editable tag sits INSIDE it (that descendant's edit
-  -- explains the ancestor's growth). Content and nesting, never position.
+  -- A changed readonly tag with no changed editable descendant is a
+  -- violation: the edit touched locked text and no hole's edit explains it.
   if self:_readonly_violated(editable, locked) then
-    -- Flash and restore where the reverted edit found the cursor: by handler
-    -- time nvim has already adjusted (and often clamped) it, so the live
-    -- position cannot be trusted.
-    local violated = {} --- @type morph.Extmark[]
-    for _, m in ipairs(locked) do
-      table.insert(violated, m.extmark)
-    end
-    local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
-    self:_revert_violation(violated, restore_cursor)
+    self:_revert_violation(locked)
     return
   end
 
-  -- Phase 3 -- accept: every changed tag's expectation moves to its live
-  -- content -- editable ones so dispatch announces the new text, locked ones
-  -- so the next window does not re-read them as fresh violations.
+  -- Move every changed tag's expectation to its live content -- editable so
+  -- dispatch announces the new text, locked so the next window does not
+  -- re-read them as fresh violations.
   for _, list in ipairs { editable, locked } do
     for _, m in ipairs(list) do
       m.tag.curr_text = m.text
     end
   end
 
-  -- Mirror the accepted edit into the undo probe, so probe entries track main
-  -- entries. Runs before on_change fires: the probe then reflects the exact
-  -- change the app is about to be told about.
+  -- Keep probe entries in step with main entries, before on_change fires.
   if self.probe then self.probe:mirror(undotree(self.bufnr).seq_cur) end
 
-  -- Phase 4 -- dispatch. A changed editable tag OWNS the edit: fire each
-  -- owner's on_change so the app hears the new content, innermost first. The
-  -- textlock defers handler-triggered re-renders, so the tag<->extmark
-  -- correlation this loop walks cannot shift mid-iteration.
+  -- Dispatch: a changed editable tag OWNS the edit, so fire its on_change
+  -- innermost first. The textlock defers handler-triggered re-renders; the
+  -- collector's captured tag stays the right target even if an earlier
+  -- handler updated app state.
   if #editable > 0 then
     sort_innermost_first(editable)
     local prev_textlock = self.textlock
     self.textlock = true
     for _, m in ipairs(editable) do
-      local tag = self.text_content.curr.extmark_ids_to_tag[m.extmark.id]
-      local event = tag and Morph._fire_tag_on_change(tag, m.text)
+      local event = Morph._fire_tag_on_change(m.tag, m.text)
       if event and not event.bubble_up then break end
     end
     self.textlock = prev_textlock
-    -- The accepted edit's own cursor movement was gated out of the snapshot
-    -- (it fired while a change was pending), so refresh it: the next revert
-    -- should restore to here, not before this batch.
+    -- The accepted edit's cursor movement was gated out of the snapshot, so
+    -- refresh it: the next revert restores here, not before this batch.
     if self.buf_watcher and vim.fn.bufwinid(self.bufnr) ~= -1 then
       self.buf_watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
     end
@@ -2427,16 +2406,15 @@ function Morph:_on_bytes_after_autocmd(
   -- TextChanged window sits inside editable territory and is already covered
   -- by the tree -- tolerate it (reverting would undo every keystroke after
   -- the first in the batch). Anything else landed outside every rendered
-  -- span: locked apps revert it, since the tree is the whole document.
+  -- span, and locked apps revert that: the tree is the whole document.
   if changed.in_editable_span then return end
   if self.readonly_default then
-    local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
-    self:_revert_violation({}, restore_cursor)
+    self:_revert_violation {}
     return
   end
 
-  -- Classic apps have no locked tree to enforce: the whole buffer is the top
-  -- level tag's content, so hand the change to its on_change.
+  -- Classic apps have no locked tree to enforce: the whole buffer is the
+  -- top-level tag's content, so hand the change to its on_change.
   local top = self.text_content.curr.top_level_tag
   if not (top and vim.is_callable(top.attributes.on_change)) then return end
   local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
