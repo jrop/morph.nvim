@@ -196,17 +196,17 @@ local function resolve_readonly(tag, inherited)
 end
 
 --- Determine the type of a tree node.
---- @param node morph.Tree
+--- @param tree morph.Tree
 --- @return 'nil'|'boolean'|'string'|'number'|'array'|'tag'|'component'
-local function tree_type(node)
-  if node == nil or node == vim.NIL then return 'nil' end
-  if type(node) == 'boolean' then return 'boolean' end
-  if type(node) == 'string' then return 'string' end
-  if type(node) == 'number' then return 'number' end
-  if type(node) == 'function' then
+local function tree_kind(tree)
+  if tree == nil or tree == vim.NIL then return 'nil' end
+  if type(tree) == 'boolean' then return 'boolean' end
+  if type(tree) == 'string' then return 'string' end
+  if type(tree) == 'number' then return 'number' end
+  if type(tree) == 'function' then
     -- getinfo returns nil when the function has no debug info; degrade to a
     -- placeholder name rather than crashing inside the error builder.
-    local info = debug.getinfo(node, 'n')
+    local info = debug.getinfo(tree, 'n')
     local name = (info and info.name) or '<anonymous>'
     error(
       'morph.nvim: raw component function "'
@@ -217,38 +217,14 @@ local function tree_type(node)
         .. ', ...)'
     )
   end
-  if type(node) == 'table' then
-    if node.kind == 'tag' then
-      return vim.is_callable(node.name) and 'component' or 'tag'
+  if type(tree) == 'table' then
+    if tree.kind == 'tag' then
+      return vim.is_callable(tree.name) and 'component' or 'tag'
     else
       return 'array'
     end
   end
-  error('unknown tree node type: ' .. type(node))
-end
-
---- Compute an identity key for a node, used to match old/new nodes during reconciliation.
---- Includes the node type, component function (if any), and explicit key attribute.
---- For primitive types without explicit keys, uses index to distinguish positions.
---- @param node morph.Node
---- @param index integer fallback key if no explicit key
---- @return string
-local function tree_identity_key(node, index)
-  local t = tree_type(node)
-  if t == 'nil' or t == 'boolean' then
-    return t .. '-' .. tostring(index)
-  elseif t == 'string' or t == 'number' then
-    return t .. '-' .. tostring(index)
-  elseif t == 'array' then
-    return 'array-' .. tostring(index)
-  elseif t == 'tag' then
-    local tag = node --[[@as morph.Tag]]
-    return 'tag-' .. tag.name .. '-' .. tostring(tag.attributes.key or index)
-  elseif t == 'component' then
-    local tag = node --[[@as morph.Tag]]
-    return 'component-' .. tostring(tag.name) .. '-' .. tostring(tag.attributes.key or index)
-  end
-  error 'unreachable'
+  error('unknown tree node type: ' .. type(tree))
 end
 
 --------------------------------------------------------------------------------
@@ -853,7 +829,7 @@ end
 --- Unmount a tree, calling unmount lifecycle on all components (depth-first).
 --- @param old_tree morph.Tree
 function Reconciler:_unmount_tree(old_tree)
-  local node_type = tree_type(old_tree)
+  local node_type = tree_kind(old_tree)
 
   if node_type == 'array' then
     local arr = old_tree --[[@as morph.Node[] ]]
@@ -896,8 +872,8 @@ end
 --- @param new_tree morph.Tree
 --- @return morph.Tree
 function Reconciler:reconcile(old_tree, new_tree)
-  local old_type = tree_type(old_tree)
-  local new_type = tree_type(new_tree)
+  local old_type = tree_kind(old_tree)
+  local new_type = tree_kind(new_tree)
 
   -- If type changed, unmount old tree first
   if old_type ~= new_type then self:_unmount_tree(old_tree) end
@@ -940,6 +916,30 @@ end
 --- @param new_nodes morph.Node[]?
 --- @return morph.Node[]
 function Reconciler:reconcile_array(old_nodes, new_nodes)
+  --- Compute an identity key for a node, used to match old/new nodes during reconciliation.
+  --- Includes the node type, component function (if any), and explicit key attribute.
+  --- For primitive types without explicit keys, uses index to distinguish positions.
+  --- @param node morph.Node
+  --- @param index integer fallback key if no explicit key
+  --- @return string
+  local function node_kind_key(node, index)
+    local t = tree_kind(node)
+    if t == 'nil' or t == 'boolean' then
+      return t .. '-' .. tostring(index)
+    elseif t == 'string' or t == 'number' then
+      return t .. '-' .. tostring(index)
+    elseif t == 'array' then
+      return 'array-' .. tostring(index)
+    elseif t == 'tag' then
+      local tag = node --[[@as morph.Tag]]
+      return 'tag-' .. tag.name .. '-' .. tostring(tag.attributes.key or index)
+    elseif t == 'component' then
+      local tag = node --[[@as morph.Tag]]
+      return 'component-' .. tostring(tag.name) .. '-' .. tostring(tag.attributes.key or index)
+    end
+    error 'unreachable'
+  end
+
   --- @type morph.Node[]
   old_nodes = old_nodes or {}
   --- @type morph.Node[]
@@ -951,7 +951,7 @@ function Reconciler:reconcile_array(old_nodes, new_nodes)
   for i = 1, table.maxn(old_nodes) do
     local node = old_nodes[i]
     if node ~= nil then
-      local key = tree_identity_key(node --[[@as morph.Node]], i)
+      local key = node_kind_key(node --[[@as morph.Node]], i)
       old_by_key[key] = node
     end
   end
@@ -961,7 +961,7 @@ function Reconciler:reconcile_array(old_nodes, new_nodes)
   for i = 1, table.maxn(new_nodes) do
     local new_node = new_nodes[i]
     if new_node ~= nil then
-      local key = tree_identity_key(new_node --[[@as morph.Node]], i)
+      local key = node_kind_key(new_node --[[@as morph.Node]], i)
       local old_node = old_by_key[key]
 
       if old_node then
@@ -991,7 +991,7 @@ function Reconciler:reconcile_component(old_tree, new_tag)
 
   -- Try to reuse existing context from old tree
   local ctx
-  local old_type = tree_type(old_tree)
+  local old_type = tree_kind(old_tree)
   if old_type == 'component' then
     local old_tag = old_tree --[[@as morph.Tag]]
     -- Only reuse context when the component function is the same
@@ -1181,22 +1181,26 @@ end
 -- matches components by identity key instead, so the reconciler does not
 -- need it.
 
---- @alias morph.LevenshteinChange<T> { kind: 'add', item: T, index: integer } | { kind: 'delete', item: T, index: integer } | { kind: 'change', from: T, to: T, index: integer }
+--- @alias morph.LevenshteinChangeAdd<T> { kind: 'add', item: T, index: integer }
+--- @alias morph.LevenshteinChangeDelete<T> { kind: 'delete', item: T, index: integer }
+--- @alias morph.LevenshteinChangeChange<T> { kind: 'change', from: T, to: T, index: integer }
+--- @alias morph.LevenshteinChange<T> morph.LevenshteinChangeAdd<T> | morph.LevenshteinChangeDelete<T> | morph.LevenshteinChangeChange<T>
 
---- @class morph.LevenshteinOpts
---- @field from any[]
---- @field to any[]
+--- @class morph.LevenshteinOpts<T>
+--- @field from T[]
+--- @field to T[]
 --- @field are_any_equal? boolean
---- @field cost? morph.LevenshteinCost
+--- @field cost? morph.LevenshteinCost<T>
 
---- @class morph.LevenshteinCost
+--- @class morph.LevenshteinCost<T>
 --- @field of_add? integer
 --- @field of_delete? integer
---- @field of_change? fun(a: any, b: any, ai: integer, bi: integer): integer
+--- @field of_change? fun(a: T, b: T, ai: integer, bi: integer): integer
 
 --- Compute the minimal edit sequence to transform `from` into `to`.
---- @param opts morph.LevenshteinOpts
---- @return morph.LevenshteinChange<any>[]
+--- @generic T
+--- @param opts morph.LevenshteinOpts<T>
+--- @return morph.LevenshteinChange<T>[]
 local function levenshtein(opts)
   local are_any_equal = opts.are_any_equal == nil and true or opts.are_any_equal
   local cost_of_add = opts.cost and opts.cost.of_add or 1
@@ -1347,7 +1351,7 @@ function Morph.markup_to_lines(opts)
   --- @param node morph.Tree
   --- @param parent_readonly? boolean
   local function visit(node, parent_readonly)
-    local node_type = tree_type(node)
+    local node_type = tree_kind(node)
 
     if node_type == 'string' then
       -- A string with no enclosing tag (top-level in the render tree, or
@@ -1532,10 +1536,13 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
     local line0 = prefix + change.index - 1
 
     if change.kind == 'add' then
+      --- @cast change morph.LevenshteinChangeAdd<string>
       vim.api.nvim_buf_set_lines(bufnr, line0, line0, true, { change.item })
     elseif change.kind == 'delete' then
+      --- @cast change morph.LevenshteinChangeDelete<string>
       vim.api.nvim_buf_set_lines(bufnr, line0, line0 + 1, true, {})
     elseif change.kind == 'change' then
+      --- @cast change morph.LevenshteinChangeChange<string>
       -- For changed lines, do character-level diffing for minimal edits
       local char_changes = levenshtein {
         --- @diagnostic disable-next-line: param-type-mismatch
@@ -1547,10 +1554,13 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
       for _, char_change in ipairs(char_changes) do
         local col0 = char_change.index - 1
         if char_change.kind == 'add' then
+          --- @cast char_change morph.LevenshteinChangeAdd<string>
           vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0, { char_change.item })
         elseif char_change.kind == 'delete' then
+          --- @cast char_change morph.LevenshteinChangeDelete<string>
           vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0 + 1, {})
         elseif char_change.kind == 'change' then
+          --- @cast char_change morph.LevenshteinChangeChange<string>
           vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0 + 1, { char_change.to })
         end
       end
@@ -2364,7 +2374,7 @@ function Morph:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row_off, 
 
   -- A changed readonly tag with no changed editable descendant is a
   -- violation: the edit touched locked text and no hole's edit explains it.
-  if self:_readonly_violated(editable, locked) then
+  if self._readonly_violated(editable, locked) then
     self:_revert_violation(locked)
     return
   end
@@ -2484,8 +2494,8 @@ function Morph:_collect_changed(change_start, new_end)
     local id, row0, col0, details = ext[1], ext[2], ext[3], ext[4]
     local tag = self.text_content.curr.extmark_ids_to_tag[id]
     if tag then
-      local end_row = details.end_row or row0
-      local end_col = details.end_col or col0
+      local end_row = (details and details.end_row) or row0
+      local end_col = (details and details.end_col) or col0
 
       -- change_start sits inside this editable live span (boundaries
       -- included)? The no-change fallback uses this to tell an edit inside an
@@ -2555,7 +2565,7 @@ end
 --- @param editable morph.TagChange[]
 --- @param locked morph.TagChange[]
 --- @return boolean
-function Morph:_readonly_violated(editable, locked)
+function Morph._readonly_violated(editable, locked)
   for _, suspect in ipairs(locked) do
     local explained = false
     for _, hole in ipairs(editable) do

@@ -9,7 +9,7 @@ M.assert = assert --[[@as function]]
 local Morph = require 'morph'
 
 --- @diagnostic disable-next-line: undefined-field
-local levenshtein = Morph._levenshtein --- @type fun(opts: morph.LevenshteinOpts): morph.LevenshteinChange<any>[]
+local levenshtein = Morph._levenshtein --- @type fun(opts: morph.LevenshteinOpts<string>): morph.LevenshteinChange<any>[]
 
 --- Build a readable unified line diff of two line lists using Morph's
 --- Levenshtein diff. `+` = add (want line), `-` = delete (got line); a change
