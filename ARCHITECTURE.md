@@ -43,7 +43,7 @@ The single file is organized into logical sections:
 | Section               | Responsibility                                                  |
 | --------------------- | --------------------------------------------------------------- |
 | Type Definitions      | EmmyLua annotations for Tag, Element, Node, Tree, Component     |
-| Tree Utilities        | `tree_type()` and `tree_identity_key()` for node classification |
+| Tree Utilities        | `tree_kind()` and the reconciler's identity-key helper for node classification |
 | Levenshtein Algorithm | Generic diff algorithm for minimal edit sequences               |
 | Textlock Detection    | Detects when buffer modifications are blocked                   |
 | Buffer Watcher        | Batches `on_bytes` events via TextChanged autocmd               |
@@ -156,7 +156,7 @@ This is where the **side-by-side correlated visitor** pattern is most visible. I
 **Step 1: Compute identity keys for each node**
 
 ```lua
--- tree_identity_key() combines:
+-- the identity-key helper combines:
 -- - node type ('tag', 'component', 'string', etc.)
 -- - for components: the function reference
 -- - explicit `key` attribute (or array index as fallback)
