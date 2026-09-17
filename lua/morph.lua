@@ -331,6 +331,65 @@ local function is_buffer_api_ready(bufnr)
   return true
 end
 
+--- Run `on_ready` once the buffer can accept a render, or fail loudly.
+---
+--- `is_buffer_api_ready` can be false for two reasons, and they need different
+--- handling because only one of them self-corrects. An example of the first is
+--- a mount issued from an init.lua: before VimEnter the buffer is mid-setup,
+--- and that clears the moment VimEnter fires, so the wait rides the event
+--- instead of polling (a poll would spin for the whole startup window). An
+--- example of the second is a named buffer that was unloaded: `bufloaded` stays
+--- 0 no matter how long you wait, so polling it is exactly what let a
+--- permanently-unready buffer re-schedule mount forever. That case is instead
+--- resolved once by loading the buffer, which is what mounting into it means.
+--- If the predicate is still false after both, this errors rather than looping:
+--- the two bounded outcomes (ready, or a single loud failure) replace an
+--- unbounded retry chain.
+--- @param bufnr integer
+--- @param on_ready fun()
+local function when_buffer_ready(bufnr, on_ready)
+  -- A buffer can be deleted between the wait being registered and the wait
+  -- resolving (e.g. a pre-VimEnter mount whose buffer is wiped first), and
+  -- every predicate below would error on it. Fail with a message that names
+  -- the real cause instead of a raw "Invalid buffer id".
+  if not vim.api.nvim_buf_is_valid(bufnr) then
+    error('morph.nvim: buffer ' .. tostring(bufnr) .. ' no longer exists', 0)
+  end
+
+  if is_buffer_api_ready(bufnr) then
+    on_ready()
+    return
+  end
+
+  -- Startup: the predicate flips on its own at VimEnter, so wait for the event.
+  if vim.v.vim_did_enter == 0 then
+    vim.api.nvim_create_autocmd('VimEnter', {
+      once = true,
+      callback = function() when_buffer_ready(bufnr, on_ready) end,
+    })
+    return
+  end
+
+  -- Past startup the only remaining blocker is the named-but-unloaded buffer,
+  -- which never clears by itself; loading it once is the caller's intent.
+  if vim.api.nvim_buf_get_name(bufnr) ~= '' and vim.fn.bufloaded(bufnr) == 0 then
+    pcall(vim.fn.bufload, bufnr)
+  end
+
+  if is_buffer_api_ready(bufnr) then
+    on_ready()
+    return
+  end
+
+  error(
+    'morph.nvim: buffer '
+      .. tostring(bufnr)
+      .. ' is not ready to render into; '
+      .. 'load the buffer or wrap the call in vim.schedule()',
+    0
+  )
+end
+
 --------------------------------------------------------------------------------
 -- Pos00: Zero-Based Buffer Positions
 --------------------------------------------------------------------------------
@@ -1711,14 +1770,10 @@ function Morph:render(tree)
   -- Guard: buffer may have been deleted while render was scheduled
   if not vim.api.nvim_buf_is_valid(self.bufnr) then return end
 
-  -- Guard: buffer API may not be ready during startup (before VimEnter)
+  -- Guard: buffer API may not be ready during startup (before VimEnter). See
+  -- when_buffer_ready: event-driven wait or a one-time load, never a poll.
   if not is_buffer_api_ready(self.bufnr) then
-    vim.notify(
-      'morph.nvim: Buffer not yet loaded, deferring render. '
-        .. 'Consider wrapping render in vim.schedule() for cleaner startup.',
-      vim.log.levels.WARN
-    )
-    vim.schedule(function() self:render(tree) end)
+    when_buffer_ready(self.bufnr, function() self:render(tree) end)
     return
   end
 
@@ -1926,14 +1981,11 @@ function Morph:mount(tree, opts)
     error('Morph:mount() can only be called once per buffer', 0)
   end
 
-  -- Guard: buffer API may not be ready during startup
+  -- Guard: buffer API may not be ready during startup. The wait is event-driven
+  -- (VimEnter) or a one-time load, never an unbounded poll; see
+  -- when_buffer_ready. Re-entering mount preserves opts.
   if not is_buffer_api_ready(self.bufnr) then
-    vim.notify(
-      'morph.nvim: Buffer not yet loaded, deferring mount. '
-        .. 'Consider wrapping mount in vim.schedule() for cleaner startup.',
-      vim.log.levels.WARN
-    )
-    vim.schedule(function() self:mount(tree) end)
+    when_buffer_ready(self.bufnr, function() self:mount(tree, opts) end)
     return
   end
 
