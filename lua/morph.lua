@@ -2319,15 +2319,23 @@ function Morph:_revert_violation(violated)
   -- already adjusted (and often clamped) it, so the live position cannot be
   -- trusted.
   local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
+  local function restore()
+    if not restore_cursor then return end
+    local win = vim.fn.bufwinid(self.bufnr)
+    if win ~= -1 then pcall(vim.api.nvim_win_set_cursor, win, restore_cursor) end
+  end
   vim.schedule(function()
+    -- The restore must run AFTER the revert render, which may be deferred (the
+    -- production default debounce is 16ms). A deferred render re-inserts the
+    -- deleted text ABOVE the cursor, so restoring first leaves the cursor one
+    -- row below the pre-edit position. Queueing restore as an after-render
+    -- callback lands it on whichever render the reconciler ends up running.
     if self.reconciler then
+      self.reconciler:_schedule_after_render(restore)
       self.reconciler:schedule_rerender()
     elseif self.last_tree then
       self:render(self.last_tree)
-    end
-    if restore_cursor then
-      local win = vim.fn.bufwinid(self.bufnr)
-      if win ~= -1 then pcall(vim.api.nvim_win_set_cursor, win, restore_cursor) end
+      restore()
     end
   end)
 end

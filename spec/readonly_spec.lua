@@ -509,6 +509,46 @@ describe('readonly regions', function()
     assert.are.same({ 1, 3 }, result.cursor)
   end)
 
+  -- A revert re-renders the tree, and that render can be deferred (the
+  -- production default debounce is 16ms). The cursor restore must therefore be
+  -- applied AFTER the deferred render, because the render re-inserts the
+  -- deleted line ABOVE the cursor and shifts it down one row. Restoring
+  -- before the render (the bug) left the cursor one line below where the
+  -- rejected `dd` found it.
+  it('restores the cursor after a reverted line delete under a debounced render', function()
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
+      _G.m:mount(
+        h('text', { id = 'root', readonly = true }, {
+          h('text', { id = 'ro', readonly = true }, 'LOCKED\n'),
+          h('text', {
+            id = 'hole',
+            readonly = false,
+            on_change = util.create_event_recorder 'hole',
+          }, 'editable\n'),
+          h('text', { id = 'ro2', readonly = true }, 'more'),
+        }),
+        { debounce_ms = 16 }
+      )
+      util.drain(50)
+      vim.api.nvim_win_set_cursor(0, { 1, 3 }) -- inside the locked span
+    end)
+
+    nv:input 'dd'
+    -- Wait past the debounce window so the deferred revert render lands.
+    nv:request('nvim_exec_lua', 'vim.wait(select(1, ...))', { 300 })
+    local result = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      util.drain(50)
+      return { text = util.text(0), cursor = vim.api.nvim_win_get_cursor(0) }
+    end)
+    assert.are.same('LOCKED\neditable\nmore', result.text)
+    assert.are.same({ 1, 3 }, result.cursor)
+  end)
+
   -- A line delete clamps the cursor column to the next line's length; the
   -- restore must return the PRE-edit column (from the pre-edit snapshot),
   -- not nvim's clamped one.
