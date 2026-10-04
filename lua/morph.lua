@@ -1524,12 +1524,202 @@ end
 function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(opts), '\n') end
 
 --------------------------------------------------------------------------------
--- Writing the Difference
+-- Reading the Difference / Writing the Difference
 --------------------------------------------------------------------------------
--- patch_lines applies old_lines -> new_lines with minimal buffer edits:
--- a whole-buffer replace when a large buffer changed too much, otherwise a
--- trimmed-context Levenshtein on lines and characters. Why here: render
--- calls it after every flatten, which keeps the write path in one chapter.
+-- Two line-array diffs, one chapter because they are the same trick in both
+-- directions, on the same engine (the Interlude's levenshtein). diff_to_band
+-- reads where the buffer changed: the guard's dirty band is the content diff
+-- of the render's line snapshot against the live lines -- settled states,
+-- final coordinates, no event frames. patch_lines writes a computed
+-- difference: old_lines -> new_lines with minimal buffer edits (a
+-- whole-buffer replace when a large buffer changed too much, otherwise the
+-- trimmed-context Levenshtein on lines and characters). Why here: render
+-- calls patch_lines after every flatten, which keeps the write path in one
+-- chapter, and the guard diffs each user burst through diff_to_band beside
+-- it.
+
+--- Trim the common prefix/suffix lines from two line arrays: the changed
+--- region both diff consumers work on. patch_lines writes that region;
+--- diff_to_band reads it. The region is old[prefix+1..#old_lines-suffix]
+--- rewritten as new[prefix+1..#new_lines-suffix] (1-based, inclusive).
+--- @param old_lines string[]
+--- @param new_lines string[]
+--- @return integer prefix Common leading lines (the region's 0-based top row)
+--- @return integer suffix Common trailing lines
+local function trim_common_edges(old_lines, new_lines)
+  local n, m = #old_lines, #new_lines
+  local prefix = 0
+  while prefix < n and prefix < m and old_lines[prefix + 1] == new_lines[prefix + 1] do
+    prefix = prefix + 1
+  end
+  local suffix = 0
+  while
+    suffix < n - prefix
+    and suffix < m - prefix
+    and old_lines[n - suffix] == new_lines[m - suffix]
+  do
+    suffix = suffix + 1
+  end
+  return prefix, suffix
+end
+
+--- Diff two line arrays into the guard's dirty band. Both sides are settled
+--- content -- the render's line snapshot vs the live buffer lines -- so
+--- unlike on_bytes geometry no frame compensation applies: the rows ARE
+--- final coordinates. The engine is the house levenshtein, run on the
+--- trimmed middle at line granularity -- the exact alignment patch_lines
+--- writes with, here read back as geometry.
+---
+--- The band's edges are extmark semantics, not diff logic. The top is the
+--- region top, widened UP over the region's net removed lines: a tag
+--- spanning from above the junction owns its deleted tail, and its start
+--- mark sits on an UNCHANGED row -- nvim_buf_get_extmarks matches marks by
+--- their start positions, so only the widened band reaches it. The bottom
+--- is the junction -- the first unchanged row after the region, where a
+--- removed range's extmarks are parked -- and it is deliberately NOT
+--- clamped to the buffer: appends and end-of-buffer edits park marks one
+--- row PAST the last line, and the extmark query accepts the out-of-range
+--- end. When the region preserves the line count and rows follow it,
+--- nothing was removed and nothing parks past its content, so the bottom
+--- tightens to the region's last changed row.
+---
+--- Windows: one per maximal run of the script's line ops -- the DP's exact
+--- alignment decides where runs break (an aligned-equal pair between ops is
+--- the gap). Columns are trimmed from the run's first and last line pair --
+--- the collapsed-span witness reads its new content through the window that
+--- touches its collapse point (see _collect_changed_band). A run with no
+--- new rows (a pure delete) gets no window: its witness correctly reads
+--- empty at the junction.
+--- @param old_lines string[] The diff base (the render's line snapshot)
+--- @param new_lines string[] The live buffer lines
+--- @return integer? top0 nil when the arrays are identical
+--- @return integer? bottom0
+--- @return morph.ChangeWindow[]? windows
+function Morph.diff_to_band(old_lines, new_lines)
+  local n, m = #old_lines, #new_lines
+  local prefix, suffix = trim_common_edges(old_lines, new_lines)
+  local region_old, region_new = n - suffix - prefix, m - suffix - prefix
+  if region_old == 0 and region_new == 0 then return nil, nil, nil end
+
+  local removed = math.max(0, region_old - region_new)
+  local top0 = math.max(0, prefix - removed)
+  local bottom0 = m - suffix
+  if region_old == region_new and suffix > 0 then bottom0 = bottom0 - 1 end
+
+  local windows = {} --- @type morph.ChangeWindow[]
+  -- Past this size the DP costs milliseconds per burst. The band stays
+  -- exact -- its edges are region arithmetic and need no DP -- and only the
+  -- windows coarsen to one per region: the witness tolerates a wider read
+  -- (apps re-render on change), so correctness never depends on window
+  -- tightness.
+  if math.max(region_old, region_new) > 300 then
+    if region_new > 0 then
+      windows[1] = {
+        row0 = prefix,
+        col0 = 0,
+        end_row = m - suffix - 1,
+        end_col = #new_lines[m - suffix],
+      }
+    end
+    return top0, bottom0, windows
+  end
+
+  local trimmed_old, trimmed_new = {}, {}
+  for i = prefix + 1, n - suffix do
+    trimmed_old[#trimmed_old + 1] = old_lines[i]
+  end
+  for i = prefix + 1, m - suffix do
+    trimmed_new[#trimmed_new + 1] = new_lines[i]
+  end
+  local line_changes = levenshtein { from = trimmed_old, to = trimmed_new }
+
+  -- Walk the script in document order (the backtrack emits it end-first),
+  -- grouping ops into runs. The backtrack records each op's FROM anchor
+  -- (its `index`), so the aligned-equal pairs it skipped are visible as a
+  -- gap between the anchor and the replay position: each silent keep
+  -- advances both sides, and that gap is exactly what breaks runs -- the
+  -- DP's exact alignment deciding what the old pairing walk only guessed
+  -- at.
+  local from_pos, to_pos = 1, 1
+  -- The run's consumed row ranges, 1-based into the trimmed arrays: the
+  -- FROM side is the old rows it rewrote, the TO side the new rows it
+  -- produced (nil while the run has consumed nothing on that side).
+  --- @type { from_first: integer?, from_last: integer?, to_first: integer?, to_last: integer? }?
+  local run = nil
+  local function flush_run()
+    local r = run
+    if not r then return end
+    run = nil
+    if not r.to_first then return end -- a pure delete run: the witness reads empty
+    -- to_first/to_last are always set together (every TO-consuming op
+    -- writes both), so the to_first guard above covers to_last too; the
+    -- checker cannot see that.
+    local to_first, to_last =
+      r.to_first, --[[@as integer]]
+      r.to_last --[[@as integer]]
+    local first_old = r.from_first and trimmed_old[r.from_first] or nil
+    local last_old = r.from_last and trimmed_old[r.from_last] or nil
+    -- The run consumed TO rows to_first..to_last, all within the region, so
+    -- the lookups cannot miss (the region never extends past m - suffix).
+    local first_new = trimmed_new[to_first] --[[@as string]]
+    local last_new = trimmed_new[to_last] --[[@as string]]
+    local col0 = 0
+    if first_old then
+      local min_len = math.min(#first_old, #first_new)
+      while col0 < min_len and first_old:byte(col0 + 1) == first_new:byte(col0 + 1) do
+        col0 = col0 + 1
+      end
+    end
+    local end_col = #last_new
+    if last_old then
+      local min_len = math.min(#last_old, #last_new)
+      local trim = 0
+      while
+        trim < min_len - col0
+        and last_old:byte(#last_old - trim) == last_new:byte(#last_new - trim)
+      do
+        trim = trim + 1
+      end
+      end_col = end_col - trim
+    end
+    if end_col < col0 then end_col = col0 end
+    windows[#windows + 1] = {
+      row0 = prefix + to_first - 1,
+      col0 = col0,
+      end_row = prefix + to_last - 1,
+      end_col = end_col,
+    }
+  end
+
+  for i = #line_changes, 1, -1 do
+    local change = line_changes[i] --[[@as morph.LevenshteinChange<string>]]
+    local keeps = change.index - from_pos
+    if keeps > 0 or not run then flush_run() end
+    run = run or {}
+    if keeps > 0 then
+      -- The silent keeps: aligned-equal pairs, both sides advancing, none
+      -- of them an op.
+      from_pos, to_pos = from_pos + keeps, to_pos + keeps
+    end
+    if change.kind == 'delete' then
+      run.from_first = run.from_first or from_pos
+      run.from_last = from_pos
+      from_pos = from_pos + 1
+    elseif change.kind == 'add' then
+      run.to_first = run.to_first or to_pos
+      run.to_last = to_pos
+      to_pos = to_pos + 1
+    else
+      run.from_first = run.from_first or from_pos
+      run.from_last = from_pos
+      run.to_first = run.to_first or to_pos
+      run.to_last = to_pos
+      from_pos, to_pos = from_pos + 1, to_pos + 1
+    end
+  end
+  flush_run()
+  return top0, bottom0, windows
+end
 
 --- Apply minimal edits to transform buffer content from old_lines to new_lines.
 --- Uses a two-stage strategy:
@@ -1557,28 +1747,13 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
     end
   end
 
-  -- Stage 2 (O(n)): trim common prefix/suffix lines so Levenshtein
-  -- only sees the changed middle.  A single-line insertion deep in a
-  -- 1000-line list balloons Levenshtein's O(n^2) cost; most tree-view
-  -- edits are localised, so the trimmed input is orders of magnitude
-  -- smaller than the raw line count suggests.
-  local prefix = 0
-  while
-    prefix < #old_lines
-    and prefix < #new_lines
-    and old_lines[prefix + 1] == new_lines[prefix + 1]
-  do
-    prefix = prefix + 1
-  end
-
-  local suffix = 0
-  while
-    suffix < #old_lines - prefix
-    and suffix < #new_lines - prefix
-    and old_lines[#old_lines - suffix] == new_lines[#new_lines - suffix]
-  do
-    suffix = suffix + 1
-  end
+  -- Stage 2 (O(n)): trim common prefix/suffix lines (trim_common_edges, the
+  -- same cut the guard's diff_to_band reads through) so Levenshtein only
+  -- sees the changed middle.  A single-line insertion deep in a 1000-line
+  -- list balloons Levenshtein's O(n^2) cost; most tree-view edits are
+  -- localised, so the trimmed input is orders of magnitude smaller than the
+  -- raw line count suggests.
+  local prefix, suffix = trim_common_edges(old_lines, new_lines)
 
   local trimmed_old = {}
   for i = prefix + 1, #old_lines - suffix do
@@ -1716,6 +1891,10 @@ function Morph.new(bufnr, opts)
     changedtick = 0,
     changing = false,
     textlock = false,
+    -- The row range the last judged burst swept (test/debug introspection).
+    -- The band itself is the watcher's content diff (see diff_to_band); the
+    -- drain receives it ready-made.
+    _last_band = nil,
     probe = nil,
     _probe_cmdline_autocmd = nil,
     original_keymaps = {},
@@ -2189,19 +2368,33 @@ end
 --------------------------------------------------------------------------------
 -- The Buffer Watcher
 --------------------------------------------------------------------------------
--- nvim_buf_attach's on_bytes fires DURING a change, while the buffer is
--- inconsistent; the watcher queues those events and drains them when
--- TextChanged says the buffer is stable again, excluding morph's own render
--- writes. _ensure_buf_watcher is its Morph-side adapter. Why here: the
--- reader has now met render, so "morph is mid-render" is a phrase with
--- meaning.
+-- The watcher counts user edits as they stream through nvim_buf_attach's
+-- on_bytes (excluding morph's own render writes) and reports the burst when
+-- TextChanged says the buffer is stable again. Detection only: the drain
+-- never reads event coordinates and carries no geometry -- the consumer
+-- derives the dirty band by diffing its own line snapshot against the live
+-- lines (see diff_to_band): settled states, final coordinates, no event
+-- frames to compensate. _ensure_buf_watcher is its Morph-side adapter. Why
+-- here: the reader has now met render, so "morph is mid-render" is a
+-- phrase with meaning.
+
+--- @class morph.ChangeWindow One splice's replacement region: where the
+---   change's new text lives.
+--- @field row0 integer
+--- @field col0 integer
+--- @field end_row integer
+--- @field end_col integer
 
 --- @class morph.BufWatcher
---- @field user_bytes_queue unknown[][] User on_bytes events captured while
----   morph was NOT rendering, in arrival order, still unprocessed: genuine
----   user edits. Fast typing batches several events into one TextChanged
----   window; the guard drains them in order when the window closes, because
----   render writes must never be policed as if the user made them.
+--- @field pending_edits integer Count of user on_bytes events captured while
+---   morph was NOT rendering, still unprocessed: genuine user edits. Fast
+---   typing batches several events into one TextChanged window; the
+---   consumer judges the whole batch once, when the window closes, because
+---   render writes must never be policed as if the user made them. The
+---   events' coordinates are never read -- the burst's geometry comes from
+---   the content diff (see diff_to_band) -- so the count doubles as the
+---   change-in-flight flag (cursor movements inside a burst belong to the
+---   change, not to navigation).
 --- @field cursor_sample? integer[] Last settled cursor position (win_get_cursor
 ---   format): sampled on genuine navigation and on deliberate placements (an
 ---   app's post-render cursor positioning), never on movements caused by a
@@ -2210,12 +2403,19 @@ end
 --- @field cursor_moved_autocmd_id integer
 --- @field cleanup fun() Remove the watcher
 
---- Create a buffer watcher that calls `callback` after text changes.
+--- Create a buffer watcher that calls `callback` once for every burst of
+--- user edits -- the on_bytes events captured between TextChanged windows --
+--- after the buffer is stable again. The watcher owns change DETECTION
+--- only: the burst's geometry is the consumer's to derive (see diff_to_band)
+--- against the consumer's own baseline.
 --- @param bufnr integer
---- @param callback function Called with on_bytes args after TextChanged fires
 --- @param is_rendering fun(): boolean Whether morph is mid-render (its own writes)
+--- @param callback fun() Called once per closed user-edit burst, with no
+---   payload. A reported burst need not mean the content changed (a burst
+---   that typed and deleted within one window diffs to nothing); the
+---   consumer decides by diffing against its own baseline.
 --- @return morph.BufWatcher
-local function create_buf_watcher(bufnr, callback, is_rendering)
+local function create_buf_watcher(bufnr, is_rendering, callback)
   -- Guard: buffer API must be ready for nvim_buf_attach to work
   if not is_buffer_api_ready(bufnr) then
     error(
@@ -2225,17 +2425,20 @@ local function create_buf_watcher(bufnr, callback, is_rendering)
     )
   end
 
-  local watcher = { user_bytes_queue = {} }
+  local watcher = { pending_edits = 0 }
 
-  -- Capture on_bytes args but don't call callback yet. Only events captured
-  -- while morph is NOT rendering are queued as user edits: the guard polices
-  -- user edits, and running it on morph's own writes made every app
-  -- re-render (which rewrites the buffer after `changing` is already false)
-  -- look like an out-of-tree edit -- a spurious revert per keystroke.
+  -- Count on_bytes events but don't judge yet. Only events captured while
+  -- morph is NOT rendering count as user edits: the guard polices user
+  -- edits, and running it on morph's own writes made every app re-render
+  -- (which rewrites the buffer after `changing` is already false) look like
+  -- an out-of-tree edit -- a spurious revert per keystroke.
+  -- NOTE: this callback must NOT return true -- for Lua-attached
+  -- nvim_buf_listen callbacks a true return DETACHES the listener (nil
+  -- continues), the opposite of what the C API's Boolean suggests.
   local attach_ok = vim.api.nvim_buf_attach(bufnr, false, {
     on_bytes = function(...)
       if is_rendering() then return end
-      table.insert(watcher.user_bytes_queue, { ... })
+      watcher.pending_edits = watcher.pending_edits + 1
     end,
   })
 
@@ -2248,37 +2451,27 @@ local function create_buf_watcher(bufnr, callback, is_rendering)
     )
   end
 
-  -- Fire callback when TextChanged fires (buffer is now stable)
+  -- Report the closed burst to the consumer when TextChanged fires (buffer
+  -- is now stable)
   watcher.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
     { 'TextChanged', 'TextChangedI', 'TextChangedP' },
     {
       buffer = bufnr,
       callback = function()
-        local queue = watcher.user_bytes_queue
-        if #queue == 0 then
+        if watcher.pending_edits == 0 then
           -- Either no change happened, or the pending window held only
           -- morph's own render writes (the render already refreshed the
           -- snapshots it wrote); policing that would revert the app's
           -- legitimate re-render. Mixed windows (user edit and render writes
-          -- in one typeahead batch) still run, on the user event's geometry,
-          -- so the sweep sees the user's change.
+          -- in one typeahead batch) still run -- the diff sees whatever the
+          -- content became.
           return
         end
-        watcher.user_bytes_queue = {}
-        -- Drain in ARRIVAL order: each event's geometry is exact for the
-        -- frame its own change created, and the FIRST event's region is
-        -- stated in the pre-window frame -- the frame the stored spans live
-        -- in. The first keystroke therefore lands in the hole and updates
-        -- its content to the full live text (batched chars included), and
-        -- the remaining events find no mismatch and benignly no-op. Judging
-        -- the window by only the last event (the old behavior) measured
-        -- trailing keystrokes against a snapshot they had already outgrown,
-        -- so a locked ancestor
-        -- read the whole batch as a violation and reverted legitimate fast
-        -- typing.
-        for _, user_args in ipairs(queue) do
-          callback(unpack(user_args))
-        end
+        watcher.pending_edits = 0
+        -- The burst -- one TextChanged window -- is the unit of user action.
+        -- The count's only remaining job was to prove a user edit happened;
+        -- what the content became is the consumer's to read and diff.
+        callback()
       end,
     }
   )
@@ -2296,7 +2489,7 @@ local function create_buf_watcher(bufnr, callback, is_rendering)
       if is_rendering() then return end
       -- A user edit is pending (unprocessed): its cursor movements belong to
       -- the change, not to navigation, so keep the pre-edit sample.
-      if #watcher.user_bytes_queue > 0 then return end
+      if watcher.pending_edits > 0 then return end
       watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
     end,
   })
@@ -2325,15 +2518,11 @@ function Morph:_ensure_buf_watcher()
 
   self.buf_watcher = create_buf_watcher(
     self.bufnr,
-    -- nvim's on_bytes argument order is (…, start_row, start_col, byte_offset,
-    -- old_end_row, old_end_col, old_end_len, new_end_row, new_end_col,
-    -- new_end_len). The content model only ever reasons from the change's
-    -- START and its POST-change END, so name exactly those here and give the
-    -- handler a four-argument signature instead of threading nvim's twelve.
-    function(_, _, _, start_row0, start_col0, _, _, _, _, new_end_row, new_end_col)
-      self:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row, new_end_col)
-    end,
-    function() return self.changing end
+    function() return self.changing end,
+    -- Called once per closed user-edit burst. The guard owns everything
+    -- after that: it reads the live lines, diffs them against the render's
+    -- snapshot (see diff_to_band), and judges the resulting band.
+    function() self:_on_bytes_burst() end
   )
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
 end
@@ -2348,9 +2537,13 @@ end
 --   tag.curr_text  the accepted content per tag -- the only frame the guard
 --                   decides with; live extmark positions locate the text,
 --                   they never decide.
---   watcher.cursor_sample/user_bytes_queue  the pre-edit cursor snapshot
---                   and the pending user edit; render-owned writes never
---                   open a guard window.
+--   diff base        the render's line snapshot (text_content.curr.lines):
+--                   the burst's dirty region is the content diff against it
+--                   (see diff_to_band) -- settled states, final coordinates,
+--                   no event frames.
+--   watcher.cursor_sample/pending_edits  the pre-edit cursor snapshot and
+--                   the pending user edit; render-owned writes never open a
+--                   guard window.
 
 --- @private
 --- @private
@@ -2408,45 +2601,71 @@ function Morph:_flash_readonly(start, stop)
 end
 
 --- @private
---- Called after TextChanged autocmd fires, with the on_bytes info. The
---- guard's phases run in order: collect the tags whose live content differs
---- from the tree's expectation, decide (any readonly tag whose change no
---- editable descendant explains reverts the whole tree), accept (every
---- changed tag's expectation moves to its new content), then dispatch the
---- owned edits to their on_change handlers.
-function Morph:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row_off, new_end_col_off)
+--- Judge one TextChanged burst. The burst is the unit of user action: fast
+--- typing batches several edits into one TextChanged window, and every
+--- keystroke of the batch is already applied when the window fires. The
+--- band sidesteps per-event frames entirely -- it is the content diff of
+--- the render's snapshot against the live lines (see diff_to_band) -- so
+--- the guard sweeps the dirty band ONCE, in final coordinates, through the
+--- usual phases: collect the tags whose live content differs from the
+--- tree's expectation, decide (any readonly tag whose change no editable
+--- descendant explains reverts the whole tree), accept (every changed tag's
+--- expectation moves to its new content and the diff base moves to the
+--- live lines), then dispatch the owned edits to their on_change handlers.
+function Morph:_on_bytes_burst()
   -- Belt-and-suspenders: the watcher already drops morph's own writes at
-  -- capture, but a re-entrant call during a render must never reach the guard.
+  -- capture, but a re-entrant call during a render must never reach the
+  -- guard. Deferring is sound: the diff base stands, so the next drain
+  -- re-diffs -- and its band contains this burst too.
   if self.changing then return end
 
-  -- The change's start and post-change end. Per :h nvim_buf_attach on_bytes, a
-  -- column offset is relative to start_col0 on a single-line change (row
-  -- offset 0) and absolute in the end row otherwise.
-  local change_start = Pos00.new(start_row0, start_col0)
-  local new_end = Pos00.new(
-    start_row0 + new_end_row_off,
-    new_end_row_off == 0 and start_col0 + new_end_col_off or new_end_col_off
-  )
+  local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
+  local top0, bottom0, windows = Morph.diff_to_band(self.text_content.curr.lines, lines)
+  -- A nil band means the content is identical to the accepted baseline:
+  -- nothing to judge (a burst that typed and deleted within one window
+  -- lands here, and correctly polices nothing).
+  if not top0 then return end
 
-  -- Which tags' live content changed? (see _collect_changed for the test)
-  local changed = self:_collect_changed(change_start, new_end)
-  local editable, locked = changed.editable, changed.locked
+  -- The band that judged this burst, for tests and debugging.
+  self._last_band = { top0, bottom0 }
+
+  -- Which tags' live content changed? (see _collect_changed_band for the test)
+  -- A non-nil top0 guarantees all three diff returns are real (see
+  -- diff_to_band); the checker cannot narrow multi-returns, so assert it.
+  local editable, locked = self:_collect_changed_band(
+    top0,
+    bottom0 --[[@as integer]],
+    windows --[[@as morph.ChangeWindow[] ]]
+  )
 
   -- A changed readonly tag with no changed editable descendant is a
   -- violation: the edit touched locked text and no hole's edit explains it.
+  -- No baseline commit: the revert restores the standing snapshot's
+  -- content, which is exactly what the next drain's diff must come back
+  -- empty on.
   if self._readonly_violated(editable, locked) then
     self:_revert_violation(locked)
     return
   end
 
-  -- Move every changed tag's expectation to its live content -- editable so
-  -- dispatch announces the new text, locked so the next window does not
-  -- re-read them as fresh violations.
+  -- No tag in the band changed: the edit landed outside every rendered
+  -- span. The tree is the whole document, so locked apps revert that -- and
+  -- skip the accept-commit below for the same reason as the violation.
+  if #editable == 0 and self.readonly_default then
+    self:_revert_violation {}
+    return
+  end
+
+  -- Accept: every changed tag's expectation moves to its live content --
+  -- editable so dispatch announces the new text, locked so the next burst
+  -- does not re-read them as fresh violations -- and the diff base moves to
+  -- the live lines, so the next drain's diff starts from here.
   for _, list in ipairs { editable, locked } do
     for _, m in ipairs(list) do
       m.tag.curr_text = m.text
     end
   end
+  self.text_content.curr.lines = lines
 
   -- Keep probe entries in step with main entries, before on_change fires.
   if self.probe then self.probe:mirror(undotree(self.bufnr).seq_cur) end
@@ -2465,29 +2684,19 @@ function Morph:_on_bytes_after_autocmd(start_row0, start_col0, new_end_row_off, 
     end
     self.textlock = prev_textlock
     -- The accepted edit's cursor movement was gated out of the snapshot, so
-    -- refresh it: the next revert restores here, not before this batch.
+    -- refresh it: the next revert restores here, not before this burst.
     if self.buf_watcher and vim.fn.bufwinid(self.bufnr) ~= -1 then
       self.buf_watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
     end
     return
   end
 
-  -- No editable tag owns the change. A leftover event from a batched
-  -- TextChanged window sits inside editable territory and is already covered
-  -- by the tree -- tolerate it (reverting would undo every keystroke after
-  -- the first in the batch). Anything else landed outside every rendered
-  -- span, and locked apps revert that: the tree is the whole document.
-  if changed.in_editable_span then return end
-  if self.readonly_default then
-    self:_revert_violation {}
-    return
-  end
-
   -- Classic apps have no locked tree to enforce: the whole buffer is the
-  -- top-level tag's content, so hand the change to its on_change.
+  -- top-level tag's content, so hand the change to its on_change. The
+  -- baseline is already committed to `lines` above.
   local top = self.text_content.curr.top_level_tag
   if not (top and vim.is_callable(top.attributes.on_change)) then return end
-  local content = table.concat(vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false), '\n')
+  local content = table.concat(lines, '\n')
   if top.curr_text == content then return end
   top.curr_text = content
   local prev_textlock = self.textlock
@@ -2529,81 +2738,147 @@ end
 
 --- @private
 --- Collect the tags whose live content differs from the tree's expectation,
---- using the change window only to decide WHERE to look. Mark adjustment
---- converges every affected mark onto the change region, so a zone query
---- over [change_start, new_end] (inclusive on both edges; verified) returns
---- every candidate plus harmless neighbors. Comparing live text against
---- `curr_text` is the whole change test.
---- @param change_start morph.Pos00
---- @param new_end morph.Pos00
---- @return { editable: morph.TagChange[], locked: morph.TagChange[], in_editable_span: boolean }
-function Morph:_collect_changed(change_start, new_end)
+--- sweeping the dirty band. Every genuinely changed tag's span intersects
+--- the band -- the diff brackets the burst's touched rows (see diff_to_band),
+--- and mark adjustment pins affected spans onto them -- so a band query
+--- (inclusive on both edges) returns every candidate plus harmless
+--- neighbors. Comparing live text against `curr_text` is the whole change
+--- test.
+--- @param top0 integer
+--- @param bottom0 integer
+--- @param windows morph.ChangeWindow[] the burst's change windows
+--- @return morph.TagChange[] editable
+--- @return morph.TagChange[] locked
+function Morph:_collect_changed_band(top0, bottom0, windows)
   local editable = {} --- @type morph.TagChange[]
   local locked = {} --- @type morph.TagChange[]
-  local in_editable_span = false
-  local change_row, change_col = change_start[1], change_start[2]
+  local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
+  if top0 > last_row then return editable, locked end
+  -- The band's bottom row may sit past the buffer end (a line delete parks
+  -- it there so the sweep reaches the overshooting marks); the line READ
+  -- must stay in bounds -- nvim_buf_get_lines errors past the line count.
+  local band_bottom_line = vim.api.nvim_buf_get_lines(
+    self.bufnr,
+    math.min(bottom0, last_row),
+    math.min(bottom0 + 1, last_row + 1),
+    true
+  )[1] or ''
 
   local raw = vim.api.nvim_buf_get_extmarks(
     self.bufnr,
     self.ns,
-    { change_row, change_col },
-    { new_end[1], new_end[2] },
+    { top0, 0 },
+    { bottom0, #band_bottom_line },
     { details = true, overlap = true }
   )
+  -- Sorted by position: the degenerate-span witness below matches the
+  -- collapsed point against its NEAREST change window, which only means
+  -- anything in positional order.
+  --- @type { id: integer, tag: morph.Tag, row0: integer, col0: integer, details: vim.api.keyset.extmark_details }[]
+  local marks = {}
   for _, ext in ipairs(raw) do
-    local id, row0, col0, details = ext[1], ext[2], ext[3], ext[4]
-    local tag = self.text_content.curr.extmark_ids_to_tag[id]
+    local tag = self.text_content.curr.extmark_ids_to_tag[ext[1]]
     if tag then
-      local end_row = (details and details.end_row) or row0
-      local end_col = (details and details.end_col) or col0
+      table.insert(
+        marks,
+        { id = ext[1], tag = tag, row0 = ext[2], col0 = ext[3], details = ext[4] }
+      )
+    end
+  end
+  table.sort(marks, function(x, y)
+    if x.row0 ~= y.row0 then return x.row0 < y.row0 end
+    return x.col0 < y.col0
+  end)
 
-      -- change_start sits inside this editable live span (boundaries
-      -- included)? The no-change fallback uses this to tell an edit inside an
-      -- editable region from one outside the tree.
-      if
-        not tag.readonly
-        and (row0 < change_row or (row0 == change_row and col0 <= change_col))
-        and (change_row < end_row or (change_row == end_row and change_col <= end_col))
-      then
-        in_editable_span = true
-      end
+  for _i, m in ipairs(marks) do
+    local end_row = (m.details and m.details.end_row) or m.row0
+    local end_col = (m.details and m.details.end_col) or m.col0
 
-      -- Read the tag's content over its LIVE marks. The live marks are the
-      -- truth under morph's gravity scheme for every shape but one: a
-      -- replace touching the span's END drags the end mark onto the change
-      -- start, so the live span degenerates to a point and reads '' while
-      -- the actual replacement text sits at the change window -- the guard's
-      -- [change_start, new_end) is the only witness to it. For every other
-      -- shape (edited span stays healthy and reads its new bytes; a whole
-      -- delete collapses it to '' which IS the new content; a shift leaves
-      -- untouched spans reading their own bytes) widening by the stored span
-      -- would re-import positional attribution and report bytes gravity
-      -- gave to a neighbor as changed content: a typed char at a hole's
-      -- tail made the shifted ']' tag report "f]", and a mid-word delete
-      -- made a tag read "suf" from the following literal.
-      local collapsed = row0 == end_row and col0 == end_col
-      local new_text
-      if collapsed then
-        -- Collapsed live span: the replacement text at the change window is
-        -- the tag's new content. A pure delete has new_end == change_start,
-        -- so the read yields '' -- the correct content for a fully deleted
-        -- span.
-        new_text = live_span_text(self.bufnr, change_row, change_col, new_end[1], new_end[2])
-      else
-        new_text = live_span_text(self.bufnr, row0, col0, end_row, end_col)
-      end
-      if tag.curr_text ~= new_text then
-        local extmark = Extmark._from_raw(self.bufnr, id, row0, col0, details)
-        local mismatch = { extmark = extmark, tag = tag, text = new_text }
-        if tag.readonly then
-          table.insert(locked, mismatch)
-        else
-          table.insert(editable, mismatch)
+    -- Read the tag's content over its LIVE marks. The live marks are the
+    -- truth under morph's gravity scheme for every shape but one: a splice
+    -- that consumes a span's whole range (a same-length replace, a paste
+    -- over the tail, typing into an empty hole) parks BOTH of the span's
+    -- marks PAST the replacement text, and the between-marks read collapses
+    -- to '' while the real content sits just outside. Mount 'Search: [x]'
+    -- with the hole 'x', then replace the hole's content with 'y' (visual
+    -- paste, replace-char, any whole-hole splice):
+    --
+    --   Search: [y]
+    --   00000000001
+    --   01234567890
+    --
+    -- Both hole marks land at (0,10), after the 'y'; the span reads ''
+    -- although its content became 'y' at [9,10). Typing into an empty hole
+    -- is the same shape with more bytes -- 'ifilter' into 'Search: []'
+    -- parks both marks at (0,15), past 'filter':
+    --
+    --   Search: [filter]
+    --   0000000000111111
+    --   0123456789012345
+    --
+    -- Neither the degenerate span nor any gap around it recovers the
+    -- content -- only the burst's change windows (see diff_to_band) still
+    -- bracket the replacement ([9,10) -> 'y', [9,15) -> 'filter'), so the
+    -- window at the collapse point is the only WITNESS of what the span
+    -- became, and the collapsed read goes through it. A pure delete
+    -- collapses the span too, and its window reads '' -- the correct
+    -- content for a fully deleted span. For every other shape (an edited
+    -- span stays healthy and reads its new bytes; a shift leaves untouched
+    -- spans reading their own bytes) widening the read would re-import
+    -- positional attribution and report bytes gravity gave to a neighbor as
+    -- changed content: a typed char at a hole's tail made the shifted ']'
+    -- tag report "f]", and a mid-word delete made a tag read "suf" from
+    -- the following literal.
+    local collapsed = m.row0 == end_row and m.col0 == end_col
+    local new_text
+    if collapsed then
+      -- Nearest window by rows first, then columns: the change that made
+      -- the span degenerate is the one whose window touches its collapse
+      -- point (distance zero on both axes).
+      --- @type morph.ChangeWindow?, integer?, integer?
+      local best, best_row_delta, best_col_delta
+      for _, w in ipairs(windows) do
+        local row_delta = 0
+        if m.row0 < w.row0 then
+          row_delta = w.row0 - m.row0
+        elseif m.row0 > w.end_row then
+          row_delta = m.row0 - w.end_row
         end
+        local col_delta = 0
+        if row_delta == 0 then
+          if m.col0 < w.col0 then
+            col_delta = w.col0 - m.col0
+          elseif m.col0 > w.end_col then
+            col_delta = m.col0 - w.end_col
+          end
+        end
+        if
+          not best
+          or row_delta < best_row_delta
+          or (row_delta == best_row_delta and col_delta < best_col_delta)
+        then
+          best, best_row_delta, best_col_delta = w, row_delta, col_delta
+        end
+      end
+      if best then
+        new_text = live_span_text(self.bufnr, best.row0, best.col0, best.end_row, best.end_col)
+      else
+        new_text = ''
+      end
+    else
+      new_text = live_span_text(self.bufnr, m.row0, m.col0, end_row, end_col)
+    end
+    if m.tag.curr_text ~= new_text then
+      local extmark = Extmark._from_raw(self.bufnr, m.id, m.row0, m.col0, m.details)
+      local mismatch = { extmark = extmark, tag = m.tag, text = new_text }
+      if m.tag.readonly then
+        table.insert(locked, mismatch)
+      else
+        table.insert(editable, mismatch)
       end
     end
   end
-  return { editable = editable, locked = locked, in_editable_span = in_editable_span }
+  return editable, locked
 end
 
 --- @private

@@ -579,6 +579,87 @@ describe('on_change events', function()
     assert.are.same('Header\n\nFilter: [glm-5.3] (7 models)\n\nFooter chrome', result.text)
     assert.are.same('glm-5.3', result.state)
   end)
+
+  -- Deleting the last word of the filter with <C-w> is an edit owned by the
+  -- hole, exactly like typing: the deletion starts and ends inside the
+  -- editable span, so the guard must accept it, dispatch on_change with the
+  -- emptied text, and keep the cursor between the brackets. Treating it as a
+  -- violation flashes the locked chrome and restores a pre-edit cursor that
+  -- no longer exists in the emptied line, which lands the cursor to the
+  -- right of the closing bracket.
+  it('accepts <C-w> deleting the last word of the filter at its end', function()
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+
+      local rec = util.create_event_recorder 'filter'
+
+      --- @param ctx morph.Ctx<{}, { filter: string }>
+      local function App(ctx)
+        if ctx.phase == 'mount' then ctx.state = { filter = '' } end
+        local state = assert(ctx.state)
+        return {
+          'Search: [',
+          h('text', {
+            id = 'filter',
+            readonly = false,
+            on_change = function(e)
+              rec(e)
+              state.filter = e.text
+              ctx:update(state)
+            end,
+          }, state.filter),
+          ']',
+        }
+      end
+
+      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
+      _G.m:mount(h(App), { debounce_ms = 0 })
+      util.drain(100)
+      local orig = _G.m._revert_violation
+      _G.m._revert_violation = function(...)
+        _G.reverts = (_G.reverts or 0) + 1
+        return orig(...)
+      end
+      util.cursor_to_extmark_start(_G.m, 'filter')
+      return nil
+    end)
+
+    -- Type the filter, then delete its last word with <C-w> while still in
+    -- insert mode: the cursor sits at the hole's end, before the locked ']'.
+    nv:input 'ifilter'
+    local typed = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      util.drain(150)
+      return { text = util.text(0), events = util.events(), cursor = vim.api.nvim_win_get_cursor(0) }
+    end)
+    assert.are.same('Search: [filter]', typed.text)
+    assert.are.same({ { id = 'filter', text = 'filter' } }, typed.events)
+    assert.are.same({ 1, 15 }, typed.cursor)
+
+    nv:input '<C-w>'
+    local result = nv:exec_func(function()
+      local util = require 'morph._test.util'
+      util.drain(150)
+      return {
+        text = util.text(0),
+        events = util.events(),
+        cursor = vim.api.nvim_win_get_cursor(0),
+        reverts = _G.reverts or 0,
+      }
+    end)
+
+    -- The deletion emptied the hole: no revert, one on_change with '', and
+    -- the cursor back between the brackets ([|], not []|).
+    assert.are.equal(0, result.reverts)
+    assert.are.same('Search: []', result.text)
+    assert.are.same({
+      { id = 'filter', text = 'filter' },
+      { id = 'filter', text = '' },
+    }, result.events)
+    assert.are.same({ 1, 9 }, result.cursor)
+  end)
 end)
 
 describe('undo/redo', function()

@@ -68,9 +68,48 @@ end
 --- @param morph morph.Morph
 --- @param id string
 function M.cursor_to_extmark_start(morph, id)
+  --- @type morph.Element
   local elem = assert(morph:get_element_by_id(id), 'element "' .. id .. '" not found')
   local start = elem.extmark.start
   vim.api.nvim_win_set_cursor(0, { start[1] + 1, start[2] })
+end
+
+--- Snapshot every rendered tag's live text and span (plain data for host
+--- asserts), for band-superset assertions in child specs.
+--- @param morph morph.Morph
+--- @return table<string, { text: string, start: integer[], stop: integer[] }>
+function M.tag_snapshot(morph)
+  local out = {}
+  for id in pairs(morph.text_content.curr.extmark_ids_to_tag) do
+    local pos = vim.api.nvim_buf_get_extmark_by_id(morph.bufnr, morph.ns, id, { details = true })
+    if pos and pos[1] then
+      local srow, scol = pos[1], pos[2]
+      local det = pos[3] or {}
+      local erow, ecol = det.end_row or srow, det.end_col or scol
+      local text
+      if srow == erow and scol >= ecol then
+        text = ''
+      else
+        text =
+          table.concat(vim.api.nvim_buf_get_text(morph.bufnr, srow, scol, erow, ecol, {}), '\n')
+      end
+      out[id] = { text = text, start = { srow, scol }, stop = { erow, ecol } }
+    end
+  end
+  return out
+end
+
+--- Ids whose live text differs between two snapshots (or is new).
+--- @param before table<string, { text: string }>
+--- @param after table<string, { text: string }>
+--- @return string[]
+function M.changed_tag_ids(before, after)
+  local changed = {}
+  for id, snap in pairs(after) do
+    local was = before[id]
+    if not was or was.text ~= snap.text then changed[#changed + 1] = id end
+  end
+  return changed
 end
 
 --- Flush scheduled re-renders.

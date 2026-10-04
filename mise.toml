@@ -88,6 +88,13 @@ for v in $VERSIONS; do
 done
 '''
 
+[tasks.bench]
+description = "Run headless benchmarks (benches/change_pipeline.lua)"
+usage = '''
+arg "[filter]" help="Only run bench groups whose name contains this substring"
+'''
+run = 'nvim --headless -l benches/change_pipeline.lua ${usage_filter}'
+
 [tasks."test:coverage"]
 depends = ["test:prepare"]
 run = '''
