@@ -34,8 +34,39 @@ local function close_all_floats()
   end
 end
 
+--- Return the first floating window found, nil if none.
+local function first_float_win()
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_config(w).relative ~= '' then return w end
+  end
+  return nil
+end
+
+--- Test float geometry, identical across the host specs.
+local CFG = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 }
+
+--- Shared FloatingWindow app: an `{ open }` state captured in `box[1]` so
+--- tests drive open/close transitions, with optional on_closed passthrough.
+--- @param initial_open boolean
+--- @param on_closed? fun()
+--- @return fun(ctx: morph.Ctx<any, any>) App
+--- @return morph.Ctx<any, any>[] box
+local function float_app(initial_open, on_closed)
+  local box = {}
+  local function App(ctx)
+    if ctx.phase == 'mount' then ctx.state = { open = initial_open } end
+    box[1] = ctx
+    return h(FloatingWindow, {
+      open = ctx.state.open,
+      config = CFG,
+      on_closed = on_closed,
+    }, h('text', {}, { 'Hello' }))
+  end
+  return App, box
+end
+
 describe('FloatingWindow', function()
-  -- These tests drive open/close transitions via app_ctx:update and assert
+  -- These tests drive open/close transitions via box[1]:update and assert
   -- synchronously, so run with debounce off (NVIM_TEST=true) like the suite
   -- does. Save/restore so other specs are unaffected.
   --- @type string?
@@ -61,23 +92,9 @@ describe('FloatingWindow', function()
     local buf = create_test_buffer()
 
     local r = Morph.new(buf)
-    r:mount(
-      h(
-        FloatingWindow,
-        { open = true, config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 } },
-        h('text', {}, { 'Hello' })
-      )
-    )
+    r:mount(h(FloatingWindow, { open = true, config = CFG }, h('text', {}, { 'Hello' })))
 
-    local windows = vim.api.nvim_list_wins()
-    local float_win = nil
-    for _, w in ipairs(windows) do
-      local cfg = vim.api.nvim_win_get_config(w)
-      if cfg.relative ~= '' then
-        float_win = w
-        break
-      end
-    end
+    local float_win = first_float_win()
 
     assert.is_not_nil(float_win, 'Floating window not created')
 
@@ -101,30 +118,21 @@ describe('FloatingWindow', function()
     local original_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_cursor(original_win, { 5, 3 })
 
-    --- @type morph.Ctx<any, any>
-    local app_ctx
-    local function App(ctx)
-      if ctx.phase == 'mount' then ctx.state = { open = false } end
-      app_ctx = ctx
-      return h(FloatingWindow, {
-        open = ctx.state.open,
-        config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-      }, h('text', {}, { 'Hello' }))
-    end
+    local App, box = float_app(false)
 
     local r = Morph.new(create_test_buffer())
-    r:mount(h(App, {}, {}))
+    r:mount(h(App))
 
     -- open=false: no float, original context untouched.
     assert.are.equal(0, count_float_wins())
 
     -- false -> true: float opens, focus moves away from original window.
-    app_ctx:update { open = true }
+    box[1]:update { open = true }
     assert.are.equal(1, count_float_wins())
     assert.are_not.equal(original_win, vim.api.nvim_get_current_win())
 
     -- true -> false: float closes, original context restored.
-    app_ctx:update { open = false }
+    box[1]:update { open = false }
     vim.wait(
       1000,
       function()
@@ -146,23 +154,14 @@ describe('FloatingWindow', function()
     local original_win = vim.api.nvim_get_current_win()
     vim.api.nvim_win_set_cursor(original_win, { 2, 2 })
 
-    --- @type morph.Ctx<any, any>
-    local app_ctx
-    local function App(ctx)
-      if ctx.phase == 'mount' then ctx.state = { open = true } end
-      app_ctx = ctx
-      return h(FloatingWindow, {
-        open = ctx.state.open,
-        config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-      }, h('text', {}, { 'Hello' }))
-    end
+    local App, box = float_app(true)
 
     local r = Morph.new(create_test_buffer())
-    r:mount(h(App, {}, {}))
+    r:mount(h(App))
 
     assert.are.equal(1, count_float_wins())
 
-    app_ctx:update { open = false }
+    box[1]:update { open = false }
     vim.wait(1000, function() return vim.api.nvim_get_current_win() == original_win end, 10)
 
     assert.are.equal(0, count_float_wins())
@@ -174,19 +173,9 @@ describe('FloatingWindow', function()
     local buf = create_test_buffer()
 
     local r = Morph.new(buf)
-    r:mount(h(FloatingWindow, {
-      open = false,
-      config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-    }, h('text', {}, { 'Hello' })))
+    r:mount(h(FloatingWindow, { open = false, config = CFG }, h('text', {}, { 'Hello' })))
 
-    local windows = vim.api.nvim_list_wins()
-    local float_wins = {}
-    for _, w in ipairs(windows) do
-      local cfg = vim.api.nvim_win_get_config(w)
-      if cfg.relative ~= '' then table.insert(float_wins, w) end
-    end
-
-    assert.are.equal(0, #float_wins, 'Floating window should not be created when open=false')
+    assert.are.equal(0, count_float_wins(), 'Floating window should not be created when open=false')
 
     cleanup_buffers { buf }
   end)
@@ -195,23 +184,9 @@ describe('FloatingWindow', function()
     local buf = create_test_buffer()
 
     local r = Morph.new(buf)
-    r:mount(
-      h(
-        FloatingWindow,
-        { open = true, config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 } },
-        h('text', {}, { 'Test Content' })
-      )
-    )
+    r:mount(h(FloatingWindow, { open = true, config = CFG }, h('text', {}, { 'Test Content' })))
 
-    local windows = vim.api.nvim_list_wins()
-    local float_win = nil
-    for _, w in ipairs(windows) do
-      local cfg = vim.api.nvim_win_get_config(w)
-      if cfg.relative ~= '' then
-        float_win = w
-        break
-      end
-    end
+    local float_win = first_float_win()
 
     assert.is_not_nil(float_win, 'Floating window should be created')
 
@@ -230,23 +205,9 @@ describe('FloatingWindow', function()
     local buf = create_test_buffer()
 
     local r = Morph.new(buf)
-    r:mount(
-      h(
-        FloatingWindow,
-        { open = true, config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 } },
-        h('text', {}, { 'Hello' })
-      )
-    )
+    r:mount(h(FloatingWindow, { open = true, config = CFG }, h('text', {}, { 'Hello' })))
 
-    local windows = vim.api.nvim_list_wins()
-    local float_win = nil
-    for _, w in ipairs(windows) do
-      local cfg = vim.api.nvim_win_get_config(w)
-      if cfg.relative ~= '' then
-        float_win = w
-        break
-      end
-    end
+    local float_win = first_float_win()
 
     assert.is_not_nil(float_win, 'Floating window should be created')
 
@@ -272,30 +233,20 @@ describe('FloatingWindow', function()
     local fired = 0
     local fire_win, fire_mode, fire_floats
 
-    --- @type morph.Ctx<any, any>
-    local app_ctx
-    local function App(ctx)
-      if ctx.phase == 'mount' then ctx.state = { open = true } end
-      app_ctx = ctx
-      return h(FloatingWindow, {
-        open = ctx.state.open,
-        config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-        on_closed = function()
-          fired = fired + 1
-          fire_win = vim.api.nvim_get_current_win()
-          fire_mode = vim.fn.mode():sub(1, 1)
-          fire_floats = count_float_wins()
-        end,
-      }, h('text', {}, { 'Hello' }))
-    end
+    local App, box = float_app(true, function()
+      fired = fired + 1
+      fire_win = vim.api.nvim_get_current_win()
+      fire_mode = vim.fn.mode():sub(1, 1)
+      fire_floats = count_float_wins()
+    end)
 
     local r = Morph.new(create_test_buffer())
-    r:mount(h(App, {}, {}))
+    r:mount(h(App))
 
     assert.are.equal(1, count_float_wins())
     assert.are.equal(0, fired)
 
-    app_ctx:update { open = false }
+    box[1]:update { open = false }
     vim.wait(2000, function() return fired > 0 end, 10)
 
     assert.are.equal(1, fired)
@@ -323,19 +274,10 @@ describe('FloatingWindow', function()
     vim.api.nvim_set_current_win(w1)
 
     local morph_buf = create_test_buffer()
-    --- @type morph.Ctx<any, any>
-    local app_ctx
-    local function App(ctx)
-      if ctx.phase == 'mount' then ctx.state = { open = true } end
-      app_ctx = ctx
-      return h(FloatingWindow, {
-        open = ctx.state.open,
-        config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-      }, h('text', {}, { 'Hello' }))
-    end
+    local App, box = float_app(true)
 
     local r = Morph.new(morph_buf)
-    r:mount(h(App, {}))
+    r:mount(h(App))
     assert.are.equal(1, count_float_wins())
 
     -- Enter insert mode in the float so mode restore is meaningful.
@@ -345,7 +287,7 @@ describe('FloatingWindow', function()
     vim.api.nvim_win_close(w1, true)
 
     -- Close the float; mode must restore to normal even though W1 is gone.
-    app_ctx:update { open = false }
+    box[1]:update { open = false }
     vim.wait(
       1000,
       function() return vim.fn.mode():sub(1, 1) == 'n' and count_float_wins() == 0 end,
@@ -370,17 +312,10 @@ describe('FloatingWindow', function()
 
     local morph_buf = create_test_buffer()
     local fired = 0
-    local function App(ctx)
-      if ctx.phase == 'mount' then ctx.state = { open = true } end
-      return h(FloatingWindow, {
-        open = ctx.state.open,
-        config = { relative = 'editor', row = 1, col = 1, width = 40, height = 10 },
-        on_closed = function() fired = fired + 1 end,
-      }, h('text', {}, { 'Hello' }))
-    end
+    local App = float_app(true, function() fired = fired + 1 end)
 
     local r = Morph.new(morph_buf)
-    r:mount(h(App, {}))
+    r:mount(h(App))
     assert.are.equal(1, count_float_wins())
     assert.are.equal(0, fired)
 
@@ -501,6 +436,25 @@ describe('FloatingWindow nested open from on_closed', function()
     end)
 
     -- Real input into B: must land in B's buffer iff B entered insert mode.
+    -- Wait for B to actually BE in insert mode before typing: nightly applies
+    -- B's deferred startinsert one tick after on_win_create, so there is a
+    -- window where b_buf exists and is focused but the keystroke would still
+    -- be read as a normal-mode motion (older versions apply it within the
+    -- same tick, where the buffer's mere existence implied editability).
+    nv:exec_func(function()
+      -- The cap only has to cover a slow tick, not steady state: nothing
+      -- leaves insert mode after B's startinsert lands, so a generous bound
+      -- costs nothing when the condition is already true.
+      vim.wait(
+        1000,
+        function()
+          return _G.b_buf ~= nil
+            and vim.api.nvim_get_current_buf() == _G.b_buf
+            and vim.fn.mode():sub(1, 1) == 'i'
+        end,
+        5
+      )
+    end)
     nv:input 'w'
 
     local b_buf = nv:exec_func(function() return _G.b_buf end)

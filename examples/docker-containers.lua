@@ -1,6 +1,15 @@
 local Morph = require 'morph'
 local h = Morph.h
 
+-- Share the Table component with examples/_shared.lua: this file lives in
+-- examples/, so that directory must be on package.path for the require. The
+-- first chunk's getinfo is never nil under :luafile, but the checker cannot
+-- prove it.
+---@diagnostic disable-next-line: need-check-nil
+local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
+package.path = ('%s/?.lua;%s'):format(here, package.path)
+local Shared = require '_shared'
+
 --------------------------------------------------------------------------------
 -- Types
 --------------------------------------------------------------------------------
@@ -25,46 +34,6 @@ local function show_term(cmd, pos)
   vim.wo[0][0].relativenumber = false
   vim.cmd.terminal(cmd)
   vim.cmd.startinsert()
-end
-
---- @param ctx morph.Ctx<{ cells: morph.Tree[][] }, any>
-local function Table(ctx)
-  local cells = ctx.props.cells
-  local max_widths = {}
-
-  -- Calculate max width for each column
-  for col_idx = 1, #cells[1] do
-    local max_width = 0
-    for row_idx = 1, #cells do
-      local cell = cells[row_idx][col_idx]
-      local cell_text = Morph.markup_to_string { tree = cell }
-      local width = #cell_text + 1
-      if width > max_width then max_width = width end
-    end
-    max_widths[col_idx] = max_width
-  end
-
-  local result = {}
-
-  for row_idx, row in ipairs(cells) do
-    if row_idx > 1 then table.insert(result, '\n') end
-
-    for col_idx, cell in ipairs(row) do
-      table.insert(result, cell)
-
-      if col_idx < #row then
-        -- Calculate padding needed for this cell
-        local cell_text = Morph.markup_to_string { tree = cell }
-        local cell_width = #cell_text
-        --- @type integer
-        local needed_padding = max_widths[col_idx] - cell_width
-
-        if needed_padding > 0 then table.insert(result, string.rep(' ', needed_padding)) end
-      end
-    end
-  end
-
-  return result
 end
 
 --  _   _      _
@@ -105,7 +74,7 @@ local function Help(ctx)
   return {
     h['@markup.heading']({}, '## Help'),
     '\n\n',
-    h(Table, { cells = help_table }),
+    h(Shared.Table, { cells = help_table }),
   }
 end
 
@@ -208,7 +177,7 @@ local function Containers(ctx)
 
     ctx.props.containers and '\n\n' or '',
 
-    h(Table, { cells = containers_table }),
+    h(Shared.Table, { cells = containers_table }),
   }
 end
 

@@ -19,6 +19,7 @@ local h = Morph.h
 local Pos00 = Morph.Pos00
 local Extmark = Morph.Extmark
 local _assert = require 'morph._test.assert'
+local util = require 'morph._test.util'
 
 --------------------------------------------------------------------------------
 -- TEST HELPERS
@@ -40,15 +41,9 @@ end
 --- @param pos [integer, integer]
 local function set_cursor(pos) vim.api.nvim_win_set_cursor(0, pos) end
 
---- Execute a test within a temporary buffer that is cleaned up afterward.
-local function with_buf(lines, f)
-  vim.go.swapfile = false
-  vim.cmd.new()
-  vim.api.nvim_buf_set_lines(0, 0, -1, false, lines)
-  local ok, result = pcall(f)
-  vim.cmd.bdelete { bang = true }
-  if not ok then error(result) end
-end
+-- Execute a test within a temporary buffer that is cleaned up afterward
+-- (the shared implementation lives in morph._test.util).
+local with_buf = util.with_buf
 
 --------------------------------------------------------------------------------
 -- ASSERTION HELPERS

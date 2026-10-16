@@ -1,59 +1,16 @@
 local Morph = require 'morph'
 local h = Morph.h
 
+-- Share the Table component with examples/_shared.lua: this file lives in
+-- examples/, so that directory must be on package.path for the require. The
+-- first chunk's getinfo is never nil under :luafile, but the checker cannot
+-- prove it.
+---@diagnostic disable-next-line: need-check-nil
+local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
+package.path = ('%s/?.lua;%s'):format(here, package.path)
+local Shared = require '_shared'
+
 local H = {}
-
----
---- This is the part that gets really expensive, and why this is a somewhat
---- useful test. This `Table` component (inefficiently implemented) makes the
---- UI stutter.
----
---- @param ctx morph.Ctx<{ cells: morph.Tree[][] }, any>
-local function Table(ctx)
-  local cells = ctx.props.cells
-  local max_widths = {}
-
-  -- Cache for cell text to avoid calling markup_to_string twice per cell
-  local cell_text_cache = {}
-
-  -- Calculate max width for each column
-  for col_idx = 1, #cells[1] do
-    local max_width = 0
-    for row_idx = 1, #cells do
-      local cell = cells[row_idx][col_idx]
-      -- Cache the result of markup_to_string
-      if not cell_text_cache[row_idx] then cell_text_cache[row_idx] = {} end
-      local cell_text = Morph.markup_to_string { tree = cell }
-      cell_text_cache[row_idx][col_idx] = cell_text
-      local width = #cell_text + 1
-      if width > max_width then max_width = width end
-    end
-    max_widths[col_idx] = max_width
-  end
-
-  local result = {}
-
-  for row_idx, row in ipairs(cells) do
-    if row_idx > 1 then table.insert(result, '\n') end
-
-    for col_idx, cell in ipairs(row) do
-      table.insert(result, cell)
-
-      if col_idx < #row then
-        -- Calculate padding needed for this cell
-        -- Use cached cell text instead of recalculating
-        local cell_text = cell_text_cache[row_idx][col_idx]
-        local cell_width = #cell_text
-        --- @type integer
-        local needed_padding = max_widths[col_idx] - cell_width
-
-        if needed_padding > 0 then table.insert(result, string.rep(' ', needed_padding)) end
-      end
-    end
-  end
-
-  return result
-end
 
 --------------------------------------------------------------------------------
 -- Types
@@ -112,7 +69,7 @@ local function Users(ctx)
     ']',
     '\n\n',
 
-    h(Table, { cells = table_cells }),
+    h(Shared.Table, { cells = table_cells }),
   }
 end
 

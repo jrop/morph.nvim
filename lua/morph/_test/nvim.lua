@@ -207,6 +207,69 @@ function Nvim:assert_screenshot(expected, msg)
   )
 end
 
+--- Poll across RPC round trips until the guard has judged every captured
+--- edit -- the buffer watcher's pending_edits drains to 0, i.e. the
+--- TextChanged window that opened for the burst has closed. A programmatic
+--- edit (nvim_buf_set_text from a spec) gets its TextChanged dispatched by
+--- nvim's main loop, and on some versions that dispatch is only guaranteed
+--- when the loop regains control BETWEEN RPC requests -- a single in-child
+--- vim.wait can pump the loop without ever reaching that checkpoint, so the
+--- guard never runs and the readback observes a half-processed burst.
+--- Each attempt is its own request (the arrival flushes pending events) plus
+--- an in-child wait. Best effort: returns false on timeout so callers can
+--- decide whether a half-processed burst is a failure (see observe-style
+--- readbacks) or irrelevant. Requires the spec's instance in `_G.m` (the
+--- convention every child spec follows); without one it passes immediately.
+--- @param ms? integer  per-attempt in-child wait cap (default 50)
+--- @return boolean  true once no burst window is open
+function Nvim:await_guard(ms)
+  for _ = 1, 40 do
+    local done = self:exec_func(function(...)
+      local cap = ... --- @type integer?
+      local window_open = function()
+        local w = _G.m and _G.m.buf_watcher
+        return (w and w.pending_edits or 0) > 0
+      end
+      vim.wait(cap or 50, function() return not window_open() end, 5)
+      return not window_open()
+    end, nil, ms)
+    if done then return true end
+  end
+  return false
+end
+
+--- Drain scheduled child work (when `opts.ms` is given) and read back the
+--- child's buffer text and event sink: the read-after-action most child specs
+--- end with. Without `ms`, no drain happens -- the read observes whatever has
+--- settled by the time this RPC round-trip executes, exactly like a bare
+--- exec_func readback. `opts.clear` empties the event sink after reading;
+--- `opts.cursor` adds the child's cursor to the result. Before reading, the
+--- guard's burst window is awaited (see :await_guard) -- a pending window
+--- means the action has not fully settled, and its judgment would land after
+--- the read on some nvim versions.
+--- @param opts? { ms?: integer, cursor?: boolean, clear?: boolean }
+--- @return { text: string, events: morph._test.util.Event[], cursor: integer[]? }
+function Nvim:settled(opts)
+  self:await_guard()
+  return self:exec_func(function(...)
+    local util = require 'morph._test.util'
+    local o = ... --- @type { ms?: integer, cursor?: boolean, clear?: boolean }
+    if o.ms then util.drain(o.ms) end
+    local out = { text = util.text(0), events = util.events { clear = o.clear } }
+    if o.cursor then out.cursor = vim.api.nvim_win_get_cursor(0) end
+    return out
+  end, nil, opts or {}) --[[@as { text: string, events: morph._test.util.Event[], cursor: integer[]? }]]
+end
+
+--- Drain scheduled child work: a flush-only round trip (no readback).
+--- @param ms? integer  safety cap for the drain (default 1000)
+function Nvim:drain(ms)
+  self:exec_func(function(...)
+    local util = require 'morph._test.util'
+    util.drain(...)
+  end, nil, ms)
+end
+
 function Nvim:stop()
   pcall(vim.fn.jobstop, self.jobid)
   self.jobid = -1

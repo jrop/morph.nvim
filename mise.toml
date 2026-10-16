@@ -38,8 +38,18 @@ fmt = "stylua ."
 luarocks test --prepare
 echo
 
-# Check that the nightly version of Neovim is not more than a day old:
-if find .prefix -path '**/nightly/**/nvim' -mtime -1 2>/dev/null | grep -q .; then
+# Check that the nightly version of Neovim is not more than a day old. The
+# tag directory is recreated on every nvimv install/upgrade, so its own mtime
+# is when we installed it. The mtimes INSIDE the tarball are preserved from
+# the upstream build -- a nightly is already a day old when published -- so
+# testing the binary's mtime can essentially never match and would re-download
+# the release on every run. -maxdepth 0 tests the directory itself without
+# descending (supported by both BSD and GNU find):
+# The path mirrors nvimv's own DATA_DIR ("${XDG_DATA_HOME:-$PREFIX/share}/nvimv")
+# so the check follows installs wherever nvimv actually puts them -- XDG_DATA_HOME
+# wins on Linux, and PREFIX defaults to $HOME/.local when unset.
+nightly_dir="${XDG_DATA_HOME:-${PREFIX:-$HOME/.local}/share}/nvimv/tags/nightly"
+if [ -n "$(find "$nightly_dir" -maxdepth 0 -mtime -1 2>/dev/null)" ]; then
   echo "Neovim Nightly is up-to-date"
 else
   if nvimv ls | grep nightly >/dev/null; then

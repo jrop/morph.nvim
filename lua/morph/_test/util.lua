@@ -37,6 +37,20 @@ function M.scratch_buf(opts)
   return bufnr
 end
 
+--- Run `f` inside a temporary scratch window, cleaned up afterward (bdelete
+--- fires the teardown autocmds). Host-side specs; the child harness uses
+--- scratch_buf instead.
+--- @param lines string[]?  initial lines (nil leaves the buffer empty)
+--- @param f fun()
+function M.with_buf(lines, f)
+  vim.go.swapfile = false
+  vim.cmd.new()
+  if lines then vim.api.nvim_buf_set_lines(0, 0, -1, false, lines) end
+  local ok, result = pcall(f)
+  vim.cmd.bdelete { bang = true }
+  if not ok then error(result) end
+end
+
 --- Return an on_change handler that appends { id = id, text = e.text } to
 --- the child-global event sink.
 --- @param id string
@@ -80,7 +94,7 @@ end
 --- @return table<string, { text: string, start: integer[], stop: integer[] }>
 function M.tag_snapshot(morph)
   local out = {}
-  for id in pairs(morph.text_content.curr.extmark_ids_to_tag) do
+  for id in pairs(morph.text_content.extmark_ids_to_tag) do
     local pos = vim.api.nvim_buf_get_extmark_by_id(morph.bufnr, morph.ns, id, { details = true })
     if pos and pos[1] then
       local srow, scol = pos[1], pos[2]

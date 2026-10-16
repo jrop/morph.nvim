@@ -14,37 +14,13 @@
 --- lives in the child global `_G.m`.
 local Nvim = require 'morph._test.nvim'
 
---- Drain scheduled re-renders and return the buffer text: the read-after-
---- action most tests end with. The exec_func closure stays self-contained.
---- @param nv morph._test.Nvim
---- @return string
-local function settled_text(nv)
-  return nv:exec_func(function()
-    local util = require 'morph._test.util'
-    util.drain(150)
-    return util.text(0)
-  end)
-end
-
---- Drain scheduled re-renders when a test only needs the flush, not a value.
---- @param nv morph._test.Nvim
-local function drain(nv)
-  nv:exec_func(function()
-    local util = require 'morph._test.util'
-    util.drain(150)
-  end)
-end
-
 --- Drain the edit's echo re-render, run the app's chrome refresh, drain that.
 --- The exec_func closure stays self-contained (no upvalues).
 --- @param nv morph._test.Nvim
 local function drain_refresh(nv)
-  nv:exec_func(function()
-    local util = require 'morph._test.util'
-    util.drain(150)
-    _G.refresh()
-    util.drain(150)
-  end)
+  nv:drain(150)
+  nv:exec_func(function() _G.refresh() end)
+  nv:drain(150)
 end
 
 --- Move the child's cursor to the region named `r` (element-lookup variant).
@@ -56,6 +32,56 @@ local function cursor_to_r(nv)
     local el = assert(_G.m:get_element_by_id 'r')
     vim.api.nvim_win_set_cursor(0, { el.extmark.start[1] + 1, el.extmark.start[2] })
   end)
+end
+
+--- Mount the status/filter fixture app the probe tests share: a controlled
+--- region `r` whose on_change echoes into app state, plus 'status: ...'
+--- chrome; `_G.refresh` re-renders the chrome the way async data would, and
+--- the cursor starts on the region.
+--- @param nv morph._test.Nvim
+--- @param remount? boolean  unmount + remount the same instance after the
+---   first mount (the interception-reinstallation test's subject)
+local function mount_status_filter(nv, remount)
+  nv:exec_func(function(...)
+    local util = require 'morph._test.util'
+    local Morph = require 'morph'
+    local h = Morph.h
+
+    --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
+    local function App(ctx)
+      if ctx.phase == 'mount' then
+        ctx.state = { filter = 'base', status = 'idle' }
+        _G.app_ctx = ctx
+      end
+      local state = assert(ctx.state)
+      return {
+        'status: ',
+        h('text', {}, state.status),
+        '\nX:[',
+        h('text', {
+          id = 'r',
+          readonly = false,
+          on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
+        }, state.filter),
+        ']',
+      }
+    end
+
+    _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
+    _G.m:mount(h(App), { debounce_ms = 0 })
+    local o = ... --- @type { remount?: boolean }?
+    if o and o.remount then
+      -- Remount on the same instance: new() is not called again, so whatever
+      -- interception it installed must be re-established by the mount path.
+      _G.m:unmount()
+      _G.m:mount(h(App), { debounce_ms = 0 })
+    end
+    _G.refresh = function()
+      local state = assert(_G.app_ctx.state)
+      _G.app_ctx:update { filter = state.filter, status = 'working' }
+    end
+    util.cursor_to_extmark_start(_G.m, 'r')
+  end, nil, { remount = remount })
 end
 
 describe('region-aware undo', function()
@@ -103,10 +129,7 @@ describe('region-aware undo', function()
       _G.m:mount(h(App), { debounce_ms = 0 })
     end)
 
-    local before = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
+    local before = nv:settled({}).text
     assert.are.same('Filter: aaa\n[aaa]', before)
 
     -- Type into the hole; the app re-renders the heading reflection.
@@ -117,12 +140,12 @@ describe('region-aware undo', function()
       util.drain(50)
     end)
     nv:input 'iZZZ<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('Filter: ZZZaaa\n[ZZZaaa]', typed)
 
     -- One `u` must revert the hole edit; the app re-renders the reflection.
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('Filter: aaa\n[aaa]', undone)
   end)
 
@@ -153,15 +176,15 @@ describe('region-aware undo', function()
       return nil
     end)
     nv:input 'iY<Esc>' -- edit region b -> B:[Ybbb]
-    local both = settled_text(nv)
+    local both = nv:settled({ ms = 150 }).text
     assert.are.same('A:[Xaaa] B:[Ybbb]', both)
 
     nv:input 'u' -- only b's edit reverts
-    local first = settled_text(nv)
+    local first = nv:settled({ ms = 150 }).text
     assert.are.same('A:[Xaaa] B:[bbb]', first)
 
     nv:input 'u' -- now a's edit reverts
-    local second = settled_text(nv)
+    local second = nv:settled({ ms = 150 }).text
     assert.are.same('A:[aaa] B:[bbb]', second)
   end)
 
@@ -196,15 +219,15 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('Filter: Xaaa\n[Xaaa]', typed)
 
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('Filter: aaa\n[aaa]', undone)
 
     nv:input '<C-r>'
-    local redone = settled_text(nv)
+    local redone = nv:settled({ ms = 150 }).text
     assert.are.same('Filter: Xaaa\n[Xaaa]', redone)
   end)
 
@@ -259,11 +282,11 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('status: idle tick: 0\nFilter: Xaaa\n[Xaaa]', typed)
 
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('status: idle tick: 0\nFilter: aaa\n[aaa]', undone)
 
     -- The async app refresh lands here, straight onto the main buffer's tree.
@@ -273,14 +296,11 @@ describe('region-aware undo', function()
       util.drain(150)
       return nil
     end)
-    local refreshed = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
+    local refreshed = nv:settled({}).text
     assert.are.same('status: working tick: 1\nFilter: aaa\n[aaa]', refreshed)
 
     nv:input '<C-r>'
-    local redone = settled_text(nv)
+    local redone = nv:settled({ ms = 150 }).text
     -- The region edit is restored, and the app's refresh of non-region chrome
     -- survives it (the probe never touched that chrome).
     assert.are.same('status: working tick: 1\nFilter: Xaaa\n[Xaaa]', redone)
@@ -304,11 +324,11 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iabc<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('X:[abcbase]', typed)
 
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('X:[base]', undone)
   end)
 
@@ -331,16 +351,16 @@ describe('region-aware undo', function()
 
     -- Undo with nothing to undo: the region must survive untouched.
     nv:input 'u'
-    local at_floor = settled_text(nv)
+    local at_floor = nv:settled({ ms = 150 }).text
     assert.are.same('X:[base]', at_floor)
 
     -- One edit and undo returns to mount state; a further undo is a no-op.
     nv:input 'iZ<Esc>'
-    drain(nv)
+    nv:drain(150)
     nv:input 'u'
     nv:input 'u'
     nv:input 'u'
-    local still_floor = settled_text(nv)
+    local still_floor = nv:settled({ ms = 150 }).text
     assert.are.same('X:[base]', still_floor)
   end)
 
@@ -362,15 +382,15 @@ describe('region-aware undo', function()
 
     -- Insert a newline inside the region: the region becomes two lines.
     nv:input 'i<CR>line two<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('X:[\nline twoone]', typed)
 
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('X:[one]', undone)
 
     nv:input '<C-r>'
-    local redone = settled_text(nv)
+    local redone = nv:settled({ ms = 150 }).text
     assert.are.same('X:[\nline twoone]', redone)
   end)
 
@@ -398,11 +418,7 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return { text = util.text(0), events = util.events() }
-    end)
+    local result = nv:settled { ms = 200 }
     assert.are.same('Name: [editable]', result.text)
     assert.are.same({}, result.events)
   end)
@@ -413,54 +429,15 @@ describe('region-aware undo', function()
   -- (which would pop the refresh) and probe undo (which pops the region edit)
   -- produce different results; this asserts the probe path wins.
   it('routes the :undo ex-command through the probe', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-
-      --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { filter = 'base', status = 'idle' }
-          _G.app_ctx = ctx
-        end
-        local state = assert(ctx.state)
-        return {
-          'status: ',
-          h('text', {}, state.status),
-          '\nX:[',
-          h('text', {
-            id = 'r',
-            readonly = false,
-            on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
-          }, state.filter),
-          ']',
-        }
-      end
-
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
-        _G.app_ctx:update { filter = state.filter, status = 'working' }
-      end
-      util.cursor_to_extmark_start(_G.m, 'r')
-    end)
+    mount_status_filter(nv)
 
     nv:input 'iZ<Esc>'
     drain_refresh(nv)
-    local refreshed = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
+    local refreshed = nv:settled({}).text
     assert.are.same('status: working\nX:[Zbase]', refreshed)
 
     nv:input ':undo<CR>'
-    local undone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local undone = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[base]', undone)
   end)
 
@@ -468,43 +445,7 @@ describe('region-aware undo', function()
   -- re-arm it: without that, `:undo` after remount falls through to native
   -- traversal and reverts chrome renders instead of region edits.
   it('reinstalls ex-command interception after remount', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-
-      --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { filter = 'base', status = 'idle' }
-          _G.app_ctx = ctx
-        end
-        local state = assert(ctx.state)
-        return {
-          'status: ',
-          h('text', {}, state.status),
-          '\nX:[',
-          h('text', {
-            id = 'r',
-            readonly = false,
-            on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
-          }, state.filter),
-          ']',
-        }
-      end
-
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      -- Remount on the same instance: new() is not called again, so whatever
-      -- interception it installed must be re-established by the mount path.
-      _G.m:unmount()
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
-        _G.app_ctx:update { filter = state.filter, status = 'working' }
-      end
-      util.cursor_to_extmark_start(_G.m, 'r')
-    end)
+    mount_status_filter(nv, true)
 
     nv:input 'iZ<Esc>'
     drain_refresh(nv)
@@ -513,21 +454,13 @@ describe('region-aware undo', function()
     -- Native undo would revert the chrome render instead, leaving the region
     -- edited and the status stale.
     nv:input ':undo<CR>'
-    local undone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local undone = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[base]', undone)
 
     -- Redo must also route through the probe within the remounted session
     -- (history is reset across remounts, but not across an undo/redo pair).
     nv:input '<C-r>'
-    local redone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local redone = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[Zbase]', redone)
   end)
 
@@ -536,39 +469,7 @@ describe('region-aware undo', function()
   -- the edits, so native undo's step count includes it and lands on a render,
   -- while the probe's count includes only the two region edits.
   it('routes :earlier and :later counts through the probe', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-
-      --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { filter = 'base', status = 'idle' }
-          _G.app_ctx = ctx
-        end
-        local state = assert(ctx.state)
-        return {
-          'status: ',
-          h('text', {}, state.status),
-          '\nX:[',
-          h('text', {
-            id = 'r',
-            readonly = false,
-            on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
-          }, state.filter),
-          ']',
-        }
-      end
-
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
-        _G.app_ctx:update { filter = state.filter, status = 'working' }
-      end
-      util.cursor_to_extmark_start(_G.m, 'r')
-    end)
+    mount_status_filter(nv)
 
     -- Two separate edit sessions, so two probe entries.
     nv:input 'iA<Esc>'
@@ -577,19 +478,11 @@ describe('region-aware undo', function()
     drain_refresh(nv)
 
     nv:input ':earlier 2<CR>'
-    local back = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local back = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[base]', back)
 
     nv:input ':later 2<CR>'
-    local forward = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local forward = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[BAbase]', forward)
   end)
 
@@ -597,57 +490,17 @@ describe('region-aware undo', function()
   -- must route through the probe too, so a chrome refresh between them does not
   -- consume the step.
   it('routes g- and g+ through the probe', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-
-      --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { filter = 'base', status = 'idle' }
-          _G.app_ctx = ctx
-        end
-        local state = assert(ctx.state)
-        return {
-          'status: ',
-          h('text', {}, state.status),
-          '\nX:[',
-          h('text', {
-            id = 'r',
-            readonly = false,
-            on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
-          }, state.filter),
-          ']',
-        }
-      end
-
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
-        _G.app_ctx:update { filter = state.filter, status = 'working' }
-      end
-      util.cursor_to_extmark_start(_G.m, 'r')
-    end)
+    mount_status_filter(nv)
 
     nv:input 'iZ<Esc>'
     drain_refresh(nv)
 
     nv:input 'g-'
-    local undone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local undone = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[base]', undone)
 
     nv:input 'g+'
-    local redone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local redone = nv:settled({ ms = 200 }).text
     assert.are.same('status: working\nX:[Zbase]', redone)
   end)
 
@@ -674,11 +527,11 @@ describe('region-aware undo', function()
     assert.is_true(engaged)
 
     nv:input 'iZ<Esc>'
-    local typed = settled_text(nv)
+    local typed = nv:settled({ ms = 150 }).text
     assert.are.same('X:[Zbase]', typed)
 
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('X:[base]', undone)
   end)
 
@@ -697,7 +550,7 @@ describe('region-aware undo', function()
 
     nv:input 'iZ<Esc>'
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('just chrome, no holes', undone)
   end)
 
@@ -734,11 +587,7 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'u'
-    local undone = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(150)
-      return { text = util.text(0), events = util.events { clear = true } }
-    end)
+    local undone = nv:settled { ms = 150, clear = true }
     assert.are.same('abc', undone.text)
     assert.are.same({ { id = 'inner', text = 'ab' } }, undone.events)
 
@@ -747,7 +596,7 @@ describe('region-aware undo', function()
     -- restored buffer, so its write must be skipped rather than drag the
     -- inner region's marks.
     nv:input '<C-r>'
-    local redone = settled_text(nv)
+    local redone = nv:settled({ ms = 150 }).text
     assert.are.same('Zabc', redone)
   end)
 
@@ -784,39 +633,7 @@ describe('region-aware undo', function()
   -- and one chrome refresh in the main tree, a relative reading would land
   -- wrong; this asserts the probe jumps straight to state 2 (the middle edit).
   it('treats :undo N as an absolute state jump', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local Morph = require 'morph'
-      local h = Morph.h
-
-      --- @param ctx morph.Ctx<{}, { filter: string, status: string }>
-      local function App(ctx)
-        if ctx.phase == 'mount' then
-          ctx.state = { filter = 'base', status = 'idle' }
-          _G.app_ctx = ctx
-        end
-        local state = assert(ctx.state)
-        return {
-          'status: ',
-          h('text', {}, state.status),
-          '\nX:[',
-          h('text', {
-            id = 'r',
-            readonly = false,
-            on_change = function(e) ctx:update { filter = e.text, status = state.status } end,
-          }, state.filter),
-          ']',
-        }
-      end
-
-      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
-      _G.m:mount(h(App), { debounce_ms = 0 })
-      _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
-        _G.app_ctx:update { filter = state.filter, status = 'working' }
-      end
-      util.cursor_to_extmark_start(_G.m, 'r')
-    end)
+    mount_status_filter(nv)
 
     -- Three separate region-edit sessions: probe entries 2, 3 and 4.
     nv:input 'iA<Esc>'
@@ -824,15 +641,11 @@ describe('region-aware undo', function()
     nv:input 'iB<Esc>'
     cursor_to_r(nv)
     nv:input 'iC<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     -- State 2 is baseline + first edit, i.e. 'Abase'.
     nv:input ':undo 2<CR>'
-    local at_two = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(200)
-      return util.text(0)
-    end)
+    local at_two = nv:settled({ ms = 200 }).text
     assert.are.same('status: idle\nX:[Abase]', at_two)
   end)
 
@@ -851,19 +664,11 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'u'
-    local after_u = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(100)
-      return util.text(0)
-    end)
+    local after_u = nv:settled({ ms = 100 }).text
     assert.are.same('one', after_u)
 
     nv:input 'g-'
-    local after_gminus = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      util.drain(100)
-      return util.text(0)
-    end)
+    local after_gminus = nv:settled({ ms = 100 }).text
     assert.are.same('base', after_gminus)
   end)
 
@@ -893,10 +698,7 @@ describe('region-aware undo', function()
       _G.probe_buf = _G.m.probe and _G.m.probe.bufnr or nil
       return nil
     end)
-    local edited = nv:exec_func(function()
-      local util = require 'morph._test.util'
-      return util.text(0)
-    end)
+    local edited = nv:settled({}).text
     assert.are.same('A:[Zaaa]', edited)
 
     -- Re-render without the hole: the probe is torn down.
@@ -916,7 +718,7 @@ describe('region-aware undo', function()
 
     -- Traversal after the removal is a harmless no-op, not a crash.
     nv:input 'u'
-    local after = settled_text(nv)
+    local after = nv:settled({ ms = 150 }).text
     assert.are.same('A:[] (no hole)', after)
   end)
 
@@ -944,7 +746,7 @@ describe('region-aware undo', function()
 
     -- One accepted edit on a gives the probe history above its baseline.
     nv:input 'iX<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     -- Shrink the set: b is gone, a survives under the same declared id.
     nv:exec_func(function()
@@ -966,7 +768,7 @@ describe('region-aware undo', function()
 
     -- The pre-shrink edit is still undoable: it belongs to a, which survived.
     nv:input 'u'
-    local after = settled_text(nv)
+    local after = nv:settled({ ms = 150 }).text
     assert.are.same('A:[aaa]', after)
   end)
 
@@ -995,7 +797,7 @@ describe('region-aware undo', function()
 
     -- One accepted edit gives the probe history above its baseline.
     nv:input 'iX<Esc>'
-    settled_text(nv)
+    nv:settled { ms = 150 } -- drain, discard the value
 
     -- Re-render with the same number of editable regions but different
     -- ones (a,b -> c,d); the probe is kept and only its tags are re-pointed.
@@ -1017,7 +819,7 @@ describe('region-aware undo', function()
     -- Undo must have nothing to say about regions that never existed in its
     -- recorded history: c must not inherit a's text, d must not inherit b's.
     nv:input 'u'
-    local after = settled_text(nv)
+    local after = nv:settled({ ms = 150 }).text
     assert.are.same('C:[ccc] D:[ddd]', after)
   end)
 
@@ -1069,18 +871,18 @@ describe('region-aware undo', function()
 
     -- One accepted edit on the FIRST region.
     nv:input 'iX<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     -- Prepend a new item: the set grows 2 -> 3, every survivor shifts down.
     nv:exec_func(function() _G.add_top() end)
-    local grown = settled_text(nv)
+    local grown = nv:settled({ ms = 150 }).text
     assert.are.same('new3\nXone\ntwo\n', grown)
 
     -- Undo with NO edits since the add: nothing in the current region set can
     -- be identified with the recorded history, so this must be a no-op --
     -- every region keeps the text it rendered with, typed text included.
     nv:input 'u'
-    local after = settled_text(nv)
+    local after = nv:settled({ ms = 150 }).text
     assert.are.same('new3\nXone\ntwo\n', after)
   end)
 
@@ -1134,16 +936,16 @@ describe('region-aware undo', function()
 
     -- One accepted edit on item "one".
     nv:input 'iX<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     -- Prepend "new3": one and two keep their ids, new3 has none.
     nv:exec_func(function() _G.add_top() end)
-    local grown = settled_text(nv)
+    local grown = nv:settled({ ms = 150 }).text
     assert.are.same('new3\nXone\ntwo\n', grown)
 
     -- Undo reverts the pre-prepend edit on the item it was made on.
     nv:input 'u'
-    local after = settled_text(nv)
+    local after = nv:settled({ ms = 150 }).text
     assert.are.same('new3\none\ntwo\n', after)
   end)
 
@@ -1206,9 +1008,9 @@ describe('region-aware undo', function()
 
     -- Edit item #2, then chrome-moves it above #1: #2, #1, #3.
     nv:input 'iX<Esc>'
-    drain(nv)
+    nv:drain(150)
     nv:exec_func(function() _G.move_up(2) end)
-    local moved = settled_text(nv)
+    local moved = nv:settled({ ms = 150 }).text
     assert.are.same('Xtwo\none\nthree\n', moved)
 
     -- Edit item #1 at its NEW position: an edit made after the reorder, on a
@@ -1218,27 +1020,27 @@ describe('region-aware undo', function()
       return nil
     end)
     nv:input 'iY<Esc>'
-    local edited = settled_text(nv)
+    local edited = nv:settled({ ms = 150 }).text
     assert.are.same('Xtwo\nYone\nthree\n', edited)
 
     -- Undo walks back through BOTH edits, each landing on its own item:
     -- first the #1 edit (recorded after the reorder, on line two), then the
     -- #2 edit (recorded before it, now on line one).
     nv:input 'u'
-    local first = settled_text(nv)
+    local first = nv:settled({ ms = 150 }).text
     assert.are.same('Xtwo\none\nthree\n', first)
 
     nv:input 'u'
-    local second = settled_text(nv)
+    local second = nv:settled({ ms = 150 }).text
     assert.are.same('two\none\nthree\n', second)
 
     -- Redo walks forward again, landing each text back on its item.
     nv:input '<C-r>'
-    local redone = settled_text(nv)
+    local redone = nv:settled({ ms = 150 }).text
     assert.are.same('Xtwo\none\nthree\n', redone)
 
     nv:input '<C-r>'
-    local redone_again = settled_text(nv)
+    local redone_again = nv:settled({ ms = 150 }).text
     assert.are.same('Xtwo\nYone\nthree\n', redone_again)
   end)
 
@@ -1290,7 +1092,7 @@ describe('region-aware undo', function()
       return nil
     end)
     nv:input 'iX<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     nv:exec_func(function()
       local util = require 'morph._test.util'
@@ -1298,12 +1100,12 @@ describe('region-aware undo', function()
       return nil
     end)
     nv:input 'iY<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     -- The add grows the set; the re-render preserves the typed edits.
     nv:exec_func(function() _G.add_item() end)
     nv:exec_func(function() _G.add_item() end)
-    local grown = settled_text(nv)
+    local grown = nv:settled({ ms = 150 }).text
     assert.are.same('Xone\nYtwo\nitem3\nitem4\n', grown)
 
     -- Edit one of the NEW regions.
@@ -1313,18 +1115,18 @@ describe('region-aware undo', function()
       return nil
     end)
     nv:input 'iZ<Esc>'
-    drain(nv)
+    nv:drain(150)
 
     nv:input 'u' -- reverts item-3's edit
-    local first = settled_text(nv)
+    local first = nv:settled({ ms = 150 }).text
     assert.are.same('Xone\nYtwo\nitem3\nitem4\n', first)
 
     nv:input 'u' -- reverts item-2's edit (recorded before the add)
-    local second = settled_text(nv)
+    local second = nv:settled({ ms = 150 }).text
     assert.are.same('Xone\ntwo\nitem3\nitem4\n', second)
 
     nv:input 'u' -- reverts item-1's edit
-    local third = settled_text(nv)
+    local third = nv:settled({ ms = 150 }).text
     assert.are.same('one\ntwo\nitem3\nitem4\n', third)
   end)
 
@@ -1350,7 +1152,7 @@ describe('region-aware undo', function()
 
     nv:input 'iZ<Esc>'
     nv:input 'u'
-    local undone = settled_text(nv)
+    local undone = nv:settled({ ms = 150 }).text
     assert.are.same('X:[base]', undone)
   end)
 end)

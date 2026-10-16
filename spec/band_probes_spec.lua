@@ -63,8 +63,19 @@ describe('band probes', function()
     end)
   end
 
-  --- Drain the burst and collect band, changed tags, text and reverts.
+  --- Wait for the guard to judge the current burst, drain the revert/accept
+  --- fall-out, and collect band, changed tags, text and reverts.
   local function observe()
+    -- Wait for the guard to judge the burst (the event under test) before
+    -- reading any state. The burst-closing TextChanged autocmd is dispatched
+    -- by nvim's main loop, and for programmatic edits some versions dispatch
+    -- it only when the loop regains control BETWEEN RPC requests, which a
+    -- single in-child drain misses. await_guard polls across round trips
+    -- (each request flushes pending key-events); unlike a plain drain, its
+    -- failure mode is a loud error with diagnostics, not a nil band.
+    if not nv:await_guard() then
+      error 'guard never judged the burst (TextChanged window never closed)'
+    end
     return nv:exec_func(function()
       local util = require 'morph._test.util'
       util.drain(200)
@@ -161,6 +172,7 @@ describe('band probes', function()
     nv:exec_func(function()
       local util = require 'morph._test.util'
       util.drain(150)
+      -- Snapshot before the second burst so its changed set is exact.
       _G.before = util.tag_snapshot(_G.m)
       return nil
     end)

@@ -392,6 +392,8 @@ The flow: `Tree → render() → Element → buffer text + extmarks`
 - `renderer:render(tree)` - Render static markup
 - `renderer:get_element_by_id(id)` - Find an element by its `id` attribute
 - `renderer:get_elements_at(pos, mode?)` - Get all elements at a cursor position, sorted from innermost to outermost
+- `Morph.markup_to_string({ tree, readonly_default? })` - Convert a static Tree to a plain string (used to measure or inspect rendered text without touching a buffer)
+- `Morph.markup_to_lines({ tree, readonly_default?, on_tag? })` - Same conversion, returning an array of lines
 
 ### Component Context
 

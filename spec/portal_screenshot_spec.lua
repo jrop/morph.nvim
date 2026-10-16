@@ -30,17 +30,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('simple text renders to portal buffer', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -85,17 +80,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('parent state update triggers portal re-render', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
 
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
@@ -189,17 +179,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('portal keymap triggers parent state update', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
 
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
@@ -297,17 +282,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('multi-line content renders to portal buffer', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -357,17 +337,12 @@ describe('Portal screenshot', function()
   it('updates propagate to portal buffer', function()
     -- Mount v1
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -408,18 +383,13 @@ describe('Portal screenshot', function()
 
     -- Create fresh v2 (close old split first)
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       vim.cmd 'only'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -464,17 +434,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('nested components render through portal', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
 
       --- @param ctx morph.Ctx<any, any>
       local function Label(ctx)
@@ -526,17 +491,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('empty portal renders empty buffer', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -581,25 +541,14 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('multiple portals render to separate buffers', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf1 = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf1].buftype = 'nofile'
-      vim.bo[portal_buf1].bufhidden = 'wipe'
-      vim.bo[portal_buf1].buflisted = false
-      local portal_buf2 = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf2].buftype = 'nofile'
-      vim.bo[portal_buf2].bufhidden = 'wipe'
-      vim.bo[portal_buf2].buflisted = false
-      local portal_buf3 = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf3].buftype = 'nofile'
-      vim.bo[portal_buf3].bufhidden = 'wipe'
-      vim.bo[portal_buf3].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf1 = util.scratch_buf {}
+      local portal_buf2 = util.scratch_buf {}
+      local portal_buf3 = util.scratch_buf {}
 
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
@@ -659,17 +608,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('on_buf_create callback receives morph document', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
 
       local callback_fired = false
       local received_bufnr = nil
@@ -709,17 +653,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('highlighted text renders through portal', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
       vim.api.nvim_set_current_buf(source_buf)
       local morph = Morph.new(source_buf)
       morph:mount(h('text', {}, {
@@ -768,17 +707,12 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('complex nested tree renders through portal', function()
     nv:exec_func(function()
+      local util = require 'morph._test.util'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
-      local source_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[source_buf].buftype = 'nofile'
-      vim.bo[source_buf].bufhidden = 'wipe'
-      vim.bo[source_buf].buflisted = false
-      local portal_buf = vim.api.nvim_create_buf(false, true)
-      vim.bo[portal_buf].buftype = 'nofile'
-      vim.bo[portal_buf].bufhidden = 'wipe'
-      vim.bo[portal_buf].buflisted = false
+      local source_buf = util.scratch_buf {}
+      local portal_buf = util.scratch_buf {}
 
       --- @param ctx morph.Ctx<any, any>
       local function Label(ctx)

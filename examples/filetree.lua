@@ -39,32 +39,6 @@ function Path:parent()
   return Path.new(path)
 end
 
---- @param to_path morph.examples.Path
-function Path:steps_to(to_path)
-  local rel_path = vim.fs.relpath(self._path, to_path._path)
-  if not rel_path then return end
-
-  --- @type string[]
-  local rel_steps = {}
-  local curr_rel = rel_path
-  while curr_rel ~= vim.fs.dirname(curr_rel) do
-    local part = vim.fs.basename(curr_rel)
-    table.insert(rel_steps, part)
-    curr_rel = vim.fs.dirname(curr_rel)
-  end
-  rel_steps = vim.iter(rel_steps):rev():totable()
-
-  --- @type morph.examples.Path[]
-  local steps = {}
-  local curr = self._path
-  for _, step in ipairs(rel_steps) do
-    curr = vim.fs.joinpath(curr, step)
-    table.insert(steps, Path.new(curr))
-  end
-
-  return steps
-end
-
 function Path:ls()
   if self:kind() == 'file' then return end
   --- @type morph.examples.Path[]
@@ -78,12 +52,6 @@ function Path:ls()
     return p1._path < p2._path
   end)
   return children
-end
-
-function Path:make_enclosing_dirs()
-  local parent = self:parent()
-  if parent == nil then return end
-  vim.uv.fs_mkdir(parent._path, assert(tonumber('755', 8)))
 end
 -- }}}
 
@@ -143,65 +111,11 @@ function Tree:set_expanded(path, expanded)
     self._children[path._path] = path:ls()
   end
 end
-
-function Tree:refresh()
-  -- clear _children cache:
-  self._children = {}
-end
-
---- @param path morph.examples.Path
---- @param child morph.examples.Path
-function Tree:create(path, child)
-  assert(path:kind() == 'dir', 'can only create files inside directories')
-
-  child:make_enclosing_dirs()
-
-  local f = assert(io.open(child._path, 'w+'))
-  f:write ''
-  f:close()
-
-  self._children[path._path] = path:ls()
-end
-
---- @param path morph.examples.Path
---- @param new_dir morph.examples.Path
-function Tree:create_dir(path, new_dir)
-  assert(path:kind() == 'dir', 'can only create directories inside directories')
-
-  if new_dir:kind() ~= nil then
-    -- already exists, bail
-    return
-  end
-
-  new_dir:make_enclosing_dirs()
-
-  vim.uv.fs_mkdir(new_dir._path, assert(tonumber('755', 8)))
-
-  self._children[path._path] = path:ls()
-  self._children[new_dir._path] = new_dir:ls()
-end
-
---- @param path morph.examples.Path
---- @param new_base_name string
-function Tree:rename(path, new_base_name)
-  assert(path:kind() == 'file', 'can only rename files')
-
-  local parent_dir = assert(path:parent(), 'unreachable')
-  local new_path = vim.fs.joinpath(parent_dir._path, new_base_name)
-
-  assert(vim.uv.fs_rename(path._path, new_path))
-
-  self._children[parent_dir._path] = parent_dir:ls()
-end
 -- }}}
 
 --- @param ctx morph.Ctx<{ path: morph.examples.Path, tree: morph.examples.Tree, level: integer, refresh: function }, {}>
 --- @return morph.Tree
 local function FsNode(ctx)
-  if ctx.phase == 'mount' then
-    -- Initialize:
-  end
-
   local tree = ctx.props.tree
   local path = ctx.props.path
   local kind = path:kind()
