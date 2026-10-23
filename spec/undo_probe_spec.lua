@@ -394,6 +394,41 @@ describe('region-aware undo', function()
     assert.are.same('X:[\nline twoone]', redone)
   end)
 
+  -- A region's text can end with a newline, which puts its extmark stop at
+  -- column 0 of the following line. The probe reads the live region back over
+  -- that span to decide what to undo; if the read drops the trailing newline,
+  -- the comparison against the stored text never settles. Undo/redo must
+  -- round-trip the region intact, newline and all.
+  it('undoes an edit inside a region whose text ends with a newline', function()
+    nv:exec_func(function()
+      local util = require 'morph._test.util'
+      local Morph = require 'morph'
+      local h = Morph.h
+      _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
+      _G.m:render {
+        h('text', {}, 'X:['),
+        h('text', { id = 'r', readonly = false }, 'one\n'),
+        h('text', {}, ']'),
+      }
+      util.cursor_to_extmark_start(_G.m, 'r')
+    end)
+
+    local initial = nv:settled({ ms = 150 }).text
+    assert.are.same('X:[one\n]', initial)
+
+    nv:input 'iX<Esc>'
+    local typed = nv:settled({ ms = 150 }).text
+    assert.are.same('X:[Xone\n]', typed)
+
+    nv:input 'u'
+    local undone = nv:settled({ ms = 150 }).text
+    assert.are.same('X:[one\n]', undone)
+
+    nv:input '<C-r>'
+    local redone = nv:settled({ ms = 150 }).text
+    assert.are.same('X:[Xone\n]', redone)
+  end)
+
   -- Enabling the probe must not weaken the locked-chrome guard: editing
   -- outside every editable region is still a violation, still reverted, and
   -- still leaves the app's on_change unfired.

@@ -370,9 +370,8 @@ describe('on_change events', function()
     -- nvim_buf_set_lines at a boundary does NOT expand the extmark's end_row.
     -- This simulates linewise paste ("p" in Normal mode), where the extmark
     -- covers only the original content and the newly inserted lines fall
-    -- outside the extmark's range. The fallback in _on_bytes_after_autocmd
-    -- must scan all on_change elements when no extmarks overlap the changed
-    -- region and read the full buffer content directly.
+    -- outside the extmark's range. The guard must still notice the change from
+    -- the render-vs-live content diff and fire on_change.
     mount_echo_hole 'asldkfjasdlfjkasdfkj'
 
     -- Simulate linewise paste: insert a line after the extmark's range.
@@ -392,9 +391,9 @@ describe('on_change events', function()
 
   it('fires on_change when set_lines inserts content before extmark range', function()
     -- nvim_buf_set_lines at row 0 (before the extmark) shifts the extmark
-    -- rather than expanding it. The fallback must detect that the extmark
-    -- moved and fire on_change with the full buffer text including the
-    -- prepended content.
+    -- rather than expanding it. The content diff must still detect the change
+    -- and fire on_change with the full buffer text including the prepended
+    -- content.
     mount_echo_hole 'asldkfjasdlfjkasdfkj'
 
     -- Prepend a line before the extmark range.

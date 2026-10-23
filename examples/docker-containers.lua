@@ -1,14 +1,16 @@
 local Morph = require 'morph'
 local h = Morph.h
 
--- Share the Table component with examples/_shared.lua: this file lives in
--- examples/, so that directory must be on package.path for the require. The
--- first chunk's getinfo is never nil under :luafile, but the checker cannot
--- prove it.
+-- Share the Table component with examples/_shared.lua. Load it by path rather
+-- than through `require`: a session may replace `package.loaders`, which makes
+-- `package.path` irrelevant, while `morph` itself still resolves through the
+-- runtimepath. The chunk's own directory locates the sibling file regardless.
 ---@diagnostic disable-next-line: need-check-nil
-local here = vim.fn.fnamemodify(debug.getinfo(1, 'S').source:sub(2), ':p:h')
-package.path = ('%s/?.lua;%s'):format(here, package.path)
-local Shared = require '_shared'
+local source = debug.getinfo(1, 'S').source
+-- File chunks normally name their source with a leading `@`, but some loaders
+-- pass the path bare; stripping it unconditionally would eat the leading `/`.
+if source:sub(1, 1) == '@' then source = source:sub(2) end
+local Shared = dofile(vim.fs.joinpath(vim.fs.dirname(source), '_shared.lua'))
 
 --------------------------------------------------------------------------------
 -- Types

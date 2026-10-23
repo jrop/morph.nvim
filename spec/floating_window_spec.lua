@@ -414,25 +414,39 @@ describe('FloatingWindow nested open from on_closed', function()
       _G.m:mount(h(App, {}))
     end)
 
+    -- A mode change requested in the child (`startinsert` / `stopinsert`) only
+    -- takes effect when the child's main loop regains control between RPC
+    -- requests. One long in-child `vim.wait` can therefore starve the very
+    -- transition it waits for: the 500ms fallback then closes A while the
+    -- child still reports insert, and the pending switch to normal cancels
+    -- B's `startinsert`. Poll across requests instead, with a short wait per
+    -- attempt so the loop can apply the pending change.
+    --- @param predicate fun(): boolean arity-0 function string.dumped into the child
+    --- @return boolean
+    local function poll_child(predicate, attempts)
+      for _ = 1, attempts or 150 do
+        if nv:exec_func(predicate) then return true end
+      end
+      return false
+    end
+
     -- Round-trip so A's on_win_create startinsert flushes: the child is a real
     -- embedded nvim and programmatic startinsert DOES enter insert, but the
     -- mode change is only visible across an RPC round-trip, not within the
     -- same exec_func. This puts A in insert so the close takes the i->n
     -- ModeChanged route (the only path the bug manifests on).
-    nv:exec_func(function()
-      vim.wait(300, function() return vim.fn.mode():sub(1, 1) == 'i' end, 5)
+    local a_ready = poll_child(function()
+      vim.wait(5)
+      return vim.fn.mode():sub(1, 1) == 'i'
     end)
+    assert.is_true(a_ready, 'float A never entered insert mode; the i->n route was not exercised')
 
     -- Close A: its on_closed opens B, whose on_win_create startinsert is
-    -- deferred onto a clean tick by the fix. Round-trip flushes the child's
-    -- scheduled work so the deferred startinsert has run before we type.
-    -- _G.app rides the dump boundary: exec_func string.dumps its callback into
-    -- the child nvim, so a host-side local could not carry the ctx across.
+    -- deferred onto a clean tick by the fix. _G.app rides the dump boundary:
+    -- exec_func string.dumps its callback into the child nvim, so a host-side
+    -- local could not carry the ctx across.
     nv:exec_func(function()
       (_G.app --[[@as morph.Ctx<any, any>]]):update { show_a = false }
-    end)
-    nv:exec_func(function()
-      vim.wait(300, function() return _G.b_buf ~= nil end, 5)
     end)
 
     -- Real input into B: must land in B's buffer iff B entered insert mode.
@@ -441,20 +455,13 @@ describe('FloatingWindow nested open from on_closed', function()
     -- window where b_buf exists and is focused but the keystroke would still
     -- be read as a normal-mode motion (older versions apply it within the
     -- same tick, where the buffer's mere existence implied editability).
-    nv:exec_func(function()
-      -- The cap only has to cover a slow tick, not steady state: nothing
-      -- leaves insert mode after B's startinsert lands, so a generous bound
-      -- costs nothing when the condition is already true.
-      vim.wait(
-        1000,
-        function()
-          return _G.b_buf ~= nil
-            and vim.api.nvim_get_current_buf() == _G.b_buf
-            and vim.fn.mode():sub(1, 1) == 'i'
-        end,
-        5
-      )
+    local b_ready = poll_child(function()
+      vim.wait(5)
+      return _G.b_buf ~= nil
+        and vim.api.nvim_get_current_buf() == _G.b_buf
+        and vim.fn.mode():sub(1, 1) == 'i'
     end)
+    assert.is_true(b_ready, 'second float never became editable in insert mode')
     nv:input 'w'
 
     local b_buf = nv:exec_func(function() return _G.b_buf end)

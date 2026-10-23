@@ -133,7 +133,7 @@ end
 </details>
 
 ### **Efficient Reconciliation**
-Only updates what changed, using a diffing algorithm similar to React's virtual DOM. The renderer intelligently patches only the specific text regions that have actually changed, preserving cursor position and avoiding disruptive window jumps. This means smooth, flicker-free updates even for complex UIs with frequent state changes.
+Only updates what changed, using keyed reconciliation plus a minimal line-level text diff. The renderer patches only the specific text regions that have actually changed, preserving cursor position and avoiding disruptive window jumps. This means smooth, flicker-free updates even for complex UIs with frequent state changes.
 
 ### **Rich Text Styling**
 Apply highlight groups and extmarks with simple attributes:

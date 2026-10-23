@@ -1,8 +1,9 @@
 --- Shared components for the morph examples.
 ---
 --- Examples are launched with `:luafile %`, so each example that needs this
---- module first adds its own directory to package.path, then does
---- `require '_shared'`.
+--- module loads it by path with `dofile` from its own directory. Loading by
+--- path rather than `require` keeps working when a session replaces
+--- `package.loaders` (which would make `package.path` irrelevant).
 
 local Morph = require 'morph'
 

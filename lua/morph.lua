@@ -49,72 +49,43 @@
 -- A React-like component library for Neovim buffers.
 --
 -- A morph document turns a tree of tags into buffer text, then keeps that
--- text -- and its extmarks, keymaps, and undo behavior -- in sync as the tree
--- changes and as the user types. One turn of the loop, and the part of this
--- file that plays it:
+-- text, its extmarks, keymaps, and undo behavior in sync as the tree changes
+-- and the user types. Each part of the file owns one step of that loop:
 --
---   describe   the app builds a tree with h()                      (Part I)
---   reconcile  the Reconciler diffs old against new                (Part III)
---   render     the tree becomes lines; patch_lines writes the
---              difference into the buffer                          (Part IV)
---   mount      the Morph instance owns the buffer, extmarks,
---              keymaps, and lifecycle                              (Part V)
---   handle     the watcher batches the user's edits; the guard
---              polices locked text and fires on_change             (Part VI)
---   undo       the probe scopes undo/redo to the editable regions  (Part VII)
+--   I    the tree model and h()                   V    the Morph instance
+--   II   core types (Pos00, Extmark, Ctx,         VI   the change guard
+--        RenderError)                              VII  the undo probe
+--   III  reconciliation                           annex components built on
+--   IV   text generation and diffing                    the public API
 --
--- The file is a book: each chapter's code only uses names already
--- introduced -- a rule Lua's `local` scoping enforces mechanically. Type
--- annotations are the exception, not a violation: they are erased comments
--- resolved from a global type registry, so Morph's field card names the
--- reconciler, the watcher, and the probe before their chapters arrive. Two
--- interludes are self-contained and skippable: the environment checks (Part II)
--- and the Levenshtein diff (Part IV). The annex holds components and hook
--- helpers built on the public API -- optional reading that doubles as
--- example code.
---
--- House rules for new code:
---   1. A chapter is contiguous: a class's declaration and its methods stay
---      in one chapter; subsystem-owned Morph methods live with their
---      subsystem's chapter (the guard's and the probe's do not sit in
---      Part V). The one exception is Morph's declaration card, which
---      rides at the top of Part III so the reconciler can name
---      Morph.ErrorBoundary.
---   2. Every banner states the chapter's role and why it sits where it does.
---   3. Interludes reference nothing outside themselves; a new dependency
---      promotes an interlude into a part.
---   4. New features declare which step of the loop they serve; anything that
---      serves none belongs in the annex.
+-- House rules for new code: a chapter is contiguous; each banner states its
+-- role and why it sits where it does; code uses only names already introduced
+-- (Lua's `local` scoping enforces this, and type annotations are erased
+-- comments that may therefore name a type early).
 --
 -- Public API (see the exports at the end of the file): h, Pos00, Extmark,
--- RenderError, the Morph instance methods, and the Morph.ErrorBoundary /
--- Morph.Portal / Morph.FloatingWindow components.
+-- RenderError, the Morph instance methods, and the ErrorBoundary / Portal /
+-- FloatingWindow components.
 
 --------------------------------------------------------------------------------
 -- PART I -- THE TREE MODEL
 --------------------------------------------------------------------------------
 -- The data model: what a UI tree is made of, how nodes are classified and
--- matched, and h(), the one constructor user code calls. Everything later
--- operates on these structures.
+-- matched, and h(), the one constructor user code calls.
 
 --------------------------------------------------------------------------------
 -- Types
 --------------------------------------------------------------------------------
--- What trees are made of. Why here: every later chapter annotates its
--- parameters with these names, and nothing here runs at runtime.
-
--- The type hierarchy flows from abstract to concrete:
---   Tag (recipe) -> Element (instantiated tag with extmark)
---   Node -> Tree (composable structures)
---   Component (function that produces Trees)
+-- Tag = recipe (an h() result); Element = instantiated tag with an extmark;
+-- Node/Tree = composable structures; Component = a function producing a Tree.
+-- Nothing here runs at runtime.
 --------------------------------------------------------------------------------
 
 --- @alias morph.TagEventHandler fun(e: { tag: morph.Element, mode: string, lhs: string, bubble_up: boolean }): string
 
---- Tag attributes. The `readonly` field is 3-state: `true` locks the region,
---- `false` carves an editable hole (even under a locked ancestor), and absent
---- (nil) inherits from the enclosing region (ultimately the renderer's
---- default, set via Morph.new's `readonly` option).
+--- Tag attributes. `readonly` is 3-state: `true` locks the region, `false`
+--- carves an editable hole (even under a locked ancestor), and nil inherits
+--- from the enclosing region (ultimately Morph.new's `readonly` option).
 --- @alias morph.TagAttributes {
 ---   [string]?: unknown,
 ---   on_change?: (fun(e: { text: string,  bubble_up: boolean }): unknown),
@@ -128,8 +99,7 @@
 ---   extmark?: vim.api.keyset.set_extmark
 --- }
 
---- A tag is the result of calling h(...): it is a recipe for creating an
---- element.
+--- A tag is the result of calling h(...): a recipe for creating an element.
 --- @class morph.Tag
 --- @field kind 'tag'
 --- @field name string | morph.Component<any, any>
@@ -137,55 +107,39 @@
 --- @field children morph.Tree
 --- @field parent? morph.Tag Enclosing tag recorded at render time; the guard
 ---   walks it to ask "is this editable tag inside that readonly one?" The
----   relation must be STRUCTURAL, not positional. Live bounds cannot answer
----   it: a deleted line collapses EVERY tag's marks to the same point, so
----   bounds-containment (vacuously true between any two zero-width spans)
----   would let a destroyed editable sibling 'explain' a destroyed readonly
----   tag and skip the revert (readonly_spec:114, dd of a locked line). The
----   walk is also transitive by necessity: an edit inside a hole grows every
----   ancestor that embeds it, and each must be explained separately.
+---   relation must be structural, not positional: a deleted line collapses
+---   every tag's marks to one point, so bounds-containment would let a
+---   destroyed editable sibling "explain" a destroyed readonly tag.
 --- @field literal? boolean True on the implicit tag wrapping a bare literal
 --- @field private ctx? morph.Ctx<any, any>
 --- @field private curr_text? string
 --- @field private readonly? boolean
 --- @field private stamp? string Hex sequence id minted by the reconciler and
----   copied along matches: the node's identity chain, unique within its
----   document for the session. The reconciler writes it on the app-side node
----   (the graph its next diff sees) and mirrors it on the rendered wrapper
----   for downstream consumers; being a value, it crosses that graph boundary
----   by copying. The undo probe chains a region's history across renders by
----   matching stamps -- then requiring the stored tip to still describe the
----   region's content, so a refilled slot remints instead of inheriting
----   foreign history.
+---   copied along matches: the node's identity chain. The undo probe chains a
+---   region's history across renders by matching stamps, then requiring the
+---   stored tip to still describe the region's content.
 
---- An element is an instantiated Tag
+--- An element is an instantiated Tag.
 --- @class morph.Element : morph.Tag
 --- @field extmark morph.Extmark
 
 --- @alias morph.Node nil | boolean | string | number | morph.Tag
---- One level of array nesting: a subtree may be spliced in as a single child
---- (e.g. `{ 'label: ', ctx.children }`), which the reconciler flattens like a
---- directly written nested literal.
+--- One level of array nesting is allowed, so a subtree can be spliced in as a
+--- single child (e.g. `{ 'label: ', ctx.children }`).
 --- @alias morph.Tree morph.Node | (morph.Node | morph.Node[])[]
 --- @alias morph.Component<TProps, TState> fun(ctx: morph.Ctx<TProps, TState>): morph.Tree
 
 --- One changed tag: its live extmark and the tag's new (live or recovered)
---- content. The collector produces these; the guard's decide and dispatch
---- phases consume them.
+--- content.
 --- @alias morph.TagChange { extmark: morph.Extmark, tag: morph.Tag, text: string }
 
 --------------------------------------------------------------------------------
 -- Tree Utilities
 --------------------------------------------------------------------------------
--- Classify tree nodes: node type, identity keys for matching old to new,
--- and effective readonly resolution. Why here: pure functions over the
--- tree model, consumed by the reconciler (Part III), the text generator
--- (Part IV), and Morph (Part V); nothing here reaches past the tree.
+-- Pure functions over the tree model: node classification and readonly
+-- resolution. Nothing here reaches past the tree.
 
---- Resolve a tag's effective readonly state. 3-state semantics: `true`
---- locks the region, `false` carves an editable hole (even under a locked
---- ancestor), nil inherits from the enclosing region (ultimately the
---- renderer's default).
+--- Resolve a tag's effective readonly state (3-state; see morph.TagAttributes).
 --- @param tag morph.Tag
 --- @param inherited boolean?
 --- @return boolean?
@@ -231,10 +185,8 @@ end
 -- h(): Hyperscript
 --------------------------------------------------------------------------------
 -- The one constructor user code calls; everything downstream consumes what
--- it produces. Why here: Part I ends with the constructor everything else
--- is built on.
+-- it produces.
 --
--- Usage:
 --   h('text', { hl = 'Comment' }, { 'Hello' })  -- explicit text tag
 --   h.Comment({}, { 'Hello' })                  -- shorthand: h.<highlight>
 --   h(MyComponent, { prop = 1 }, { ... })       -- component tag
@@ -263,30 +215,20 @@ local h = setmetatable({}, {
 --------------------------------------------------------------------------------
 -- PART II -- CORE TYPES
 --------------------------------------------------------------------------------
--- The runtime objects the loop manipulates: a position type, the moving
--- region markers nvim tracks for us, the per-component context, and the
--- error value a failing component becomes. First, an interlude on the two
--- environment checks these objects and the later machinery depend on.
+-- The runtime objects the loop manipulates: a position type, the moving region
+-- markers nvim tracks for us, the per-component context, and the error value a
+-- failing component becomes. The environment checks they depend on come first.
 
 --------------------------------------------------------------------------------
 -- Interlude: Environment Checks
 --------------------------------------------------------------------------------
--- Two environment checks that answer "may I act right now?". Self-contained
--- and skippable: neither references anything else in this file. Why here,
--- and not later: Ctx:update (below) consults the first, and every
--- buffer-writing chapter consults the second.
---
--- Textlock: Neovim forbids buffer/window changes during certain operations
--- (autocmd callbacks among them); is_textlock() detects that state so
--- updates can be scheduled for later instead of erroring.
---
--- Readiness: during startup (before VimEnter) a file buffer may have its
--- filename set but its content not loaded yet; rendering into such a buffer
--- prepends content instead of replacing it. is_buffer_api_ready() gates
--- render and mount on that.
+-- Two checks that answer "may I act right now?", one per reason. is_textlock
+-- detects Neovim's textlock -- buffer/window changes are forbidden during it,
+-- e.g. inside an autocmd callback -- so updates can be scheduled instead of
+-- erroring. is_buffer_api_ready detects a startup buffer whose content is not
+-- loaded yet, where a render would prepend instead of replace.
 
---- A lazily-created unlisted scratch buffer used to probe for textlock.
---- We reuse a single buffer to avoid creating/destroying buffers on every check.
+--- A lazily-created scratch buffer reused to probe for textlock.
 --- @type integer?
 local textlock_probe_buf = nil
 
@@ -318,6 +260,14 @@ local function is_textlock()
   return false
 end
 
+--- True when the buffer has a filename but its content is not loaded yet. This
+--- is the one not-ready cause that never clears on its own.
+--- @param bufnr integer
+--- @return boolean
+local function needs_load(bufnr)
+  return vim.api.nvim_buf_get_name(bufnr) ~= '' and vim.fn.bufloaded(bufnr) == 0
+end
+
 --- Check if the buffer API is in a consistent state for rendering.
 --- @param bufnr integer
 --- @return boolean
@@ -325,26 +275,16 @@ local function is_buffer_api_ready(bufnr)
   -- Vim hasn't finished startup - buffer state may be inconsistent
   if vim.v.vim_did_enter == 0 then return false end
 
-  -- File buffer has filename but isn't loaded yet
-  if vim.api.nvim_buf_get_name(bufnr) ~= '' and vim.fn.bufloaded(bufnr) == 0 then return false end
-
-  return true
+  return not needs_load(bufnr)
 end
 
 --- Run `on_ready` once the buffer can accept a render, or fail loudly.
 ---
---- `is_buffer_api_ready` can be false for two reasons, and they need different
---- handling because only one of them self-corrects. An example of the first is
---- a mount issued from an init.lua: before VimEnter the buffer is mid-setup,
---- and that clears the moment VimEnter fires, so the wait rides the event
---- instead of polling (a poll would spin for the whole startup window). An
---- example of the second is a named buffer that was unloaded: `bufloaded` stays
---- 0 no matter how long you wait, so polling it is exactly what let a
---- permanently-unready buffer re-schedule mount forever. That case is instead
---- resolved once by loading the buffer, which is what mounting into it means.
---- If the predicate is still false after both, this errors rather than looping:
---- the two bounded outcomes (ready, or a single loud failure) replace an
---- unbounded retry chain.
+--- The predicate can be false for two reasons. Before VimEnter the buffer is
+--- mid-setup and clears itself when VimEnter fires, so the wait rides that
+--- event instead of polling. A named-but-unloaded buffer never clears on its
+--- own, so load it once (which is what mounting into it means). If the
+--- predicate is still false after both, error rather than loop forever.
 --- @param bufnr integer
 --- @param on_ready fun()
 local function when_buffer_ready(bufnr, on_ready)
@@ -372,9 +312,7 @@ local function when_buffer_ready(bufnr, on_ready)
 
   -- Past startup the only remaining blocker is the named-but-unloaded buffer,
   -- which never clears by itself; loading it once is the caller's intent.
-  if vim.api.nvim_buf_get_name(bufnr) ~= '' and vim.fn.bufloaded(bufnr) == 0 then
-    pcall(vim.fn.bufload, bufnr)
-  end
+  if needs_load(bufnr) then pcall(vim.fn.bufload, bufnr) end
 
   if is_buffer_api_ready(bufnr) then
     on_ready()
@@ -393,10 +331,8 @@ end
 --------------------------------------------------------------------------------
 -- Pos00: Zero-Based Buffer Positions
 --------------------------------------------------------------------------------
--- One position type for the whole file: nvim's API mixes 0-based and
--- 1-based indexing, and every comparison would otherwise restate that
--- accident. Why here: Extmark, the printer, the guard, and the probe all
--- compare positions.
+-- One zero-based position type for the whole file, so nvim's mix of 0- and
+-- 1-based indexing is restated in exactly one place.
 
 --- @class morph.Pos00
 --- @field [1] integer 0-based row
@@ -428,14 +364,16 @@ function Pos00:__le(other)
   return self[2] <= other[2]
 end
 
+--- Render as a `row:col` string, so a position can key a set collision-free.
+--- @return string
+function Pos00:__tostring() return ('%d:%d'):format(self[1], self[2]) end
+
 --------------------------------------------------------------------------------
 -- Extmark: Wrapper Around Neovim's Extmark API
 --------------------------------------------------------------------------------
--- Extmarks are the moving bookmarks nvim keeps for us: regions of text that
--- travel as the buffer is edited. This wrapper normalizes their quirks --
--- inverted or past-EOF bounds, newline-only spans, getregion's 1-based
--- positions. Why here: the printer places them, the guard reads them, and
--- the probe's writebacks re-place them.
+-- Extmarks are the moving bookmarks nvim keeps for us: text regions that
+-- travel as the buffer is edited. This wrapper normalizes their quirks
+-- (inverted or past-EOF bounds, degenerate spans).
 
 --- @class morph.Extmark
 --- @field id integer
@@ -490,8 +428,9 @@ end
 --- @param id integer
 --- @param start_row0 integer
 --- @param start_col0 integer
---- @param details vim.api.keyset.extmark_details? Present when the source API
----   call requested details; the body treats absent details as "no known end".
+--- @param details { end_row: integer?, end_col: integer? }? Present when the
+---   source API call requested details; the body treats absent details as "no
+---   known end". A full extmark-details keyset satisfies this narrower shape.
 --- Construct an Extmark from raw API data, normalizing bounds that extend past buffer end.
 function Extmark._from_raw(bufnr, id, start_row0, start_col0, details)
   local start = Pos00.new(start_row0, start_col0)
@@ -539,55 +478,26 @@ function Extmark._get_in_range(bufnr, ns, start, stop)
 end
 
 --- @private
---- Extract the text content covered by this extmark.
+--- The live text covered by this extmark's span. The constructors (new and
+--- _from_raw) already clamp the bounds, so no row fixup is needed here; a
+--- degenerate or inverted span reads empty. The trailing-newline behavior (an
+--- end on the next line's column 0 includes the previous line's newline) comes
+--- from nvim_buf_get_text itself.
 --- @return string
 function Extmark:_text()
   local start, stop = self.start, self.stop
-  if start == stop then return '' end
-
-  -- Handle inverted positions (start > stop), which can occur after buffer
-  -- deletions. Return empty string as there's no valid content to extract.
-  if start > stop then return '' end
-
-  -- Handle edge case: if stop is at column 0, we need to include the newline
-  -- from the previous line, which getregion doesn't handle well
-  local needs_trailing_newline = false
-  if stop[2] == 0 and stop[1] > 0 then
-    needs_trailing_newline = true
-    local prev_line = vim.api.nvim_buf_get_lines(self.bufnr, stop[1] - 1, stop[1], true)[1] or ''
-    stop = Pos00.new(stop[1] - 1, #prev_line)
-    -- Extmark covers exactly one newline. Return early to avoid the
-    -- adjusted stop == start producing inverted same-line positions
-    -- that confuse getregion into leaking the preceding character.
-    if start == stop then return '\n' end
-  end
-
-  -- Convert to 1-based positions for getregion (Neovim's API inconsistency strikes again)
-  local pos1 = { self.bufnr, start[1] + 1, start[2] + 1, 0 }
-  local pos2 = { self.bufnr, stop[1] + 1, stop[2] == 0 and 1 or stop[2], 0 }
-
-  local ok, lines = pcall(vim.fn.getregion, pos1, pos2, { type = 'v' })
-  if not ok then
-    vim.api.nvim_echo({
-      { '(morph.nvim:getregion:invalid-pos) ', 'ErrorMsg' },
-      { '{ start, end } = ' .. vim.inspect({ pos1, pos2 }, { newline = ' ', indent = '' }) },
-    }, true, {})
-    error(lines)
-  end
-
-  if needs_trailing_newline then
-    table.insert(lines --[[@as string[] ]], '')
-  end
-  return table.concat(lines --[[@as string[] ]], '\n')
+  if not (start < stop) then return '' end
+  return table.concat(
+    vim.api.nvim_buf_get_text(self.bufnr, start[1], start[2], stop[1], stop[2], {}),
+    '\n'
+  )
 end
 
 --------------------------------------------------------------------------------
 -- Ctx: Component Context (Props, State, Lifecycle)
 --------------------------------------------------------------------------------
--- Every component receives a Ctx: props (immutable input), state (owned by
--- the component), phase ('mount'|'update'|'unmount'), update(newState) and
--- refresh() to trigger re-renders, and do_after_render(fn) to schedule work.
--- Why here: the reconciler constructs and drives it next.
+-- Every component receives a Ctx: props, state, phase, and the update /
+-- refresh / do_after_render controls.
 
 --- @generic TProps
 --- @generic TState
@@ -622,11 +532,10 @@ function Ctx.new(bufnr, document, props, state, children)
   }, Ctx)
 end
 
---- Update state and trigger a re-render.
---- During 'mount' phase, this only updates state (no re-render, to avoid infinite loops).
---- When the buffer cannot be touched right now -- a textlock (e.g. during an
---- on_bytes callback, which includes fast events) or the guard's dispatch
---- batch -- the re-render is scheduled instead of run synchronously.
+--- Update state and trigger a re-render (mount phase only updates state, to
+--- avoid infinite loops). When the buffer cannot be touched right now -- a
+--- textlock, or the guard's dispatch batch -- the re-render is scheduled
+--- instead of run synchronously.
 --- @param new_state TState
 function Ctx:update(new_state)
   self.state = new_state
@@ -635,11 +544,8 @@ function Ctx:update(new_state)
   if self.phase == 'mount' then return end
   if not self.on_change then return end
 
-  -- One decision serves sync and debounced modes alike: is_textlock() already
-  -- covers fast events and expr-mapping E565s, and document.textlock covers
-  -- the guard's dispatch batch. In debounce mode a direct call defers anyway
-  -- (on_change only arms a timer), so scheduling it instead only moves the
-  -- moment that timer is armed, never the buffer-write timing.
+  -- Scheduling is safe in debounce mode too: on_change only arms a timer, so
+  -- this moves when the timer is armed, never when the buffer is written.
   local locked = (self.document and self.document.textlock) or is_textlock()
   if locked then
     vim.schedule(self.on_change)
@@ -685,8 +591,7 @@ end
 -- RenderError
 --------------------------------------------------------------------------------
 -- The value a failing component's error becomes: message, component, phase,
--- and the ancestor trace. Why here: the reconciler throws it and the error
--- boundary renders it.
+-- and the ancestor trace.
 
 --- @class morph.RenderError
 --- @field message string original error message
@@ -724,18 +629,15 @@ end
 --------------------------------------------------------------------------------
 -- PART III -- RECONCILIATION
 --------------------------------------------------------------------------------
--- The Reconciler owns everything a single Morph:mount() tracks across
--- renders: the mounted tree, the last reconciled tree, the render trace,
--- the after-render callback queue, and the debounce timer. Morph owns
--- buffers, extmarks, and keymaps; the Reconciler owns components and their
--- lifecycle. The split is visible at their one meeting point:
--- Reconciler:rerender() calls Morph:render() with a simplified tree.
-
--- Morph's declaration rides at the top of this part because the
--- reconciler must name it: reconcile_component gives Morph.ErrorBoundary
--- descendants their catch-and-fallback treatment -- the one deliberate
--- forward reference in code, since the field itself is assigned in the
--- annex. Morph's behavior is built in Part V.
+-- The Reconciler owns everything a single mount() tracks across renders: the
+-- mounted tree, the last reconciled tree, the render trace, the after-render
+-- callback queue, and the debounce timer. Morph owns buffers, extmarks, and
+-- keymaps; the Reconciler owns components and their lifecycle. They meet at
+-- Reconciler:rerender(), which calls Morph:render().
+--
+-- Morph's declaration rides here because the reconciler names it:
+-- reconcile_component gives ErrorBoundary descendants their catch-and-fallback
+-- treatment. Morph's behavior is built in Part V.
 
 --- @alias morph.MorphTextState {
 ---   lines: string[],
@@ -745,9 +647,7 @@ end
 --- }
 
 --- Read a buffer's undo tree. `undotree()` reports on the current buffer, so
---- hidden buffers need the `nvim_buf_call` hop. Shared by the guard (whose
---- mirror signal is the main tree's sequence number) and the probe (whose
---- own tree drives traversal).
+--- hidden buffers need the `nvim_buf_call` hop.
 --- @param bufnr integer
 --- @return vim.fn.undotree.ret
 local function undotree(bufnr)
@@ -759,10 +659,9 @@ end
 --- @class morph.Morph
 --- @field private bufnr integer
 --- @field private ns integer
---- @field private changedtick integer
+--- @field private changedtick? integer -- buffer tick recorded after we last synced text_content.lines
 --- @field private changing boolean
 --- @field private textlock boolean
---- @field private debounce_ms? integer
 --- @field private original_keymaps table<string, table<string, any>>
 --- @field private text_content morph.MorphTextState
 --- @field private cleanup_hooks function[]
@@ -790,7 +689,7 @@ Morph.__index = Morph
 --- @field after_render_callbacks function[] Queued ctx:do_after_render callbacks
 --- @field debounce_ms integer Resolved debounce for this mount (0 = synchronous)
 --- @field debounce_timer table? Pending maxWait debounce timer
---- @field last_invoke_time integer? uv.now() of the last render; nil until the initial render lands
+--- @field last_invoke_time integer uv.now() of the last render, seeding the debounce window
 --- @field teardown_done boolean Idempotence guard: buffer deletion and explicit unmount can both tear down
 --- @field mounted boolean True while mounted; stale rerenders no-op after unmount
 --- @field unmount_autocmd_id integer? BufDelete/BufUnload/BufWipeout autocmd that tears the mount down
@@ -813,7 +712,7 @@ function Reconciler.new(document, tree, opts)
     after_render_callbacks = {},
     debounce_ms = opts.debounce_ms or 0,
     debounce_timer = nil,
-    last_invoke_time = nil,
+    last_invoke_time = 0,
     teardown_done = false,
     mounted = false,
     stamp_seq = 0,
@@ -830,23 +729,20 @@ function Reconciler.new(document, tree, opts)
   return self
 end
 
---- Mint a region stamp: a fixed-width hex sequence id, unique within this
---- document for the session. A counter, not a content hash, because the stamp
---- must be render-invariant for matched nodes -- hashing content or position
---- breaks on exactly the reorders identity exists to support.
+--- Mint a region stamp: a session-unique hex sequence id. A counter, not a
+--- content hash: the stamp must be render-invariant for matched nodes, and
+--- hashing content or position breaks on the reorders identity exists for.
 --- @return string
 function Reconciler:_mint_stamp()
   self.stamp_seq = self.stamp_seq + 1
   return ('%016x'):format(self.stamp_seq)
 end
 
---- Mount the tree: mark mounted, render synchronously (the debounce wrapper
---- passes through while last_invoke_time is still nil), and record the render
---- time for the debounce maxWait logic.
+--- Mount the tree: mark mounted, render synchronously, and record the render
+--- time so the maxWait debounce measures from the mount render.
 function Reconciler:start()
   self.mounted = true
-  self:schedule_rerender()
-  -- Must be set AFTER the initial render to allow the pass-through guard.
+  self:rerender()
   self.last_invoke_time = vim.uv.now()
 end
 
@@ -861,11 +757,9 @@ function Reconciler:_trace_names()
   return names
 end
 
---- Run all queued after-render callbacks, then clear the queue.
---- Called at the end of each rerender and after a terminal unmount (buffer
---- deletion), so callbacks registered during an unmount phase still execute.
---- The queue is cleared before running so a callback that triggers a nested
---- rerender (via ctx:update during the update phase) sees a fresh queue.
+--- Run all queued after-render callbacks, then clear the queue. The queue is
+--- swapped out before running, so a callback that triggers a nested rerender
+--- (via ctx:update during the update phase) sees a fresh one.
 function Reconciler:_run_after_render_callbacks()
   local callbacks = self.after_render_callbacks
   self.after_render_callbacks = {}
@@ -893,8 +787,7 @@ function Reconciler:_unmount_tree(old_tree)
     local tag = old_tree --[[@as morph.Tag]]
     local Component = tag.name --[[@as morph.Component<any, any>]]
 
-    -- Skip if already unmounted (prevents double-unmount on old_tree not
-    -- being updated due to a prior unmount error during reconciliation)
+    -- Skip if already unmounted (a prior unmount error can leave old_tree stale).
     if not tag.ctx then return end
     local ctx = tag.ctx
 
@@ -926,35 +819,37 @@ function Reconciler:reconcile(old_tree, new_tree)
   -- If type changed, unmount old tree first
   if old_type ~= new_type then self:_unmount_tree(old_tree) end
 
-  -- Handle each node type
-  local rendered
-
   -- Primitives pass through untouched: no lifecycle, nothing to match.
   if new_type == 'nil' or new_type == 'boolean' or new_type == 'string' or new_type == 'number' then
-    rendered = new_tree
-  elseif new_type == 'array' then
+    return new_tree
+  end
+
+  if new_type == 'array' then
     local old_array = (old_type == 'array') and old_tree --[[@as morph.Node[]?]] or nil
     --- @diagnostic disable-next-line: need-check-nil
-    rendered = self:reconcile_array(old_array, new_tree --[[@as morph.Node[] ]])
-  elseif new_type == 'tag' then
+    return self:reconcile_array(old_array, new_tree --[[@as morph.Node[] ]])
+  end
+
+  if new_type == 'tag' then
     local new_tag = new_tree --[[@as morph.Tag]]
     local old_children = (old_type == new_type) and (old_tree --[[@as morph.Tag]]).children or nil
     --- @diagnostic disable-next-line: need-check-nil
-    rendered = h(new_tag.name, new_tag.attributes, self:reconcile(old_children, new_tag.children))
-    -- Identity travels as a VALUE: a hex sequence id minted on mount and
-    -- copied along matches. It lives on the app-side node because that is
-    -- the graph the next diff sees; the wrapper mirrors it for the probe.
+    local rendered =
+      h(new_tag.name, new_tag.attributes, self:reconcile(old_children, new_tag.children))
+    -- Identity is a value: a hex id minted on mount and copied along matches.
+    -- It lives on the app-side node (the graph the next diff sees); the
+    -- wrapper mirrors it for the probe.
     local stamp = (old_type == 'tag') and old_tree.stamp or nil
     if not stamp then stamp = self:_mint_stamp() end
     new_tag.stamp = stamp
     --- @diagnostic disable-next-line: need-check-nil
     rendered.stamp = stamp
-  elseif new_type == 'component' then
-    --- @diagnostic disable-next-line: need-check-nil
-    rendered = self:reconcile_component(old_tree, new_tree --[[@as morph.Tag]])
+    return rendered
   end
 
-  return rendered
+  -- Components are the only remaining node type.
+  --- @diagnostic disable-next-line: need-check-nil
+  return self:reconcile_component(old_tree, new_tree --[[@as morph.Tag]])
 end
 
 --- Reconcile arrays of nodes by matching old to new on identity keys (node
@@ -1055,15 +950,13 @@ function Reconciler:reconcile_component(old_tree, new_tag)
     ctx = Ctx.new(self.document.bufnr, self.document, new_tag.attributes, nil, new_tag.children)
   end
 
-  -- Set name before calling Component so ctx.name is populated if it throws.
-  -- Components that self-name (ctx.name = 'X') will override this; on update the
-  -- guard skips since the name was already set during mount.
+  -- Set the name before calling Component so ctx.name is populated if it
+  -- throws. A self-naming component (ctx.name = 'X') overrides this.
   --- @diagnostic disable-next-line: need-check-nil
   if ctx.name == '' then ctx.name = debug.getinfo(Component, 'n').name or '<anonymous>' end
 
-  -- Update context with new props/children and wire up callbacks. The closures
-  -- are stable for the mount's lifetime, so they can be captured before the
-  -- debounced schedule path even exists.
+  -- Update props/children and wire the callbacks; the closures are stable for
+  -- the mount's lifetime.
   ctx.props = new_tag.attributes
   ctx.children = new_tag.children
   ctx.on_change = function() self:schedule_rerender() end
@@ -1110,9 +1003,8 @@ function Reconciler:reconcile_component(old_tree, new_tag)
   ctx.prev_rendered_children = rendered_children
   table.remove(self.trace)
 
-  -- As soon as we've mounted, move past the 'mount' state. This is
-  -- because Ctx will not fire `on_update` if it is still in the
-  -- 'mount' state (to avoid stack overflows).
+  -- Move past 'mount' right after the first render: Ctx:update no-ops while
+  -- the phase is still 'mount' (to avoid stack overflows).
   ctx.phase = 'update'
 
   return result
@@ -1130,28 +1022,11 @@ function Reconciler:rerender()
   self:_run_after_render_callbacks()
 end
 
---- MaxWait debounce: at most one rerender per debounce_ms interval
---- while updates keep arriving, plus a trailing-edge final render
---- when they stop.
----
---- On each call:
----   - If a timer is already pending, do nothing (state is already
----     up to date — Ctx:update sets self.state before calling us).
----   - If not, compute the time remaining until the next allowed
----     render slot (debounce_ms since last_invoke_time) and schedule
----     a timer for that duration.
----
---- This guarantees a ceiling rate of 1 render / debounce_ms, and
---- the trailing edge ensures the UI always shows the latest state
---- after a burst settles.
+--- MaxWait debounce: at most one rerender per debounce_ms while updates
+--- arrive, plus a trailing render once they stop. A pending timer makes the
+--- call a no-op, because Ctx:update already set state before calling us;
+--- otherwise schedule a timer for the time left until the next allowed slot.
 function Reconciler:schedule_rerender()
-  -- Pass-through: initial mount render runs synchronously.
-  -- last_invoke_time is nil until set after the initial rerender() call.
-  if self.last_invoke_time == nil then
-    self:rerender()
-    return
-  end
-
   -- A zero debounce renders synchronously; only positive values rate-limit.
   if self.debounce_ms <= 0 then
     self:rerender()
@@ -1160,8 +1035,9 @@ function Reconciler:schedule_rerender()
 
   if self.debounce_timer and self.debounce_timer:is_active() then return end
 
-  local now = vim.uv.now()
-  local ms_since_last_invoke = math.max(0, now - self.last_invoke_time)
+  -- Elapsed time past a full window still waits one window: the trailing
+  -- render keeps its spacing rather than firing the instant work arrives.
+  local ms_since_last_invoke = vim.uv.now() - self.last_invoke_time
   local delay
   if ms_since_last_invoke >= self.debounce_ms then
     delay = self.debounce_ms
@@ -1176,13 +1052,10 @@ function Reconciler:schedule_rerender()
   end, delay)
 end
 
---- Terminal teardown: fires all unmount phases and frees every resource
---- attached to this mount. Shared by the unmount autocmd (buffer deletion)
---- and the public Morph:unmount(). Leaves buffer content as-is; callers that
---- want a blank buffer clear it themselves. Idempotent: a buffer deletion may
---- unmount the document via its autocmd, and a later explicit unmount (e.g.
---- a Portal releasing its inner document after the portal buffer is gone)
---- must be a no-op.
+--- Terminal teardown: fires all unmount phases and frees every resource of
+--- this mount (the unmount autocmd and Morph:unmount both call it). Leaves
+--- buffer content as-is. Idempotent, because buffer deletion and an explicit
+--- unmount can both run it.
 function Reconciler:teardown()
   if self.teardown_done then return end
   self.teardown_done = true
@@ -1214,18 +1087,15 @@ end
 --------------------------------------------------------------------------------
 -- PART IV -- TEXT GENERATION
 --------------------------------------------------------------------------------
--- From reconciled tree to buffer bytes: the diff algorithm, the generator
--- that flattens a tree into lines while caching each tag's text and span for
--- the guard, and the patcher that writes the difference with minimal edits.
+-- From reconciled tree to buffer bytes: the diff algorithm, the generator that
+-- flattens a tree into lines while caching each tag's text for the guard, and
+-- the patcher that writes the difference with minimal edits.
 
 --------------------------------------------------------------------------------
 -- Interlude: The Levenshtein Diff
 --------------------------------------------------------------------------------
--- The minimal edit sequence between two lists. Self-contained and
--- skippable. Why here, with the text generator: patch_lines is its only
--- consumer (lines, then characters within a changed line); reconciliation
--- matches components by identity key instead, so the reconciler does not
--- need it.
+-- The minimal edit sequence between two lists. patch_lines is the only
+-- consumer (lines, then characters within a changed line).
 
 --- @alias morph.LevenshteinChangeAdd<T> { kind: 'add', item: T, index: integer }
 --- @alias morph.LevenshteinChangeDelete<T> { kind: 'delete', item: T, index: integer }
@@ -1285,18 +1155,11 @@ local function levenshtein(opts)
   end
   --- @diagnostic enable: need-check-nil
 
-  -- Backtrack to extract the changes.
-  --
-  -- IMPORTANT: We must check which operation was *actually* used to reach the
-  -- current cell, not just compare previous cell values. When costs are
-  -- variable (e.g., key-based reconciliation where matching keys cost less),
-  -- the previous cell values don't tell us which path was taken - we need to
-  -- verify that prev_cell + operation_cost == current_cell.
-  --
-  -- Priority when multiple operations tie: delete > add > change.
-  -- This prefers removing items over substituting them, which produces more
-  -- intuitive results for keyed list reconciliation (e.g., removing 'b' from
-  -- ['a','b'] should delete 'b', not substitute 'b' for 'a' and delete 'a').
+  -- Backtrack to extract the changes. Verify which operation actually reached
+  -- each cell (prev_cell + operation_cost == current_cell) rather than
+  -- comparing the cell values, since variable costs make a cheaper path
+  -- invisible in the values alone. Ties prefer delete > add > change, so
+  -- removing 'b' from ['a','b'] deletes it rather than substituting it.
   local changes = {} --- @type morph.LevenshteinChange<any>[]
   local i, j = m, n
 
@@ -1348,10 +1211,8 @@ end
 --------------------------------------------------------------------------------
 -- From Tree to Lines
 --------------------------------------------------------------------------------
--- markup_to_lines flattens a tree into buffer lines, caching every tag's
--- text (curr_text) along the way -- the snapshot the guard later decides
--- with. Why here: the reconciler has decided WHAT to draw; this decides how
--- it reads, and Part V writes it.
+-- markup_to_lines flattens a tree into buffer lines, caching every tag's text
+-- (curr_text) along the way -- the snapshot the guard later decides with.
 
 --- Convert a tree to an array of lines, optionally calling on_tag for each tag.
 --- This is the core "rendering" logic that flattens the tree into text.
@@ -1505,17 +1366,10 @@ function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(
 --------------------------------------------------------------------------------
 -- Reading the Difference / Writing the Difference
 --------------------------------------------------------------------------------
--- Two line-array diffs, one chapter because they are the same trick in both
--- directions, on the same engine (the Interlude's levenshtein). diff_to_band
--- reads where the buffer changed: the guard's dirty band is the content diff
--- of the render's line snapshot against the live lines -- settled states,
--- final coordinates, no event frames. patch_lines writes a computed
--- difference: old_lines -> new_lines with minimal buffer edits (a
--- whole-buffer replace when a large buffer changed too much, otherwise the
--- trimmed-context Levenshtein on lines and characters). Why here: render
--- calls patch_lines after every flatten, which keeps the write path in one
--- chapter, and the guard diffs each user burst through diff_to_band beside
--- it.
+-- Two line-array diffs on the same engine (the Interlude's levenshtein).
+-- diff_to_band reads where the buffer changed: the guard's dirty band is the
+-- content diff of the render's snapshot against the live lines. patch_lines
+-- writes a computed difference with minimal buffer edits.
 
 --- Trim the common prefix/suffix lines from two line arrays: the changed
 --- region both diff consumers work on. patch_lines writes that region;
@@ -1557,32 +1411,20 @@ local function middle_lines(lines, prefix, suffix)
 end
 
 --- Diff two line arrays into the guard's dirty band. Both sides are settled
---- content -- the render's line snapshot vs the live buffer lines -- so
---- unlike on_bytes geometry no frame compensation applies: the rows ARE
---- final coordinates. The engine is the house levenshtein, run on the
---- trimmed middle at line granularity -- the exact alignment patch_lines
---- writes with, here read back as geometry.
+--- content (the render's snapshot vs the live lines), so the rows are final
+--- coordinates and no frame compensation applies. The engine is the house
+--- levenshtein on the trimmed middle -- the same alignment patch_lines writes.
 ---
---- The band's edges are extmark semantics, not diff logic. The top is the
---- region top, widened UP over the region's net removed lines: a tag
---- spanning from above the junction owns its deleted tail, and its start
---- mark sits on an UNCHANGED row -- nvim_buf_get_extmarks matches marks by
---- their start positions, so only the widened band reaches it. The bottom
---- is the junction -- the first unchanged row after the region, where a
---- removed range's extmarks are parked -- and it is deliberately NOT
---- clamped to the buffer: appends and end-of-buffer edits park marks one
---- row PAST the last line, and the extmark query accepts the out-of-range
---- end. When the region preserves the line count and rows follow it,
---- nothing was removed and nothing parks past its content, so the bottom
---- tightens to the region's last changed row.
+--- The edges are extmark semantics, not diff logic. The top tightens up over
+--- the region's net removed lines, so a tag that started above the junction
+--- and owns a deleted tail is still reached (nvim_buf_get_extmarks matches by
+--- start position). The bottom is the junction where a removed range's marks
+--- park; it is deliberately not clamped to the buffer, because appends park
+--- marks one row past the last line.
 ---
---- Windows: one per maximal run of the script's line ops -- the DP's exact
---- alignment decides where runs break (an aligned-equal pair between ops is
---- the gap). Columns are trimmed from the run's first and last line pair --
---- the collapsed-span witness reads its new content through the window that
---- touches its collapse point (see _collect_changed_band). A run with no
---- new rows (a pure delete) gets no window: its witness correctly reads
---- empty at the junction.
+--- Windows: one per maximal run of the script's line ops, columns trimmed from
+--- the run's first and last line pair. A run with no new rows (a pure delete)
+--- gets none; its witness correctly reads empty at the junction.
 --- @param old_lines string[] The diff base (the render's line snapshot)
 --- @param new_lines string[] The live buffer lines
 --- @return integer? top0 nil when the arrays are identical
@@ -1622,16 +1464,12 @@ function Morph.diff_to_band(old_lines, new_lines)
   local line_changes = levenshtein { from = trimmed_old, to = trimmed_new }
 
   -- Walk the script in document order (the backtrack emits it end-first),
-  -- grouping ops into runs. The backtrack records each op's FROM anchor
-  -- (its `index`), so the aligned-equal pairs it skipped are visible as a
-  -- gap between the anchor and the replay position: each silent keep
-  -- advances both sides, and that gap is exactly what breaks runs -- the
-  -- DP's exact alignment deciding what the old pairing walk only guessed
-  -- at.
+  -- grouping ops into runs. Each op records its FROM anchor (its `index`), so
+  -- the aligned-equal pairs it skipped appear as a gap between the anchor and
+  -- the replay position; that gap breaks runs.
   local from_pos, to_pos = 1, 1
-  -- The run's consumed row ranges, 1-based into the trimmed arrays: the
-  -- FROM side is the old rows it rewrote, the TO side the new rows it
-  -- produced (nil while the run has consumed nothing on that side).
+  -- The run's consumed ranges, 1-based into the trimmed arrays: FROM = old rows
+  -- rewritten, TO = new rows produced (nil until the run consumes that side).
   --- @type { from_first: integer?, from_last: integer?, to_first: integer?, to_last: integer? }?
   local run = nil
   local function flush_run()
@@ -1639,16 +1477,14 @@ function Morph.diff_to_band(old_lines, new_lines)
     if not r then return end
     run = nil
     if not r.to_first then return end -- a pure delete run: the witness reads empty
-    -- to_first/to_last are always set together (every TO-consuming op
-    -- writes both), so the to_first guard above covers to_last too; the
-    -- checker cannot see that.
+    -- to_first/to_last are set together, so the to_first guard also covers
+    -- to_last; the checker cannot see that.
     local to_first, to_last =
       r.to_first, --[[@as integer]]
       r.to_last --[[@as integer]]
     local first_old = r.from_first and trimmed_old[r.from_first] or nil
     local last_old = r.from_last and trimmed_old[r.from_last] or nil
-    -- The run consumed TO rows to_first..to_last, all within the region, so
-    -- the lookups cannot miss (the region never extends past m - suffix).
+    -- The run's TO rows are within the region, so these lookups cannot miss.
     local first_new = trimmed_new[to_first] --[[@as string]]
     local last_new = trimmed_new[to_last] --[[@as string]]
     local col0 = 0
@@ -1685,8 +1521,7 @@ function Morph.diff_to_band(old_lines, new_lines)
     if keeps > 0 or not run then flush_run() end
     run = run or {}
     if keeps > 0 then
-      -- The silent keeps: aligned-equal pairs, both sides advancing, none
-      -- of them an op.
+      -- Silent keeps: aligned-equal pairs advancing both sides.
       from_pos, to_pos = from_pos + keeps, to_pos + keeps
     end
     if change.kind == 'delete' then
@@ -1735,12 +1570,9 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
     end
   end
 
-  -- Stage 2 (O(n)): trim common prefix/suffix lines (trim_common_edges, the
-  -- same cut the guard's diff_to_band reads through) so Levenshtein only
-  -- sees the changed middle.  A single-line insertion deep in a 1000-line
-  -- list balloons Levenshtein's O(n^2) cost; most tree-view edits are
-  -- localised, so the trimmed input is orders of magnitude smaller than the
-  -- raw line count suggests.
+  -- Trim common prefix/suffix lines so Levenshtein only sees the changed
+  -- middle. A one-line insertion deep in a 1000-line list would otherwise
+  -- balloon its O(n^2) cost; most tree-view edits are localised.
   local prefix, suffix = trim_common_edges(old_lines, new_lines)
 
   local line_changes = levenshtein {
@@ -1787,24 +1619,18 @@ end
 --------------------------------------------------------------------------------
 -- PART V -- THE MORPH INSTANCE
 --------------------------------------------------------------------------------
--- The Morph instance: one per buffer, owning its text, extmarks, keymaps,
--- and undo interception. It provides render(tree) for static markup,
--- mount(tree) for component lifecycle, get_elements_at(pos) and
--- get_element_by_id(id) for queries, and keypress dispatch to element
--- handlers. Its declaration rides at the top of Part III (the reconciler
--- names Morph.ErrorBoundary); all of its behavior lives here, in
--- dependency order: constructor, render, mount/unmount, queries, dispatch.
+-- One Morph per buffer, owning its text, extmarks, keymaps, and undo
+-- interception. Provides render (static markup), mount (component lifecycle),
+-- the element queries, and keypress dispatch.
 
 --------------------------------------------------------------------------------
 -- Shared Helpers
 --------------------------------------------------------------------------------
 -- Keymap constants and the two helpers Morph's methods share: the
--- innermost-first element sort (shared with the guard in Part VI), and
--- buffer-keymap restore. Why here: the methods below all use them.
+-- innermost-first element sort and the buffer-keymap restore.
 
--- Keymap modes paired with the tag attributes that hold their handlers, in
--- registration order. One table instead of two index-linked arrays: a pairs
--- loop cannot desynchronize the way two parallel arrays can.
+-- Keymap modes paired with the tag attributes that hold their handlers. One
+-- table instead of two index-linked arrays, which could desynchronize.
 local KEYMAP_MODES = {
   { mode = 'i', attr = 'imap' },
   { mode = 'n', attr = 'nmap' },
@@ -1815,7 +1641,6 @@ local KEYMAP_MODES = {
 
 --- Sort element records (tables with an `extmark` field) innermost first:
 --- smallest span before larger containing spans; ties broken by extmark id.
---- Shared by get_elements_at and the change guard's on_change fire order.
 --- @param list { extmark: morph.Extmark }[]
 local function sort_innermost_first(list)
   table.sort(list, function(a, b)
@@ -1826,9 +1651,9 @@ local function sort_innermost_first(list)
 end
 
 --- @private
---- Clear all buffer-local keymaps, then restore the pre-morph snapshot.
---- Shared by render (before each pass) and terminal teardown (unmount), so a
---- live buffer is never left with stale morph-installed keymap handlers.
+--- Clear all buffer-local keymaps, then restore the pre-morph snapshot. Shared
+--- by render (before each pass) and teardown, so a live buffer never keeps
+--- stale morph-installed keymaps.
 --- @param self morph.Morph
 local function restore_buffer_keymaps(self)
   for _, keymap in ipairs(KEYMAP_MODES) do
@@ -1848,17 +1673,15 @@ end
 -- Constructor
 --------------------------------------------------------------------------------
 -- Morph.new binds the instance to a buffer: namespace, keymap snapshot, the
--- diff-state shell, and the buffer-deletion cleanup. Why here: the object's
--- declaration rode along in Part III; its life starts here.
+-- diff-state shell, and the buffer-deletion cleanup.
 
 --- Create a new Morph instance bound to a buffer.
 --- @param bufnr integer? Buffer number (nil or 0 means current buffer)
---- @param opts? table  Fields: `readonly` (boolean): every tag without an
----   explicit readonly attribute is locked by default (tags can carve editable
----   holes with readonly = false). Undo/redo is region-aware whenever a render
----   locks anything: traversal keys and commands are routed through a hidden
----   probe buffer so they govern only the editable regions, and app chrome
----   renders stay independent of history.
+--- @param opts? table  Fields: `readonly` (boolean): lock every tag that has no
+---   explicit readonly attribute, so tags can carve editable holes with
+---   readonly = false. Undo/redo is then region-aware: traversal keys route
+---   through a hidden probe buffer and govern only the editable regions, while
+---   app chrome renders stay independent of history.
 --- @return morph.Morph
 function Morph.new(bufnr, opts)
   local init_opts = opts or {}
@@ -1875,7 +1698,8 @@ function Morph.new(bufnr, opts)
     -- Renderer-level readonly default: when true, every tag without an
     -- explicit readonly attribute is locked (readonly = false carves holes).
     readonly_default = init_opts.readonly,
-    changedtick = 0,
+    -- nil means "no snapshot is proven current": the first render fetches.
+    changedtick = nil,
     changing = false,
     textlock = false,
     -- The row range the last judged burst swept (test/debug introspection).
@@ -1922,8 +1746,49 @@ end
 --------------------------------------------------------------------------------
 -- One pass: flatten the tree, patch the delta, place extmarks under the
 -- seam-gravity rules, refresh probe bookkeeping, and reinstall keymaps.
--- Why here: it is the loop's render step; mount and unmount below are its
--- lifecycle wrapper.
+
+--- An extmark queued for creation after the buffer text is patched.
+--- @alias morph.PendingExtmark { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }
+
+--- Set the boundary gravity of editable spans that touch. At a seam between
+--- two adjacent editable spans a keystroke must land in exactly one: an
+--- editable span's start yields forward when another editable span ends there
+--- (holding the seam to the left), except a zero-width span, which never
+--- yields its start (typing at an empty hole must enter the hole).
+---
+--- An editable span's end instead holds when a zero-width editable span starts
+--- there: the hole's bytes must go only to the hole, and a riding left end
+--- would balloon over them (the probe's writeback would then erase the hole).
+--- @param pending_extmarks morph.PendingExtmark[]
+local function apply_boundary_gravity(pending_extmarks)
+  local editable_stop_keys = {}
+  local editable_zero_start_keys = {}
+  for _, pending in ipairs(pending_extmarks) do
+    if not pending.tag.readonly then
+      editable_stop_keys[tostring(pending.stop)] = true
+      if pending.start == pending.stop then
+        editable_zero_start_keys[tostring(pending.start)] = true
+      end
+    end
+  end
+  for _, pending in ipairs(pending_extmarks) do
+    local zero_width = pending.start == pending.stop
+    if
+      not pending.tag.readonly
+      and not zero_width
+      and editable_stop_keys[tostring(pending.start)]
+    then
+      pending.opts = vim.tbl_extend('force', pending.opts, { right_gravity = true })
+    end
+    if
+      not pending.tag.readonly
+      and not zero_width -- a zero-width span's stop is its own start, not a neighbor's
+      and editable_zero_start_keys[tostring(pending.stop)]
+    then
+      pending.opts = vim.tbl_extend('force', pending.opts, { end_right_gravity = false })
+    end
+  end
+end
 
 --- Render static markup to the buffer.
 --- This is a "one-shot" render - no lifecycle, no state, just text + extmarks.
@@ -1933,8 +1798,7 @@ function Morph:render(tree)
   -- Guard: buffer may have been deleted while render was scheduled
   if not vim.api.nvim_buf_is_valid(self.bufnr) then return end
 
-  -- Guard: buffer API may not be ready during startup (before VimEnter). See
-  -- when_buffer_ready: event-driven wait or a one-time load, never a poll.
+  -- Buffer may not be ready during startup; see when_buffer_ready.
   if not is_buffer_api_ready(self.bufnr) then
     when_buffer_ready(self.bufnr, function() self:render(tree) end)
     return
@@ -1943,21 +1807,9 @@ function Morph:render(tree)
   -- Ensure buffer watcher is created (for on_change handlers)
   self:_ensure_buf_watcher()
 
-  -- Detect if the buffer changed externally since our last render, and resync
-  -- the diff base from the buffer's real lines when it did.
-  local changedtick = vim.b[self.bufnr].changedtick
-  if changedtick ~= self.changedtick then
-    self.text_content = {
-      lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false),
-      tags_to_extmark_ids = {},
-      extmark_ids_to_tag = {},
-    }
-    self.changedtick = changedtick
-  end
-
   -- We need to collect extmarks during tree traversal, but can't create them
   -- until after the buffer text is updated (extmarks need valid positions)
-  local pending_extmarks = {} --- @type { tag: morph.Tag, start: morph.Pos00, stop: morph.Pos00, opts: any }[]
+  local pending_extmarks = {} --- @type morph.PendingExtmark[]
   -- Every resolved-editable tag, in render order: the probe's regions.
   local probe_regions = {} --- @type morph.Tag[]
 
@@ -1971,10 +1823,9 @@ function Morph:render(tree)
     on_tag = function(tag, start, stop)
       if tag.name ~= 'text' then return end
 
-      -- Every resolved-editable tag is an undo region, decided purely by the
-      -- resolved readonly. Undo entries snapshot the whole region set, so a
-      -- nested editable tag neither splits undo steps nor disagrees with the
-      -- region that embeds it on replay.
+      -- Every resolved-editable tag is an undo region. Entries snapshot the
+      -- whole region set, so a nested editable tag neither splits undo steps
+      -- nor disagrees with the region embedding it on replay.
       if not tag.readonly then table.insert(probe_regions, tag) end
 
       -- Convert hl attribute to extmark highlight
@@ -1985,10 +1836,9 @@ function Morph:render(tree)
 
       local extmark_opts = tag.attributes.extmark or {}
       if tag.readonly then
-        -- Locked spans reject boundary inserts: a typed character at a locked
-        -- span's edge must land OUTSIDE the lock (in an adjacent hole), not
-        -- inside the locked text. Inverted gravity does that: the start mark
-        -- yields forward, the end mark holds.
+        -- Locked spans reject boundary inserts: inverted gravity (start
+        -- yields forward, end holds) lands a typed edge character in the
+        -- adjacent hole, not inside the lock.
         extmark_opts = vim.tbl_extend('force', extmark_opts, {
           right_gravity = true,
           end_right_gravity = false,
@@ -2008,9 +1858,7 @@ function Morph:render(tree)
           vim.keymap.set(keymap.mode, lhs, function()
             local result = self:_dispatch_keypress(keymap.mode, lhs)
 
-            -- Empty string means "swallow this keypress". In insert mode that's
-            -- easy, but in normal mode we need a trick: use g@ with a no-op
-            -- operator function.
+            -- '' swallows the keypress; normal mode needs the g@ no-op trick.
             if result == '' and keymap.mode ~= 'i' then
               vim.go.operatorfunc = 'v:lua.MorphOpFuncNoop'
               return 'g@ '
@@ -2022,9 +1870,15 @@ function Morph:render(tree)
     end,
   }
 
-  -- Edge case: empty trees produce empty lines array, but buffers always have
-  -- at least one line. Set curr.lines to reflect reality, not the empty tree.
+  -- Buffers always have one line, so an empty tree yields { '' }.
   if #lines == 0 then lines = { '' } end
+
+  -- Reuse the last render's snapshot as the diff base only while the buffer
+  -- still matches it. changedtick is the proof: every write (ours, a user's,
+  -- undo, the probe) bumps it, so a match means text_content.lines is still
+  -- the live text and patch_lines need not fetch it again.
+  local diff_base = nil
+  if self.changedtick == vim.b[self.bufnr].changedtick then diff_base = self.text_content.lines end
 
   -- Update buffer text with minimal edits
   self.text_content = { lines = lines, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
@@ -2034,60 +1888,13 @@ function Morph:render(tree)
   vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
 
   self.changing = true
-  -- nil base: the live lines still equal the pre-render text -- the resync
-  -- above re-read them whenever changedtick moved, and nothing since wrote
-  -- text -- so let patch_lines read its own base instead of storing one.
-  Morph.patch_lines(self.bufnr, nil, lines)
+  -- A nil base makes patch_lines read the live buffer; a recorded base is the
+  -- snapshot the tick proved current, so the fetch is skipped.
+  Morph.patch_lines(self.bufnr, diff_base, lines)
   self.changing = false
   self.changedtick = vim.b[self.bufnr].changedtick
 
-  -- Boundary gravity: at the seam between two adjacent editable spans, a
-  -- keystroke must land in exactly ONE of them. An editable span's start
-  -- yields forward when another editable span ends exactly there, so a
-  -- keystroke at the seam joins the span to the left instead of being claimed
-  -- by both (the guard's attribution below settles leftovers). Zero-width
-  -- spans never yield their start: typing at an empty hole's position must
-  -- enter the hole.
-  --
-  -- Ends: Extmark.new's yielding default (end_right_gravity=true) makes a
-  -- span's end ride over inserted text -- right for typing at a span's own
-  -- tail, but wrong when a ZERO-WIDTH editable span starts at the same
-  -- position: the hole's start never yields, so its bytes must go only to
-  -- the hole, and a left span whose end also rode over them would grow its
-  -- live span across the hole's text (the guard accepts the overlap, but the
-  -- undo probe then writes the left region's snapshot over the inflated span
-  -- and erases the hole's bytes). So an editable span's end holds when a
-  -- zero-width editable span starts exactly there. Non-zero-width starts are
-  -- excluded: they yield (rule above), so the left end's ride is what claims
-  -- the seam bytes for the span to the left.
-  local function pos_key(p) return ('%d:%d'):format(p[1], p[2]) end
-  local editable_stop_keys = {}
-  local editable_zero_start_keys = {}
-  for _, pending in ipairs(pending_extmarks) do
-    if not pending.tag.readonly then
-      editable_stop_keys[pos_key(pending.stop)] = true
-      if pending.start[1] == pending.stop[1] and pending.start[2] == pending.stop[2] then
-        editable_zero_start_keys[pos_key(pending.start)] = true
-      end
-    end
-  end
-  for _, pending in ipairs(pending_extmarks) do
-    local zero_width = pending.start[1] == pending.stop[1] and pending.start[2] == pending.stop[2]
-    if
-      not pending.tag.readonly
-      and not zero_width
-      and editable_stop_keys[pos_key(pending.start)]
-    then
-      pending.opts = vim.tbl_extend('force', pending.opts, { right_gravity = true })
-    end
-    if
-      not pending.tag.readonly
-      and not zero_width -- a zero-width span's stop is its own start, not a neighbor's
-      and editable_zero_start_keys[pos_key(pending.stop)]
-    then
-      pending.opts = vim.tbl_extend('force', pending.opts, { end_right_gravity = false })
-    end
-  end
+  apply_boundary_gravity(pending_extmarks)
 
   -- Create extmarks for the new tree
   for _, pending in ipairs(pending_extmarks) do
@@ -2103,30 +1910,25 @@ function Morph:render(tree)
     self.text_content.top_level_tag = first.tag
   end
 
-  -- Sync (or create) the undo probe with this render's editable regions. The
-  -- probe's content and undo tree persist across renders; only the tag/id
-  -- bookkeeping is refreshed, because a render creates brand-new extmarks.
-  -- A render with no intentional holes keeps Neovim's native undo.
+  -- Sync the probe with this render's editable regions. Its content and undo
+  -- tree persist across renders; only the tag/id bookkeeping is refreshed,
+  -- since a render mints brand-new extmarks. No holes means native undo.
   self:_sync_probe(probe_regions)
 
-  -- Re-arm traversal interception on every render: unmount's cleanup deletes
-  -- the autocmd, so a remount (which never calls new again) must re-install
-  -- it here. The installer is idempotent while one is already live.
+  -- Re-arm traversal interception: unmount's cleanup deletes the autocmd, so
+  -- a remount must re-install it (the installer is idempotent).
   self:_install_probe_cmdline()
 
-  -- Install the probe's traversal mappings last, after the probe exists and
-  -- after restore_buffer_keymaps wiped the previous render's maps. The wipe is
-  -- what removes them again on a later fully-unlocked render.
+  -- Install the probe's traversal mappings after the keymap wipe above, which
+  -- is also what removes them on a later fully-unlocked render.
   if self.probe then self:_install_probe_keymaps() end
 end
 
 --------------------------------------------------------------------------------
 -- Mount and Unmount
 --------------------------------------------------------------------------------
--- mount() hands a tree to a Reconciler (Part III) for full lifecycle,
--- unmount() tears it down, and _release_mount_resources() frees the
--- buffer-side state a mounted document holds. Why here: lifecycle brackets
--- render.
+-- mount() hands a tree to a Reconciler for full lifecycle; unmount() tears it
+-- down and _release_mount_resources() frees the buffer-side state.
 
 --- Mount a component tree with full lifecycle management.
 --- Components can have state, respond to updates, and run cleanup on unmount.
@@ -2135,14 +1937,11 @@ end
 function Morph:mount(tree, opts)
   opts = opts or {}
   local debounce_ms = opts.debounce_ms or (vim.env.NVIM_TEST and 0 or 16)
-  if debounce_ms > 0 then self.debounce_ms = debounce_ms end
   if vim.b[self.bufnr]._morph_mounted then
     error('Morph:mount() can only be called once per buffer', 0)
   end
 
-  -- Guard: buffer API may not be ready during startup. The wait is event-driven
-  -- (VimEnter) or a one-time load, never an unbounded poll; see
-  -- when_buffer_ready. Re-entering mount preserves opts.
+  -- May not be ready during startup; re-entering mount preserves opts.
   if not is_buffer_api_ready(self.bufnr) then
     when_buffer_ready(self.bufnr, function() self:mount(tree, opts) end)
     return
@@ -2167,11 +1966,9 @@ function Morph:unmount()
 end
 
 --- @private
---- Free the buffer-side resources a mounted document holds: registered cleanup
---- hooks, buffer keymaps, the extmark namespace, the buffer watcher, the undo
---- probe, and the text/diff state. Lifecycle concerns (unmount phases,
---- after-render callbacks) live in Reconciler:teardown, which calls this as its
---- final step. The buffer's content text is left as-is.
+--- Free the buffer-side resources a mounted document holds: cleanup hooks,
+--- keymaps, the extmark namespace, the watcher, the probe, and the diff state.
+--- Reconciler:teardown calls this after the lifecycle phases. Content stays.
 function Morph:_release_mount_resources()
   for _, cleanup in ipairs(self.cleanup_hooks) do
     cleanup()
@@ -2186,10 +1983,9 @@ function Morph:_release_mount_resources()
 
   -- Reset instance state for re-mountability.
   self.buf_watcher = nil
-  self.changedtick = 0
-  self.debounce_ms = nil
-  -- Free the probe buffer: it is per-mount state, and leaving it loaded
-  -- would leak a hidden buffer (and its undo tree) every mount/unmount cycle.
+  self.changedtick = nil
+  -- The probe buffer is per-mount state; leaving it loaded would leak a hidden
+  -- buffer and its undo tree every mount/unmount cycle.
   self:_teardown_probe()
   self.text_content = { lines = {}, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
 end
@@ -2197,42 +1993,16 @@ end
 --------------------------------------------------------------------------------
 -- Element Queries
 --------------------------------------------------------------------------------
--- get_elements_at(pos) and get_element_by_id(id) map buffer positions back
--- to elements, innermost first; _position_intersects_extmark corrects nvim's
--- over-inclusive extmark ranges. Why here: Morph reading its own state
--- back -- and dispatch, below, acts on what a query finds.
+-- get_elements_at(pos) and get_element_by_id(id) map buffer positions back to
+-- elements, innermost first; position_intersects_extmark corrects nvim's
+-- over-inclusive extmark ranges.
 
---- Find all elements that contain the given position, sorted innermost to outermost.
---- @param pos [integer, integer]|morph.Pos00 0-based position
---- @param mode string? Vim mode ('i', 'n', etc.) - affects cursor width semantics
---- @return morph.Element[]
-function Morph:get_elements_at(pos, mode)
-  pos = Pos00.new(pos[1], pos[2])
-  mode = (mode or vim.api.nvim_get_mode().mode):sub(1, 1)
-
-  -- Get candidate extmarks and convert to elements
-  local candidates = Extmark._get_in_range(self.bufnr, self.ns, pos, pos)
-
-  local elements = {} --- @type morph.Element[]
-  for _, extmark in ipairs(candidates) do
-    local tag = self.text_content.extmark_ids_to_tag[extmark.id]
-    if tag and self._position_intersects_extmark(pos, extmark, mode) then
-      table.insert(elements, vim.tbl_extend('force', {}, tag, { extmark = extmark }))
-    end
-  end
-
-  -- Sort innermost (smallest) to outermost (largest)
-  sort_innermost_first(elements)
-
-  return elements
-end
-
---- @private
 --- Check if a position truly intersects an extmark (Neovim's API is over-inclusive).
 --- @param pos morph.Pos00
 --- @param extmark morph.Extmark
 --- @param mode? string
-function Morph._position_intersects_extmark(pos, extmark, mode)
+--- @return boolean
+local function position_intersects_extmark(pos, extmark, mode)
   local start, stop = extmark.start, extmark.stop
 
   -- Zero-width extmarks at cursor position are considered intersecting
@@ -2246,10 +2016,8 @@ function Morph._position_intersects_extmark(pos, extmark, mode)
 
   -- Check column bounds on stop row
   if pos[1] == stop[1] then
-    -- Special case: on an empty line where extmark ends at column 0,
-    -- the cursor at column 0 should be considered inside. This happens when
-    -- an element ends with a newline - the cursor on the resulting empty line
-    -- has nowhere else to be, so it should still trigger handlers.
+    -- An element ending in a newline strands the cursor on the following
+    -- empty line, where it has nowhere else to be; treat it as inside.
     --- @diagnostic disable-next-line: invert-if
     if pos[2] == 0 and stop[2] == 0 then
       local line = vim.api.nvim_buf_get_lines(extmark.bufnr, pos[1], pos[1] + 1, true)[1] or ''
@@ -2272,6 +2040,31 @@ function Morph._position_intersects_extmark(pos, extmark, mode)
   return true
 end
 
+--- Find all elements that contain the given position, sorted innermost to outermost.
+--- @param pos [integer, integer]|morph.Pos00 0-based position
+--- @param mode string? Vim mode ('i', 'n', etc.) - affects cursor width semantics
+--- @return morph.Element[]
+function Morph:get_elements_at(pos, mode)
+  pos = Pos00.new(pos[1], pos[2])
+  mode = (mode or vim.api.nvim_get_mode().mode):sub(1, 1)
+
+  -- Get candidate extmarks and convert to elements
+  local candidates = Extmark._get_in_range(self.bufnr, self.ns, pos, pos)
+
+  local elements = {} --- @type morph.Element[]
+  for _, extmark in ipairs(candidates) do
+    local tag = self.text_content.extmark_ids_to_tag[extmark.id]
+    if tag and position_intersects_extmark(pos, extmark, mode) then
+      table.insert(elements, vim.tbl_extend('force', {}, tag, { extmark = extmark }))
+    end
+  end
+
+  -- Sort innermost (smallest) to outermost (largest)
+  sort_innermost_first(elements)
+
+  return elements
+end
+
 --- Find an element by its id attribute.
 --- @param id string
 --- @return morph.Element?
@@ -2285,26 +2078,15 @@ function Morph:get_element_by_id(id)
 end
 
 --------------------------------------------------------------------------------
--- Keymap Management
---
--- We intercept keypresses to dispatch them to element handlers.
--- Original keymaps are snapshotted in Morph.new() and restored before each render.
-
---------------------------------------------------------------------------------
 -- Keypress Dispatch
 --------------------------------------------------------------------------------
 -- Element handlers (imap/nmap/vmap/xmap/omap) receive keypresses innermost
--- first; returning '' swallows the key. Render's expr-mappings route the
--- swallow through the no-op operator below, because normal mode needs a `g@`
--- trick rather than an empty rhs. Original keymaps are snapshotted in
--- Morph.new and restored before each render. Why here: the last of
--- Morph's own machinery before Part VI turns to user input.
+-- first; returning '' swallows the key, routed through the no-op operator
+-- below because normal mode lacks an empty-rhs trick.
 
--- The no-op operator function behind the normal-mode swallow: an expr mapping
--- returning '' only swallows in insert mode, so render's mappings return 'g@ '
--- with this as operatorfunc, and the resulting operator-pending no-op consumes
--- the keypress. Defined once here; only the operatorfunc assignment below
--- happens per keypress.
+-- The no-op operator behind the normal-mode swallow: render's expr mappings
+-- return 'g@ ' with this as operatorfunc, and the operator-pending no-op
+-- consumes the key. Only the operatorfunc assignment happens per keypress.
 function _G.MorphOpFuncNoop() end
 
 --- @private
@@ -2344,23 +2126,17 @@ end
 --------------------------------------------------------------------------------
 -- PART VI -- CHANGE HANDLING
 --------------------------------------------------------------------------------
--- User edits arrive through the watcher, and the guard decides, per
--- keystroke, what was aimed at an editable region and what violated the
--- tree. Why after Part V: "is_rendering" and the snapshot fields only mean
--- something once render and the diff state exist.
+-- User edits arrive through the watcher, and the guard decides what was aimed
+-- at an editable region and what violated the tree.
 
 --------------------------------------------------------------------------------
 -- The Buffer Watcher
 --------------------------------------------------------------------------------
 -- The watcher counts user edits as they stream through nvim_buf_attach's
--- on_bytes (excluding morph's own render writes) and reports the burst when
--- TextChanged says the buffer is stable again. Detection only: the drain
--- never reads event coordinates and carries no geometry -- the consumer
--- derives the dirty band by diffing its own line snapshot against the live
--- lines (see diff_to_band): settled states, final coordinates, no event
--- frames to compensate. _ensure_buf_watcher is its Morph-side adapter. Why
--- here: the reader has now met render, so "morph is mid-render" is a
--- phrase with meaning.
+-- on_bytes (excluding morph's own render writes) and reports the burst once
+-- TextChanged says the buffer is stable. Detection only: it reads no event
+-- coordinates and carries no geometry; the consumer derives the dirty band by
+-- diffing its own line snapshot against the live lines (see diff_to_band).
 
 --- @class morph.ChangeWindow One splice's replacement region: where the
 ---   change's new text lives.
@@ -2370,34 +2146,25 @@ end
 --- @field end_col integer
 
 --- @class morph.BufWatcher
---- @field pending_edits integer Count of user on_bytes events captured while
----   morph was NOT rendering, still unprocessed: genuine user edits. Fast
----   typing batches several events into one TextChanged window; the
----   consumer judges the whole batch once, when the window closes, because
----   render writes must never be policed as if the user made them. The
----   events' coordinates are never read -- the burst's geometry comes from
----   the content diff (see diff_to_band) -- so the count doubles as the
+--- @field pending_edits integer User on_bytes events captured while morph was
+---   not rendering, still unprocessed. Fast typing batches several into one
+---   TextChanged window, judged together when it closes. Doubles as the
 ---   change-in-flight flag (cursor movements inside a burst belong to the
 ---   change, not to navigation).
 --- @field cursor_sample? integer[] Last settled cursor position (win_get_cursor
----   format): sampled on genuine navigation and on deliberate placements (an
----   app's post-render cursor positioning), never on movements caused by a
----   change in flight. The pre-edit snapshot for readonly reverts.
+---   format), the pre-edit snapshot for readonly reverts. Sampled on genuine
+---   navigation, never on a change in flight.
 --- @field text_changed_autocmd_id integer
 --- @field cursor_moved_autocmd_id integer
 --- @field cleanup fun() Remove the watcher
 
---- Create a buffer watcher that calls `callback` once for every burst of
---- user edits -- the on_bytes events captured between TextChanged windows --
---- after the buffer is stable again. The watcher owns change DETECTION
---- only: the burst's geometry is the consumer's to derive (see diff_to_band)
---- against the consumer's own baseline.
+--- Create a buffer watcher that calls `callback` once per burst of user edits
+--- (the on_bytes events between TextChanged windows) after the buffer is
+--- stable. A burst need not mean the content changed (type-and-delete diffs to
+--- nothing); the consumer decides against its own baseline.
 --- @param bufnr integer
 --- @param is_rendering fun(): boolean Whether morph is mid-render (its own writes)
---- @param callback fun() Called once per closed user-edit burst, with no
----   payload. A reported burst need not mean the content changed (a burst
----   that typed and deleted within one window diffs to nothing); the
----   consumer decides by diffing against its own baseline.
+--- @param callback fun() Called once per closed user-edit burst, no payload
 --- @return morph.BufWatcher
 local function create_buf_watcher(bufnr, is_rendering, callback)
   -- Guard: buffer API must be ready for nvim_buf_attach to work
@@ -2411,14 +2178,12 @@ local function create_buf_watcher(bufnr, is_rendering, callback)
 
   local watcher = { pending_edits = 0 }
 
-  -- Count on_bytes events but don't judge yet. Only events captured while
-  -- morph is NOT rendering count as user edits: the guard polices user
-  -- edits, and running it on morph's own writes made every app re-render
-  -- (which rewrites the buffer after `changing` is already false) look like
-  -- an out-of-tree edit -- a spurious revert per keystroke.
-  -- NOTE: this callback must NOT return true -- for Lua-attached
-  -- nvim_buf_listen callbacks a true return DETACHES the listener (nil
-  -- continues), the opposite of what the C API's Boolean suggests.
+  -- Count on_bytes events but judge nothing yet; only events from while morph
+  -- is not rendering count as user edits, since policing morph's own writes
+  -- would revert the app's legitimate re-render.
+  -- NOTE: must NOT return true -- a true return from a Lua nvim_buf_listen
+  -- callback DETACHES the listener (nil continues), the opposite of the C
+  -- API's Boolean.
   local attach_ok = vim.api.nvim_buf_attach(bufnr, false, {
     on_bytes = function(...)
       if is_rendering() then return end
@@ -2435,44 +2200,35 @@ local function create_buf_watcher(bufnr, is_rendering, callback)
     )
   end
 
-  -- Report the closed burst to the consumer when TextChanged fires (buffer
-  -- is now stable)
+  -- Report the closed burst once TextChanged says the buffer is stable.
   watcher.text_changed_autocmd_id = vim.api.nvim_create_autocmd(
     { 'TextChanged', 'TextChangedI', 'TextChangedP' },
     {
       buffer = bufnr,
       callback = function()
         if watcher.pending_edits == 0 then
-          -- Either no change happened, or the pending window held only
-          -- morph's own render writes (the render already refreshed the
-          -- snapshots it wrote); policing that would revert the app's
-          -- legitimate re-render. Mixed windows (user edit and render writes
-          -- in one typeahead batch) still run -- the diff sees whatever the
-          -- content became.
+          -- No change, or the window held only morph's own render writes
+          -- (already accounted for); policing that would revert a legitimate
+          -- re-render. Mixed windows still run -- the diff reads what came out.
           return
         end
         watcher.pending_edits = 0
-        -- The burst -- one TextChanged window -- is the unit of user action.
-        -- The count's only remaining job was to prove a user edit happened;
-        -- what the content became is the consumer's to read and diff.
+        -- One TextChanged window is the unit of user action; the count's only
+        -- job was to prove a user edit happened.
         callback()
       end,
     }
   )
 
-  -- Track the settled cursor position for the pre-edit snapshot used by
-  -- readonly reverts: by the time a change's TextChanged fires, nvim has
-  -- already adjusted (and often clamped) the cursor, so no post-change
-  -- observation can recover the original. Movements are sampled EXCEPT when
-  -- caused by a change in flight: morph's own patch (is_rendering) and a
-  -- pending user edit's cursor adjustment are skipped, while deliberate
-  -- placements after a render's writes settle sample directly.
+  -- Track the settled cursor for readonly reverts' pre-edit snapshot: by the
+  -- time TextChanged fires, nvim has already clamped the cursor, so the
+  -- original is unrecoverable. Skip movements caused by a change in flight
+  -- (morph's own patch, a pending edit's adjustment); sample the rest.
   watcher.cursor_moved_autocmd_id = vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI' }, {
     buffer = bufnr,
     callback = function()
       if is_rendering() then return end
-      -- A user edit is pending (unprocessed): its cursor movements belong to
-      -- the change, not to navigation, so keep the pre-edit sample.
+      -- Keep the pre-edit sample while a user edit is pending.
       if watcher.pending_edits > 0 then return end
       watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
     end,
@@ -2487,18 +2243,15 @@ local function create_buf_watcher(bufnr, is_rendering, callback)
 end
 
 --- @private
---- Ensure the buffer watcher is created. Called lazily from render/mount.
---- Readiness is create_buf_watcher's own contract; this adapter only adds the
---- lazy-create and the cleanup-hook registration.
+--- Lazily create the buffer watcher and register its cleanup hook.
 function Morph:_ensure_buf_watcher()
   if self.buf_watcher then return end
 
   self.buf_watcher = create_buf_watcher(
     self.bufnr,
     function() return self.changing end,
-    -- Called once per closed user-edit burst. The guard owns everything
-    -- after that: it reads the live lines, diffs them against the render's
-    -- snapshot (see diff_to_band), and judges the resulting band.
+    -- Called once per closed burst; the guard then reads the live lines and
+    -- judges the diff band (see diff_to_band).
     function() self:_on_bytes_burst() end
   )
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
@@ -2510,35 +2263,29 @@ end
 -- Polices text changes: reverts edits that touched locked text or landed
 -- outside the tree (flash + full-tree restore), attributes accepted edits to
 -- the editable tags that own them, and fires their on_change handlers.
--- State model (each piece justified by a spec):
+-- The frames it decides with:
 --   tag.curr_text  the accepted content per tag -- the only frame the guard
---                   decides with; live extmark positions locate the text,
---                   they never decide.
---   diff base        the render's line snapshot (text_content.lines):
---                   the burst's dirty region is the content diff against it
---                   (see diff_to_band) -- settled states, final coordinates,
---                   no event frames.
---   watcher.cursor_sample/pending_edits  the pre-edit cursor snapshot and
---                   the pending user edit; render-owned writes never open a
---                   guard window.
+--                   decides with; live extmark positions locate the text but
+--                   never decide.
+--   diff base        the render's line snapshot (text_content.lines); the
+--                   burst's dirty region is the content diff against it
+--                   (see diff_to_band).
+--   watcher.cursor_sample/pending_edits  the pre-edit cursor snapshot and the
+--                   pending user edit; render-owned writes open no window.
 
 --- @private
---- Revert an edit that violated the tree: flash the touched regions, then
---- restore the buffer to the tree's content. The tree is the source of
---- truth: instead of surgically repairing the buffer (which fights extmark
---- mark-adjustment), the normal render pipeline rebuilds every span from
---- scratch. Runs on a scheduler tick so it never mutates the buffer
---- mid-handler.
+--- Revert an edit that violated the tree: flash the touched regions, then let
+--- the normal render pipeline rebuild every span from scratch (surgical repair
+--- would fight extmark mark-adjustment). Runs on a scheduler tick, so it never
+--- mutates the buffer mid-handler.
 --- @param violated morph.TagChange[] Changed readonly tags whose extmarks get
----   flashed; empty when the edit landed outside every span and nothing can be
----   flashed.
+---   flashed; empty when the edit landed outside every span.
 function Morph:_revert_violation(violated)
   for _, m in ipairs(violated) do
     self:_flash_readonly(m.extmark.start, m.extmark.stop)
   end
-  -- Restore the cursor to the pre-edit snapshot: by handler time nvim has
-  -- already adjusted (and often clamped) it, so the live position cannot be
-  -- trusted.
+  -- Restore the pre-edit cursor: nvim has already adjusted (and clamped) the
+  -- live position by handler time.
   local restore_cursor = self.buf_watcher and self.buf_watcher.cursor_sample or nil
   local function restore()
     if not restore_cursor then return end
@@ -2546,11 +2293,10 @@ function Morph:_revert_violation(violated)
     if win ~= -1 then pcall(vim.api.nvim_win_set_cursor, win, restore_cursor) end
   end
   vim.schedule(function()
-    -- The restore must run AFTER the revert render, which may be deferred (the
-    -- production default debounce is 16ms). A deferred render re-inserts the
-    -- deleted text ABOVE the cursor, so restoring first leaves the cursor one
-    -- row below the pre-edit position. Queueing restore as an after-render
-    -- callback lands it on whichever render the reconciler ends up running.
+    -- Restore must run AFTER the revert render, which may be deferred (the
+    -- default debounce is 16ms): a deferred render re-inserts the deleted text
+    -- above the cursor, so restoring first leaves it a row low. Queueing it as
+    -- an after-render callback lands it on whichever render actually runs.
     if self.reconciler then
       table.insert(self.reconciler.after_render_callbacks, restore)
       self.reconciler:schedule_rerender()
@@ -2576,38 +2322,92 @@ function Morph:_flash_readonly(start, stop)
   end)
 end
 
+--- True when `inner` descends from `outer`, walking the parent links recorded
+--- at render time.
+--- @param inner morph.Tag
+--- @param outer morph.Tag
+--- @return boolean
+local function is_inside(inner, outer)
+  local tag = inner.parent
+  while tag do
+    if tag == outer then return true end
+    tag = tag.parent
+  end
+  return false
+end
+
+--- True when some readonly tag's content changed and no changed editable tag
+--- sits inside it. This is the whole guard: nesting, not position. A hole's own
+--- edit explains every readonly ancestor whose growth it caused, but never an
+--- editable tag it is not part of -- which is how a write over the hole's edge
+--- is caught (the chrome literal is a readonly sibling with no changed editable
+--- child). Example:
+---
+---   `Name: [x]`
+---   0000000000
+---   0123456789
+---   A="Name: [" readonly  B="x" editable  C="]" readonly
+---
+---   write [5,8)->'Y'  ->  A's content changed (it lost " ["); B is not
+---   inside A (sibling) -> violation. ciw on B alone leaves A unchanged ->
+---   accepted.
+--- @param editable morph.TagChange[]
+--- @param locked morph.TagChange[]
+--- @return boolean
+local function readonly_violated(editable, locked)
+  for _, suspect in ipairs(locked) do
+    local explained = false
+    for _, hole in ipairs(editable) do
+      if is_inside(hole.tag, suspect.tag) then
+        explained = true
+        break
+      end
+    end
+    if not explained then return true end
+  end
+  return false
+end
+
+--- Fire one tag's on_change with the standard event shape and return the
+--- (handler-mutable) event, nil when the tag has no handler. Callers hold
+--- `self.textlock` across a batch of these via _with_textlock.
+--- @param tag morph.Tag
+--- @param text string
+--- @return table? event
+local function fire_tag_on_change(tag, text)
+  local on_change = tag.attributes.on_change
+  if not vim.is_callable(on_change) then return nil end
+  local event = { text = text, bubble_up = true }
+  --- @diagnostic disable-next-line: need-check-nil
+  on_change(event)
+  return event
+end
+
 --- @private
---- Judge one TextChanged burst. The burst is the unit of user action: fast
---- typing batches several edits into one TextChanged window, and every
---- keystroke of the batch is already applied when the window fires. The
---- band sidesteps per-event frames entirely -- it is the content diff of
---- the render's snapshot against the live lines (see diff_to_band) -- so
---- the guard sweeps the dirty band ONCE, in final coordinates, through the
---- usual phases: collect the tags whose live content differs from the
---- tree's expectation, decide (any readonly tag whose change no editable
---- descendant explains reverts the whole tree), accept (every changed tag's
---- expectation moves to its new content and the diff base moves to the
---- live lines), then dispatch the owned edits to their on_change handlers.
+--- Judge one TextChanged burst -- the unit of user action, since fast typing
+--- batches several edits into one window and all are already applied when it
+--- fires. The dirty band is the content diff of the render's snapshot against
+--- the live lines (see diff_to_band), so the guard sweeps final coordinates
+--- once: collect changed tags, decide (a readonly change no editable
+--- descendant explains reverts the whole tree), accept (advance expectations
+--- and the diff base), then dispatch the owned edits to on_change.
 function Morph:_on_bytes_burst()
-  -- Belt-and-suspenders: the watcher already drops morph's own writes at
-  -- capture, but a re-entrant call during a render must never reach the
-  -- guard. Deferring is sound: the diff base stands, so the next drain
-  -- re-diffs -- and its band contains this burst too.
+  -- The watcher already drops morph's own writes at capture; this also
+  -- deflects a re-entrant call during a render. Deferring is sound: the diff
+  -- base stands, so the next drain re-diffs and still contains this burst.
   if self.changing then return end
 
   local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
   local top0, bottom0, windows = Morph.diff_to_band(self.text_content.lines, lines)
-  -- A nil band means the content is identical to the accepted baseline:
-  -- nothing to judge (a burst that typed and deleted within one window
-  -- lands here, and correctly polices nothing).
+  -- A nil band means content identical to the baseline: type-and-delete
+  -- bursts land here and correctly police nothing.
   if not top0 then return end
 
   -- The band that judged this burst, for tests and debugging.
   self._last_band = { top0, bottom0 }
 
-  -- Which tags' live content changed? (see _collect_changed_band for the test)
-  -- A non-nil top0 guarantees all three diff returns are real (see
-  -- diff_to_band); the checker cannot narrow multi-returns, so assert it.
+  -- A non-nil top0 guarantees all three diff returns are real; the checker
+  -- cannot narrow multi-returns, so assert it.
   local editable, locked = self:_collect_changed_band(
     top0,
     bottom0 --[[@as integer]],
@@ -2615,107 +2415,71 @@ function Morph:_on_bytes_burst()
   )
 
   -- A changed readonly tag with no changed editable descendant is a
-  -- violation: the edit touched locked text and no hole's edit explains it.
-  -- No baseline commit: the revert restores the standing snapshot's
-  -- content, which is exactly what the next drain's diff must come back
-  -- empty on.
-  if self._readonly_violated(editable, locked) then
+  -- violation (the edit touched locked text that no hole's edit explains).
+  -- No baseline commit: the revert restores the standing snapshot, so the
+  -- next drain's diff comes back empty.
+  if readonly_violated(editable, locked) then
     self:_revert_violation(locked)
     return
   end
 
-  -- No tag in the band changed: the edit landed outside every rendered
-  -- span. The tree is the whole document, so locked apps revert that -- and
-  -- skip the accept-commit below for the same reason as the violation.
+  -- No tag changed: the edit landed outside every span. The tree is the whole
+  -- document, so locked apps revert that too.
   if #editable == 0 and self.readonly_default then
     self:_revert_violation {}
     return
   end
 
-  -- Accept: every changed tag's expectation moves to its live content --
-  -- editable so dispatch announces the new text, locked so the next burst
-  -- does not re-read them as fresh violations -- and the diff base moves to
-  -- the live lines, so the next drain's diff starts from here.
+  -- Accept: advance every changed tag's expectation to its live content
+  -- (editable so dispatch announces it, locked so the next burst does not
+  -- re-read it as a violation), and move the diff base to the live lines.
   for _, list in ipairs { editable, locked } do
     for _, m in ipairs(list) do
       m.tag.curr_text = m.text
     end
   end
   self.text_content.lines = lines
+  -- The guard just read these exact lines, so the rerender it triggers can
+  -- reuse them as its diff base instead of fetching the buffer again.
+  self.changedtick = vim.b[self.bufnr].changedtick
 
   -- Keep probe entries in step with main entries, before on_change fires.
   if self.probe then self.probe:mirror(undotree(self.bufnr).seq_cur) end
 
-  -- Dispatch: a changed editable tag OWNS the edit, so fire its on_change
-  -- innermost first. The textlock defers handler-triggered re-renders; the
-  -- collector's captured tag stays the right target even if an earlier
-  -- handler updated app state.
+  -- A changed editable tag owns the edit: fire its on_change innermost first.
+  -- The textlock defers handler-triggered re-renders, and the captured tag
+  -- stays the right target even if an earlier handler updated app state.
   if #editable > 0 then
     sort_innermost_first(editable)
     self:_with_textlock(function()
       for _, m in ipairs(editable) do
-        local event = Morph._fire_tag_on_change(m.tag, m.text)
+        local event = fire_tag_on_change(m.tag, m.text)
         if event and not event.bubble_up then break end
       end
     end)
-    -- The accepted edit's cursor movement was gated out of the snapshot, so
-    -- refresh it: the next revert restores here, not before this burst.
+    -- The accepted edit's cursor move was gated out of the snapshot; refresh
+    -- it so the next revert restores here.
     if self.buf_watcher and vim.fn.bufwinid(self.bufnr) ~= -1 then
       self.buf_watcher.cursor_sample = vim.api.nvim_win_get_cursor(0)
     end
     return
   end
 
-  -- Classic apps have no locked tree to enforce: the whole buffer is the
-  -- top-level tag's content, so hand the change to its on_change. The
-  -- baseline is already committed to `lines` above.
+  -- Classic apps have no locked tree: the whole buffer is the top-level tag's
+  -- content, so hand the change to its on_change.
   local top = self.text_content.top_level_tag
   if not (top and vim.is_callable(top.attributes.on_change)) then return end
   local content = table.concat(lines, '\n')
   if top.curr_text == content then return end
   top.curr_text = content
-  self:_with_textlock(function() Morph._fire_tag_on_change(top, content) end)
-end
-
---- @private
---- Read the live text of a (0,0)-indexed span. Rows past the buffer end are
---- clamped first -- nvim_buf_get_text ERRORS there, and extmark ends land on
---- the buffer-end row after truncating edits. The degenerate/inverted check
---- reads empty, mirroring Extmark:_text()'s exclusive-end contract. The
---- trailing-newline behavior (an end on the next line's column 0 includes
---- the previous line's newline) comes from nvim_buf_get_text itself -- no
---- code here implements it. File-local: the collector is the only reader.
---- @param bufnr integer
---- @param row0 integer
---- @param col0 integer
---- @param end_row integer
---- @param end_col integer
---- @return string
-local function live_span_text(bufnr, row0, col0, end_row, end_col)
-  local last_row = vim.api.nvim_buf_line_count(bufnr) - 1
-  if row0 > last_row or end_row > last_row then
-    local last_line_len = #(
-      vim.api.nvim_buf_get_lines(bufnr, last_row, last_row + 1, true)[1] or ''
-    )
-    if row0 > last_row then
-      row0, col0 = last_row, last_line_len
-    end
-    if end_row > last_row then
-      end_row, end_col = last_row, last_line_len
-    end
-  end
-  if row0 > end_row or (row0 == end_row and col0 >= end_col) then return '' end
-  return table.concat(vim.api.nvim_buf_get_text(bufnr, row0, col0, end_row, end_col, {}), '\n')
+  self:_with_textlock(function() fire_tag_on_change(top, content) end)
 end
 
 --- @private
 --- Collect the tags whose live content differs from the tree's expectation,
---- sweeping the dirty band. Every genuinely changed tag's span intersects
---- the band -- the diff brackets the burst's touched rows (see diff_to_band),
---- and mark adjustment pins affected spans onto them -- so a band query
---- (inclusive on both edges) returns every candidate plus harmless
---- neighbors. Comparing live text against `curr_text` is the whole change
---- test.
+--- sweeping the dirty band. Every changed tag's span intersects the band, so
+--- an inclusive band query returns every candidate plus harmless neighbors;
+--- comparing live text against `curr_text` is the whole change test.
 --- @param top0 integer
 --- @param bottom0 integer
 --- @param windows morph.ChangeWindow[] the burst's change windows
@@ -2726,9 +2490,9 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
   local locked = {} --- @type morph.TagChange[]
   local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
   if top0 > last_row then return editable, locked end
-  -- The band's bottom row may sit past the buffer end (a line delete parks
-  -- it there so the sweep reaches the overshooting marks); the line READ
-  -- must stay in bounds -- nvim_buf_get_lines errors past the line count.
+  -- The band's bottom may sit past the buffer end (a delete parks it there so
+  -- the sweep reaches the overshooting marks), but the line read must stay in
+  -- bounds.
   local band_bottom_line = vim.api.nvim_buf_get_lines(
     self.bufnr,
     math.min(bottom0, last_row),
@@ -2744,8 +2508,7 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
     { details = true, overlap = true }
   )
   -- Sorted by position: the degenerate-span witness below matches the
-  -- collapsed point against its NEAREST change window, which only means
-  -- anything in positional order.
+  -- collapsed point against its nearest change window.
   --- @type { id: integer, tag: morph.Tag, row0: integer, col0: integer, details: vim.api.keyset.extmark_details }[]
   local marks = {}
   for _, ext in ipairs(raw) do
@@ -2766,42 +2529,33 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
     local end_row = (m.details and m.details.end_row) or m.row0
     local end_col = (m.details and m.details.end_col) or m.col0
 
-    -- Read the tag's content over its LIVE marks. The live marks are the
-    -- truth under morph's gravity scheme for every shape but one: a splice
-    -- that consumes a span's whole range (a same-length replace, a paste
-    -- over the tail, typing into an empty hole) parks BOTH of the span's
-    -- marks PAST the replacement text, and the between-marks read collapses
-    -- to '' while the real content sits just outside. Mount 'Search: [x]'
-    -- with the hole 'x', then replace the hole's content with 'y' (visual
-    -- paste, replace-char, any whole-hole splice):
+    -- Read the tag's content over its LIVE marks, which are the truth under
+    -- morph's gravity scheme for every shape but one: a splice that consumes a
+    -- span's whole range (a same-length replace, a paste over the tail, typing
+    -- into an empty hole) parks BOTH marks PAST the replacement, so the
+    -- between-marks read collapses to '' while the real content sits just
+    -- outside. Mount 'Search: [x]' and replace the hole's 'x' with 'y':
     --
     --   Search: [y]
     --   00000000001
     --   01234567890
     --
-    -- Both hole marks land at (0,10), after the 'y'; the span reads ''
-    -- although its content became 'y' at [9,10). Typing into an empty hole
-    -- is the same shape with more bytes -- 'ifilter' into 'Search: []'
-    -- parks both marks at (0,15), past 'filter':
+    -- Both hole marks land at (0,10), after the 'y'; the span reads '' though
+    -- its content became 'y' at [9,10). Typing 'filter' into 'Search: []' is
+    -- the same shape with more bytes (marks park at (0,15)):
     --
     --   Search: [filter]
     --   0000000000111111
     --   0123456789012345
     --
-    -- Neither the degenerate span nor any gap around it recovers the
-    -- content -- only the burst's change windows (see diff_to_band) still
-    -- bracket the replacement ([9,10) -> 'y', [9,15) -> 'filter'), so the
-    -- window at the collapse point is the only WITNESS of what the span
-    -- became, and the collapsed read goes through it. A pure delete
-    -- collapses the span too, and its window reads '' -- the correct
-    -- content for a fully deleted span. For every other shape (an edited
-    -- span stays healthy and reads its new bytes; a shift leaves untouched
-    -- spans reading their own bytes) widening the read would re-import
-    -- positional attribution and report bytes gravity gave to a neighbor as
-    -- changed content: a typed char at a hole's tail made the shifted ']'
-    -- tag report "f]", and a mid-word delete made a tag read "suf" from
-    -- the following literal.
+    -- Only the burst's change windows (see diff_to_band) still bracket the
+    -- replacement, so the window at the collapse point is the sole witness of
+    -- what the span became. A pure delete collapses the span too and its
+    -- window reads '' -- correct for a fully deleted span. Widening the read
+    -- for any other shape would re-import positional attribution: a typed char
+    -- at a hole's tail made the shifted ']' tag report "f]".
     local collapsed = m.row0 == end_row and m.col0 == end_col
+    local extmark = Extmark._from_raw(self.bufnr, m.id, m.row0, m.col0, m.details)
     local new_text
     if collapsed then
       -- Nearest window by rows first, then columns: the change that made
@@ -2833,15 +2587,21 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
         end
       end
       if best then
-        new_text = live_span_text(self.bufnr, best.row0, best.col0, best.end_row, best.end_col)
+        -- Read the replacement through the window touching the collapse: the
+        -- span's own marks parked past the text, so only the window still
+        -- brackets what the span became.
+        local window_mark = Extmark._from_raw(self.bufnr, m.id, best.row0, best.col0, {
+          end_row = best.end_row,
+          end_col = best.end_col,
+        })
+        new_text = window_mark:_text()
       else
         new_text = ''
       end
     else
-      new_text = live_span_text(self.bufnr, m.row0, m.col0, end_row, end_col)
+      new_text = extmark:_text()
     end
     if m.tag.curr_text ~= new_text then
-      local extmark = Extmark._from_raw(self.bufnr, m.id, m.row0, m.col0, m.details)
       local mismatch = { extmark = extmark, tag = m.tag, text = new_text }
       if m.tag.readonly then
         table.insert(locked, mismatch)
@@ -2853,106 +2613,49 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
   return editable, locked
 end
 
---- @private
---- True when some readonly tag's content changed and no changed editable tag
---- sits inside it. This is the whole guard: nesting, not position. A hole's
---- own edit explains every readonly ancestor whose growth it caused, but
---- never an editable tag it is not part of -- which is exactly how a write
---- spanning the hole's edge is caught (the chrome literal is a readonly
---- sibling with no changed editable child). Example:
----
----   `Name: [x]`
----   0000000000
----   0123456789
----   A="Name: [" readonly  B="x" editable  C="]" readonly
----
----   write [5,8)->'Y'  ->  A's content changed (it lost " ["); B is not
----   inside A (sibling) -> violation. ciw on B alone leaves A unchanged ->
----   accepted.
---- @param editable morph.TagChange[]
---- @param locked morph.TagChange[]
---- @return boolean
-function Morph._readonly_violated(editable, locked)
-  for _, suspect in ipairs(locked) do
-    local explained = false
-    for _, hole in ipairs(editable) do
-      if Morph._is_inside(hole.tag, suspect.tag) then
-        explained = true
-        break
-      end
-    end
-    if not explained then return true end
-  end
-  return false
-end
-
---- @private
---- True when `inner` descends from `outer`, walking the parent links recorded
---- at render time.
---- @param inner morph.Tag
---- @param outer morph.Tag
---- @return boolean
-function Morph._is_inside(inner, outer)
-  local tag = inner.parent
-  while tag do
-    if tag == outer then return true end
-    tag = tag.parent
-  end
-  return false
-end
-
 --------------------------------------------------------------------------------
 -- PART VII -- UNDO AND REDO
 --------------------------------------------------------------------------------
--- The undo probe: region-scoped undo/redo. Last of the machinery, because
--- it stands on everything before it -- regions come from the generator's
--- snapshots, writebacks reuse the guard's re-placement, and traversal
--- reuses the guard's on_change dispatch.
+-- The undo probe: region-scoped undo/redo. Last of the machinery, because it
+-- stands on everything before it -- regions come from the generator, writebacks
+-- reuse the guard's re-placement, traversal reuses its on_change dispatch.
 
 --------------------------------------------------------------------------------
 -- The Undo Probe
 --------------------------------------------------------------------------------
 
 -- Principle: Neovim scopes undo per buffer, but the renderer wants it scoped
--- per editable region. A hidden scratch buffer can therefore own an undo tree
--- whose entries correspond to the user's region edits, while the main buffer
--- keeps a full undo tree of chrome renders that must stay independent of
--- traversals. Example: a render with two holes, `[aaa]` and `[bbb]`, stores
--- the whole region set as one JSON line `{"r1":"aaa","r2":"bbb"}` (ids minted
--- here; a declared `attributes.id` would be used verbatim); typing into either
--- hole rewrites that line, and `u` undoes it, decodes the previous line, and
--- writes the result back into the main buffer's spans.
+-- per editable region. A hidden scratch buffer owns an undo tree whose entries
+-- correspond to the user's region edits, while the main buffer keeps a full
+-- undo tree of chrome renders independent of traversals. A render with two
+-- holes, `[aaa]` and `[bbb]`, stores the whole region set as one JSON line
+-- (ids minted here; a declared `attributes.id` is used verbatim); typing into
+-- either hole rewrites that line, and `u` undoes it, decodes the previous
+-- line, and writes the result back into the main buffer's spans.
 --
--- Two directions keep the two buffers in agreement. The mirror copies the
--- accepted main-buffer edit into the probe, opening or joining a probe entry
--- so probe entries track main entries. The replay moves the probe's undo
--- pointer (never the main buffer's) and copies every region's text back into
--- the main buffer, so an app chrome render between `u` and `<C-r>` changes
--- only the main tree and leaves the probe's redo tip intact.
+-- Two directions keep the buffers in agreement. The mirror copies the accepted
+-- main edit into the probe, opening or joining a probe entry so probe entries
+-- track main entries. The replay moves the probe's undo pointer (never the
+-- main buffer's) and copies every region's text back, so an app chrome render
+-- between `u` and `<C-r>` changes only the main tree and leaves the probe's
+-- redo tip intact.
 --
--- The probe keeps all regions in a single JSON-encoded line -- an object
--- mapping region id to region text -- rather than one buffer line per region.
--- That removes the per-region extmark bookkeeping (marks, spans, id maps) the
--- line-per-region layout needed, at the cost of rewriting the whole line on
--- every edit. Identity is resolved per render in sync: a declared
--- `attributes.id` is authoritative; otherwise the reconciler's stamp (a hex
--- sequence id minted per node chain and copied along matches) carries an id
--- forward while the stored tip still describes the region's content; static
--- renders, which have no reconciler and thus no stamps, match by render order
--- under the same rule; anything unresolved mints. Apps that add, remove,
--- reorder, or swap regions are therefore plain id-set diffs -- new ids enter
--- at birth, orphaned ids go inert, and no structural change needs a rebuild.
+-- The probe keeps all regions in a single JSON line (id -> text) rather than
+-- one line per region: that drops per-region extmark bookkeeping at the cost
+-- of rewriting the line on every edit. Identity is resolved per render in sync
+-- (declared id > stamp while the tip still matches > render order for static
+-- renders > mint), so adding, removing, reordering, or swapping regions is a
+-- plain id-set diff -- new ids enter at birth, orphaned ids go inert, and no
+-- structural change needs a rebuild.
 
 --- @class morph.Probe
 --- @field bufnr integer The hidden probe buffer
---- @field regions { tag: morph.Tag, id: string, stamp: string? }[] Region
----   records in render order; `id` is the region's identity in stored
----   entries -- either the app-declared `attributes.id` or a probe-minted id
----   -- and `stamp` is the reconciler's hex sequence id for the node chain,
----   the key the next render's identity resolution matches against.
---- @field private birth {[string]: string} Per-id birth text: what a region
----   held when its id entered the probe -- the deepest state undo reaches for
----   a region whose id has no recorded entry (e.g. one added after mount).
+--- @field regions { tag: morph.Tag, id: string, stamp: string? }[] Region records
+---   in render order; `id` is the region's identity in stored entries (the
+---   declared `attributes.id` or a minted id), and `stamp` is the reconciler's
+---   hex sequence id for the node chain, matched by the next render's resolution.
+--- @field private birth {[string]: string} Per-id birth text: the deepest state
+---   undo reaches for a region whose id has no recorded entry.
 --- @field private id_seq integer Counter for minted region ids
 --- @field baseline integer Probe `seq_cur` at mount; the undo floor
 --- @field last_main_seq integer Main `seq_cur` as of the last mirror/replay
@@ -2961,10 +2664,9 @@ end
 local Probe = {}
 Probe.__index = Probe
 
---- Mint a region id unused by anything the probe knows: ids claimed during
---- the current sync, every birth entry, and the stored tip -- the latter two
---- keep minted ids off app-declared strings that are only temporarily absent
---- from the region set.
+--- Mint a region id unused by anything the probe knows: ids claimed this sync,
+--- every birth entry, and the stored tip -- the latter two keep minted ids off
+--- app-declared strings that are only temporarily absent from the region set.
 --- @param taken {[string]: boolean} ids already claimed during this sync
 --- @param tip {[string]: string} stored tip states
 --- @return string
@@ -2977,13 +2679,10 @@ function Probe:_mint(taken, tip)
   return id
 end
 
---- The region states currently stored in the probe: id -> text.
--- The probe buffer is only ever written by _write (which refreshes the
--- cache below) and by replay's undo traversal (which clears it), so the
--- cache is authoritative in between. Decode-on-read used to round-trip a
--- JSON document the size of the ENTIRE region set on every keystroke and
--- every render; with tens of thousands of editable regions that dominates
--- the typing path.
+--- The region states currently stored in the probe: id -> text. The cache is
+--- authoritative between writes: only _write (which refreshes it) and replay's
+--- traversal (which clears it) touch the buffer, so reads never re-decode the
+--- whole region set.
 --- @return {[string]: string}
 function Probe:_texts()
   if self._tip_cache then return self._tip_cache end
@@ -2995,8 +2694,8 @@ function Probe:_texts()
 end
 
 --- Replace the stored region states, opening a new undo entry or joining the
---- current one. `undojoin` folds this write into the previous entry; syncing
---- `&undolevels` forces a fresh entry.
+--- current one (`undojoin` merges into the previous entry; touching
+--- `&undolevels` forces a fresh one).
 --- @param states {[string]: string} Region states keyed by region id
 --- @param join? boolean Whether to merge into the current probe entry
 function Probe:_write(states, join)
@@ -3015,8 +2714,7 @@ function Probe:_write(states, join)
 end
 
 --- Create the probe buffer and record the initial region set as one entry.
---- Resolution is `sync`'s job from the very first render: the records built
---- here are what the next render's stamps resolve against.
+--- `sync` resolves identities from the very first render.
 --- @param tags morph.Tag[] Region tags, in render order
 --- @return morph.Probe
 function Probe.new(tags)
@@ -3047,21 +2745,16 @@ end
 
 --- Resolve each rendered region's identity and re-point the probe's records.
 --- Resolution, in order of authority:
---- 1. A declared `attributes.id` is the app's authority channel: it is used
----    as-is, with no content check, so app-side text normalization cannot
----    break history.
---- 2. A node carrying a reconciler stamp (a hex sequence id copied along
----    matches) inherits the id recorded for that stamp -- but only while the
----    stored tip still describes the region. The tip check is what keeps
----    refills safe: a swap or a prepend hands an old stamp to a new item,
----    fails the check, and remints instead of inheriting foreign history.
---- 3. A node with no stamp comes from a static render (no reconciler, no
----    stamps); those fall back to matching by render order under the same
----    tip-equality rule.
---- Anything unresolved mints: its history starts at the region's current
---- text (its birth), and any history left hanging off the slot goes inert. A
---- region that disappears needs no handling at all -- its history simply
---- stops being referenced.
+--- 1. A declared `attributes.id` is used as-is (no content check), so app-side
+---    text normalization cannot break history.
+--- 2. A node carrying a reconciler stamp inherits the id recorded for that
+---    stamp -- but only while the stored tip still describes the region, which
+---    is what makes refills safe (a swap or prepend fails the check and remints
+---    instead of inheriting foreign history).
+--- 3. A node with no stamp comes from a static render, so it matches by render
+---    order under the same tip-equality rule.
+--- Anything unresolved mints with its current text as birth. A region that
+--- disappears needs no handling -- its history simply stops being referenced.
 --- @param tags morph.Tag[] Region tags, in render order
 function Probe:sync(tags)
   local tip = self:_texts()
@@ -3096,11 +2789,9 @@ function Probe:sync(tags)
   self.regions = regions
 end
 
---- Mirror the accepted main-buffer edit into the probe.
---- The probe opens a new entry exactly when the main buffer did, and joins
---- otherwise. The signal is whether the main buffer's `seq_cur` advanced since
---- the previous mirror batch: the first batch of a new main entry sees a
---- changed pointer, later batches of the same entry do not.
+--- Mirror the accepted main-buffer edit into the probe: open a new probe entry
+--- exactly when the main buffer did (its `seq_cur` advanced since the last
+--- mirror batch), join otherwise.
 --- @param main_seq integer The main buffer's current `seq_cur`
 function Probe:mirror(main_seq)
   local fresh = main_seq ~= self.last_main_seq
@@ -3133,9 +2824,9 @@ function Probe:replay(direction, abs_target)
     vim.api.nvim_buf_call(self.bufnr, function() pcall(vim.api.nvim_command, cmd) end)
   end
   if abs_target then
-    -- `:undo N` addresses an absolute undo state, not a step count, so jump
-    -- straight there. Clamp into [baseline, seq_last]: below the floor would
-    -- lose the mount state, above the tip is undefined.
+    -- `:undo N` addresses an absolute undo state, not a step count. Clamp into
+    -- [baseline, seq_last]: below the floor loses the mount state, above the
+    -- tip is undefined.
     local target = math.max(self.baseline, math.min(abs_target, tree.seq_last))
     if target == tree.seq_cur then return nil end
     run('undo ' .. target)
@@ -3157,8 +2848,7 @@ function Probe:replay(direction, abs_target)
   -- the probe disconnected from the current main entry so the next user edit
   -- opens a fresh probe entry rather than joining a stale one.
   self.entry_open = false
-  -- Undo moved the probe's content out from under the tip cache; the next
-  -- read must decode the entry the traversal landed on.
+  -- Undo moved the probe's content out from under the tip cache.
   self._tip_cache = nil
   return self:_texts()
 end
@@ -3174,12 +2864,10 @@ local TRAVERSALS = {
 }
 
 --- @private
---- Install buffer-local mappings that reroute traversal keys through the
---- probe. Named `u`/`<C-r>`/`g-`/`g+` mappings replace the native actions, so
---- a traversal moves the probe's undo pointer and then writes region text back
---- rather than traversing the main buffer's (chrome-contaminated) tree.
---- Called after `restore_buffer_keymaps`, which wipes buffer keymaps every
---- render.
+--- Install buffer-local mappings that reroute traversal keys through the probe:
+--- `u`/`<C-r>`/`g-`/`g+` move the probe's undo pointer and write region text
+--- back rather than traversing the main buffer's chrome-contaminated tree.
+--- Called after `restore_buffer_keymaps`, which wipes buffer keymaps each render.
 function Morph:_install_probe_keymaps()
   local opts = { buffer = self.bufnr, nowait = true, silent = true }
   local traversal_keys = { u = 'undo', ['g-'] = 'undo', ['<C-r>'] = 'redo', ['g+'] = 'redo' }
@@ -3190,20 +2878,17 @@ end
 
 --- @private
 --- Intercept the ex-command traversal forms (`:undo`, `:redo`, `:earlier`,
---- `:later`). These cannot be shadowed by buffer-local user commands, because
---- Neovim rejects lowercase user command names; a `CmdlineLeave` handler can
---- instead detect the pending command and redirect it before it runs. Parsing
---- goes through `nvim_parse_cmd`, so recognition is by command name and
---- arguments rather than by string matching, and a count or range is honored.
---- Registered once per instance from `Morph.new`; it self-gates on whether the
+--- `:later`), which cannot be shadowed by buffer-local user commands because
+--- Neovim rejects lowercase user command names; a `CmdlineLeave` handler
+--- detects the pending command and redirects it before it runs. Parsing goes
+--- through `nvim_parse_cmd`, so recognition is by command name and arguments
+--- rather than string matching, and a count or range is honored. Installed on
+--- the first render and self-gated thereafter; it also gates on whether the
 --- current buffer has a live probe.
 function Morph:_install_probe_cmdline()
   if self._probe_cmdline_autocmd then return end
-  local group = vim.api.nvim_create_augroup('morph_probe_cmdline:' .. tostring(self.bufnr), {
-    clear = true,
-  })
+  -- The id is the handle: teardown deletes it, so no augroup is needed.
   self._probe_cmdline_autocmd = vim.api.nvim_create_autocmd('CmdlineLeave', {
-    group = group,
     callback = function()
       -- Only act while this instance's buffer is current and a probe exists.
       if vim.api.nvim_get_current_buf() ~= self.bufnr or not self.probe then return end
@@ -3214,18 +2899,17 @@ function Morph:_install_probe_cmdline()
       -- `:undo N`/`:redo N` address an absolute undo state; `:earlier N`/
       -- `:later N` count N relative steps. A bare `:undo`/`:redo` has no count
       -- (nil on newer Neovim, 0 on older), so only a positive count is an
-      -- absolute target. The step count for the relative forms is the first
-      -- argument.
+      -- absolute target; the relative forms carry their step count as the
+      -- first argument.
       local absolute = spec.absolute and type(parsed.count) == 'number' and parsed.count > 0
-      -- Coerce to an integer: nvim_parse_cmd reports counts as numbers, and the
-      -- relative forms carry their step count as a string argument.
+      -- nvim_parse_cmd reports counts as numbers, and the relative forms carry
+      -- their step count as a string argument.
       local raw = absolute and parsed.count or tonumber(parsed.args and parsed.args[1] or '')
       local steps = math.max(1, math.floor(raw or 1))
 
       -- Neutralize the pending command so Neovim's own traversal never runs
-      -- (a buffer-local user command cannot shadow a builtin lowercase name,
-      -- but rewriting the command line can), then replay the probe once the
-      -- command line has closed.
+      -- (rewriting the command line shadows the builtin), then replay the
+      -- probe once the command line has closed.
       pcall(vim.fn.setcmdline, 'echo ""')
       vim.schedule(function()
         if absolute then
@@ -3248,8 +2932,8 @@ end
 
 --- @private
 --- Traverse the probe by one entry and apply the result to the main buffer.
---- Writing a region back also fires its `on_change`, so the app re-syncs its
---- state and chrome that embeds the region text re-renders to match.
+--- Writing a region back also fires its `on_change`, so the app re-syncs state
+--- and any chrome embedding the region text re-renders to match.
 --- @param direction 'undo'|'redo'
 --- @param abs_target? integer For `:undo N`/`:redo N`: the absolute state to reach
 function Morph:_probe_traverse(direction, abs_target)
@@ -3262,8 +2946,8 @@ function Morph:_probe_traverse(direction, abs_target)
   local changed = {} --- @type { tag: morph.Tag, text: string }[]
   for _, rec in ipairs(self.probe.regions) do
     local extmark = self:_region_extmark(rec.tag)
-    -- Entries that predate a region's id have nothing to say about it; the
-    -- id's birth text is the deepest state undo reaches for the region.
+    -- Entries that predate a region's id have nothing to say about it; the id's
+    -- birth text is the deepest state undo reaches for the region.
     local target = states[rec.id] or self.probe.birth[rec.id]
     if extmark and target and extmark:_text() ~= target then
       table.insert(changed, { tag = rec.tag, text = target })
@@ -3277,53 +2961,31 @@ function Morph:_probe_traverse(direction, abs_target)
     -- An earlier write in this batch may have restored this region's text
     -- already: a containing region's snapshot embeds its children's text, so
     -- once the child is written the parent matches too. Writing anyway would
-    -- drag the contained region's marks to the parent's start, so re-check
-    -- the live text immediately before writing.
+    -- drag the contained region's marks to the parent's start.
     if not extmark or extmark:_text() ~= change.text then
       self:_write_region_text(change.tag, change.text)
     end
   end
   self.changing = false
 
-  -- Deliberately do NOT refresh self.changedtick: the next render must see the
-  -- buffer as externally changed and resync its diff base (`text_content`)
-  -- from the buffer's real lines.
-
   -- Fire the changed regions' on_change so app state (and any chrome that
   -- embeds the region text) re-syncs with the reverted content.
   self:_with_textlock(function()
     for _, change in ipairs(changed) do
-      Morph._fire_tag_on_change(change.tag, change.text)
+      fire_tag_on_change(change.tag, change.text)
     end
   end)
 end
 
 --- @private
 --- Hold `self.textlock` across `fn` so handler-triggered re-renders defer
---- instead of mutating extmark spans mid-dispatch (the mechanism
---- _fire_tag_on_change's docblock describes).
+--- instead of mutating extmark spans mid-dispatch (see fire_tag_on_change).
 --- @param fn fun()
 function Morph:_with_textlock(fn)
   local prev_textlock = self.textlock
   self.textlock = true
   fn()
   self.textlock = prev_textlock
-end
-
---- @private
---- Fire one tag's on_change with the standard event shape and return the
---- (handler-mutable) event, nil when the tag has no handler. Callers hold
---- `self.textlock` across a batch of these via _with_textlock.
---- @param tag morph.Tag
---- @param text string
---- @return table? event
-function Morph._fire_tag_on_change(tag, text)
-  local on_change = tag.attributes.on_change
-  if not vim.is_callable(on_change) then return nil end
-  local event = { text = text, bubble_up = true }
-  --- @diagnostic disable-next-line: need-check-nil
-  on_change(event)
-  return event
 end
 
 --- @private
@@ -3337,9 +2999,9 @@ end
 
 --- @private
 --- Replace one region's main-buffer text with `text` and re-place its extmark
---- over the new span. Re-placing is what keeps the span exact: a replacement
---- collapses the mark to zero width, so the guard would otherwise read an
---- empty span on the next batch.
+--- over the new span. Re-placing keeps the span exact: a replacement collapses
+--- the mark to zero width, so the guard would otherwise read an empty span next
+--- batch.
 --- @param tag morph.Tag
 --- @param text string
 function Morph:_write_region_text(tag, text)
@@ -3356,16 +3018,16 @@ function Morph:_write_region_text(tag, text)
   )
   local end_row = extmark.start[1] + #lines - 1
   local end_col = (#lines == 1) and (extmark.start[2] + #lines[1]) or #lines[#lines]
-  -- Re-place through the shared extmark builder so the span's gravity
-  -- semantics stay defined in exactly one place.
+  -- Re-place through the shared extmark builder so gravity semantics stay
+  -- defined in one place.
   Extmark.new(self.bufnr, self.ns, extmark.start, Pos00.new(end_row, end_col), { id = extmark.id })
   tag.curr_text = text
 end
 
 --- @private
---- Delete the probe buffer and drop the reference. Every path that stops using
---- a probe -- disengagement, a structural region-set change, unmount, buffer
---- wipe -- funnels through here, so the hidden buffer and its undo tree never
+--- Delete the probe buffer and drop the reference. Every path that stops using a
+--- probe -- disengagement, a structural region-set change, unmount, buffer wipe
+--- -- funnels through here, so the hidden buffer and its undo tree never
 --- outlive their region set.
 function Morph:_teardown_probe()
   if self.probe and vim.api.nvim_buf_is_valid(self.probe.bufnr) then
@@ -3375,13 +3037,12 @@ function Morph:_teardown_probe()
 end
 
 --- @private
---- Build or refresh the undo probe after a render. The region set is derived
---- from the render (DFS order). Entries are keyed by region id, so every
---- structural change -- add, remove, reorder, swap -- is an id-set diff
---- rather than a rebuild trigger: regions that keep their id keep their
---- history, a region the probe cannot identify mints a fresh id whose
---- history starts at its current text, and a removed region's history goes
---- inert (replay only ever touches regions present in the render).
+--- Build or refresh the undo probe after a render (region set in DFS order).
+--- Entries are keyed by region id, so every structural change -- add, remove,
+--- reorder, swap -- is an id-set diff rather than a rebuild trigger: regions
+--- that keep their id keep their history, an unidentifiable region mints a
+--- fresh id whose history starts at its current text, and a removed region's
+--- history goes inert.
 --- @param regions morph.Tag[] Outermost intentional holes, in render order
 function Morph:_sync_probe(regions)
   -- A render with no editable tags (fully locked chrome) has nothing
@@ -3405,10 +3066,9 @@ end
 --------------------------------------------------------------------------------
 -- THE ANNEX -- CLIENTS OF THE PUBLIC API
 --------------------------------------------------------------------------------
--- Components and hook helpers built on the same public surface user code
--- sees: nothing here reaches into private state. Optional reading that
--- doubles as example code; FloatingWindow depends on Portal and on the hook
--- helpers, so read the hooks first.
+-- Components and hook helpers built on the public surface user code sees:
+-- nothing here reaches into private state. FloatingWindow depends on Portal and
+-- on the hook helpers, so read the hooks first.
 
 --------------------------------------------------------------------------------
 -- ErrorBoundary
@@ -3485,24 +3145,8 @@ end
 --------------------------------------------------------------------------------
 -- Hook Helpers
 --------------------------------------------------------------------------------
--- Two small, self-contained utilities FloatingWindow uses: a previous-value
--- cell for per-render comparisons, and mode transition with confirmation.
-
---- Create a previous-value cell. Call once at mount, store on ctx.state.
---- Each render, call cell(v) to read the previous value of v and store v.
---- A closure, not an object: the cell has one operation and no consumers of
---- the cell itself, so the state can live in an upvalue instead of a table.
---- @generic T
---- @param initial T value returned by the first call
---- @return fun(v: T): T
-local function mk_prev_value_cell(initial)
-  local prev = initial
-  return function(v)
-    local p = prev
-    prev = v
-    return p
-  end
-end
+-- One small, self-contained utility FloatingWindow uses: a mode transition
+-- confirmed by autocmd rather than a timer.
 
 --- Transition to target_mode (via stopinsert/startinsert) and call callback
 --- once the mode change takes effect, confirmed via ModeChanged autocmd
@@ -3521,12 +3165,9 @@ local function restore_mode_and_wait(target_mode, callback)
   local mode_pattern = current_mode .. ':' .. target_mode
   local mode_changed_id
   -- Defer the callback onto a clean event-loop tick so it runs OUTSIDE the
-  -- ModeChanged autocmd. Otherwise a nested action taken from the callback --
-  -- e.g. FloatingWindow's on_closed opening another float that calls
-  -- startinsert -- executes while the i:n transition is still on the autocmd
-  -- stack, and the nested startinsert does not stick (leaves the new float in
-  -- normal mode). Decoupling callback execution from the autocmd preserves the
-  -- autocmd's "wait until the mode change takes effect" timing semantics.
+  -- ModeChanged autocmd: a nested action (e.g. on_closed opening another float
+  -- that startinserts) would otherwise run while the mode transition is still
+  -- on the autocmd stack, and its startinsert would not stick.
   local function schedule_callback() vim.schedule(callback) end
   local fallback_timer = vim.defer_fn(function()
     -- mode_changed_id reads as nil here because the closure may run before the
@@ -3580,8 +3221,8 @@ end
 --- @field prev_winnr integer?
 --- @field prev_cursor [integer, integer]?
 --- @field prev_mode string?
---- @field prev_open_cell fun(v: boolean): boolean
---- @field prev_config_cell fun(v: vim.api.keyset.win_config): vim.api.keyset.win_config
+--- @field prev_open boolean
+--- @field prev_config? vim.api.keyset.win_config
 
 --- @param ctx morph.Ctx<components.FloatingWindowProps, components.FloatingWindowState>
 function Morph.FloatingWindow(ctx)
@@ -3602,24 +3243,25 @@ function Morph.FloatingWindow(ctx)
       prev_winnr = nil,
       prev_cursor = nil,
       prev_mode = nil,
-      prev_open_cell = mk_prev_value_cell(false),
-      prev_config_cell = mk_prev_value_cell(nil --[[@as vim.api.keyset.win_config]]),
+      prev_open = false,
+      prev_config = nil,
     }
   end
 
   --- @type components.FloatingWindowState
   local state = assert(ctx.state)
-  local prev_open = state.prev_open_cell(open)
   local config = ctx.props.config
   if type(config) == 'function' then config = config() end
+  -- Capture the previous render's values, then store this render's, so the
+  -- transition branches below compare against what the user last saw.
+  local prev_open, prev_config = state.prev_open, state.prev_config
+  state.prev_open, state.prev_config = open, config
 
-  --- Shared open→closed teardown for both the prop-driven close transition
-  --- and unmount. Closes over ctx/state/prev_open. When the float still holds
-  --- focus and a mode was captured, transitions back to that mode first and
-  --- restores the previous window/cursor (if alive); never steals focus back.
-  --- On unmount also tears down the resize autocmd and the float buffer.
-  --- on_closed fires when prev_open is true -- a real transition, not the
-  --- unmount of an already-closed or never-opened component.
+  --- Shared open→closed teardown for both the prop-driven close transition and
+  --- unmount. Restores the previous window/cursor (if alive), transitioning back
+  --- to the captured mode first when the float still holds focus; never steals
+  --- focus back. On unmount also tears down the resize autocmd and float buffer.
+  --- on_closed fires only for a real transition (prev_open true).
   local function close_transition()
     local is_unmount = ctx.phase == 'unmount'
     local focused = state.winnr ~= nil
@@ -3682,7 +3324,6 @@ function Morph.FloatingWindow(ctx)
 
       local enter = config.focusable ~= false
       state.winnr = vim.api.nvim_open_win(state.bufnr, enter, config)
-      state.prev_config_cell(config)
       -- Call on_win_create callback if provided
       if ctx.props.on_win_create then
         ctx:do_after_render(function()
@@ -3701,8 +3342,7 @@ function Morph.FloatingWindow(ctx)
       -- Window stays open; just update its config (skip unchanged configs to avoid UI flicker).
     elseif open then
       if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then
-        local prev = state.prev_config_cell(config)
-        if not vim.deep_equal(config, prev) then
+        if not vim.deep_equal(config, prev_config) then
           vim.api.nvim_win_set_config(state.winnr, config)
         end
       end

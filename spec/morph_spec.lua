@@ -355,6 +355,72 @@ describe('Morph', function()
   end)
 
   ------------------------------------------------------------------------------
+  -- CHANGEDTICK DIFF-BASE REUSE
+  --
+  -- render() may pass text_content.lines to patch_lines instead of letting it
+  -- fetch the buffer, but only when b:changedtick proves the snapshot is still
+  -- current. These tests count the fetches directly.
+  ------------------------------------------------------------------------------
+
+  describe('changedtick diff-base reuse', function()
+    --- Run fn while counting nvim_buf_get_lines calls, restoring the API after.
+    --- @param fn fun()
+    --- @return integer calls
+    local function count_fetches(fn)
+      local original = vim.api.nvim_buf_get_lines
+      local calls = 0
+      vim.api.nvim_buf_get_lines = function(bufnr, start, stop, strict)
+        calls = calls + 1
+        return original(bufnr, start, stop, strict)
+      end
+      local ok, err = pcall(fn)
+      vim.api.nvim_buf_get_lines = original
+      if not ok then error(err, 0) end
+      return calls
+    end
+
+    it('reuses the snapshot when the buffer is unchanged', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'alpha\nbeta' }
+
+        local calls = count_fetches(function() r:render { 'alpha\nbeta' } end)
+        assert.are.same(0, calls)
+        assert.are.same({ 'alpha', 'beta' }, get_lines())
+      end)
+    end)
+
+    it('fetches again after an external buffer change', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        r:render { 'alpha\nbeta' }
+        vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'external' })
+
+        local calls = count_fetches(function() r:render { 'alpha\nbeta' } end)
+        assert.are.same(1, calls)
+        assert.are.same({ 'alpha', 'beta' }, get_lines())
+      end)
+    end)
+
+    it('reuses the lines the guard read after an accepted burst', function()
+      with_buf({}, function()
+        local r = Morph.new(0)
+        local function tree(text)
+          return { h('text', { id = 'editable', on_change = function() end }, text) }
+        end
+        r:render(tree 'hello')
+
+        set_text(0, 0, 0, 5, { 'HELLO' })
+        vim.cmd.doautocmd 'TextChanged'
+
+        local calls = count_fetches(function() r:render(tree 'HELLO') end)
+        assert.are.same(0, calls)
+        assert.are.same({ 'HELLO' }, get_lines())
+      end)
+    end)
+  end)
+
+  ------------------------------------------------------------------------------
   -- GET_ELEMENTS_AT
   --
   -- Tests for querying elements at cursor positions. Elements are returned
@@ -948,6 +1014,35 @@ describe('Morph', function()
           'Extmark:_text() should handle inverted positions gracefully (return empty string), but got: '
             .. vim.inspect(result)
         )
+      end)
+    end)
+
+    it('reads a span past the buffer end only because _from_raw clamped it', function()
+      -- An extmark can end one row past the last line at column 0 after a
+      -- truncating edit. nvim_buf_get_text errors on end_row == line_count, so
+      -- _text cannot be handed that stop row unaided; _from_raw is what keeps
+      -- the read in bounds and drops the phantom newline the extra row implied.
+      with_buf({}, function()
+        vim.api.nvim_buf_set_lines(0, 0, -1, true, { 'abc', 'def' })
+
+        -- Raw stop (2,0) is one past the last row; _from_raw clamps it to the
+        -- last line's end before _text runs.
+        local extmark = Extmark._from_raw(0, 1, 0, 0, { end_row = 2, end_col = 0 })
+        assert.are.same(Pos00.new(1, 3), extmark.stop)
+        assert.are.same('abc\ndef', extmark:_text())
+      end)
+    end)
+
+    it('reads an in-bounds span ending at column 0 as including its newline', function()
+      -- The same stop shape, but on a row that exists, is the "region text ends
+      -- with a newline" case: get_text returns the trailing empty line, so the
+      -- newline survives the read.
+      with_buf({}, function()
+        vim.api.nvim_buf_set_lines(0, 0, -1, true, { 'abc', 'def', 'g' })
+
+        local extmark = Extmark._from_raw(0, 1, 0, 0, { end_row = 2, end_col = 0 })
+        assert.are.same(Pos00.new(2, 0), extmark.stop)
+        assert.are.same('abc\ndef\n', extmark:_text())
       end)
     end)
   end)
@@ -1641,13 +1736,10 @@ describe('Morph', function()
   ------------------------------------------------------------------------------
   -- MOUNT INTO NON-EMPTY BUFFER
   --
-  -- Bug: When mount() is called on a non-empty buffer, TextChanged can fire
-  -- after the initial render without on_bytes having captured any args.
-  -- This causes _on_bytes_after_autocmd to receive nil for all parameters,
-  -- resulting in: "attempt to perform arithmetic on local 'start_row0' (a nil value)"
-  --
-  -- The issue is in create_buf_watcher: it initializes last_on_bytes_args to nil,
-  -- and unpack({}) returns zero values, so all callback parameters are nil.
+  -- Regression: mount() into a non-empty buffer once let TextChanged fire after
+  -- the initial render with no captured on_bytes edit, so the guard ran on an
+  -- empty change and crashed. create_buf_watcher now gates on a pending-edit
+  -- count, so a TextChanged with no captured user edit is a no-op.
   ------------------------------------------------------------------------------
 
   describe('mount into non-empty buffer', function()

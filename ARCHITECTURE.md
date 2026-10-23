@@ -4,7 +4,7 @@ This document describes the internal architecture of morph.nvim, a React-like co
 
 ## Overview
 
-morph.nvim is implemented as a single file (`lua/morph.lua`, < 1500 SLoC) for easy vendoring by plugin authors. It provides a declarative, component-based API for building interactive text UIs in Neovim buffers.
+morph.nvim is implemented as a single file (`lua/morph.lua`) for easy vendoring by plugin authors. It provides a declarative, component-based API for building interactive text UIs in Neovim buffers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -17,7 +17,7 @@ morph.nvim is implemented as a single file (`lua/morph.lua`, < 1500 SLoC) for ea
 │                      Morph:mount(tree)                              │
 │   ┌─────────────────────────────────────────────────────────────┐   │
 │   │              Reconciliation (Side-by-Side Visitor)          │   │
-│   │   reconcile_tree() <--> reconcile_component()               │   │
+│   │   reconcile() <--> reconcile_component()                    │   │
 │   │         │                       │                           │   │
 │   │         ▼                       ▼                           │   │
 │   │   reconcile_array()      Component(ctx) → Tree              │   │
@@ -38,20 +38,19 @@ morph.nvim is implemented as a single file (`lua/morph.lua`, < 1500 SLoC) for ea
 
 ## Module Organization
 
-The single file is organized into logical sections:
+The single file is organized into parts. Each part opens with a banner stating
+its role:
 
-| Section               | Responsibility                                                  |
-| --------------------- | --------------------------------------------------------------- |
-| Type Definitions      | EmmyLua annotations for Tag, Element, Node, Tree, Component     |
-| Tree Utilities        | `tree_kind()` and the reconciler's identity-key helper for node classification |
-| Levenshtein Algorithm | Generic diff algorithm for minimal edit sequences               |
-| Textlock Detection    | Detects when buffer modifications are blocked                   |
-| Buffer Watcher        | Batches `on_bytes` events via TextChanged autocmd               |
-| `h()` Hyperscript     | Creates virtual DOM tags                                        |
-| `Pos00`               | 0-based position class with comparison operators                |
-| `Extmark`             | Wrapper around Neovim's extmark API                             |
-| `Ctx`                 | Component context (props, state, lifecycle)                     |
-| `Morph`               | Main renderer class                                             |
+| Part  | Responsibility                                                        |
+| ----- | --------------------------------------------------------------------- |
+| I     | Tree model, type definitions, and `h()`                               |
+| II    | Core types: environment checks, `Pos00`, `Extmark`, `Ctx`, `RenderError` |
+| III   | Reconciliation (the `Reconciler`)                                     |
+| IV    | Text generation and diffing: `markup_to_lines`, `diff_to_band`, `patch_lines` |
+| V     | The `Morph` instance: render, mount, element queries, key dispatch    |
+| VI    | The change guard: buffer watcher and readonly policing                |
+| VII   | The undo probe: region-scoped undo/redo                               |
+| Annex | `ErrorBoundary`, `Portal`, `FloatingWindow`, and hook helpers         |
 
 ## Core Concepts
 
@@ -120,7 +119,7 @@ For trees with components:
 
 ```
 Tree (with components)
-  ↓ reconcile_tree()
+  ↓ reconcile()
   ↓ reconcile_component() for each component
   ↓ Component(ctx) called → returns Tree
   ↓ reconcile children recursively
@@ -143,15 +142,16 @@ Rather than diffing trees independently and then computing changes, morph.nvim w
 
 This is implemented through three mutually recursive functions:
 
-### `reconcile_tree(old_tree, new_tree)`
+### `reconcile(old_tree, new_tree)`
 
 The entry point that dispatches based on node types:
 
-- reconcile_tree
-- reconcile_array
-- reconcile_component
+- `reconcile` (primitives, tags, and dispatch)
+- `reconcile_array`
+- `reconcile_component`
 
-This is where the **side-by-side correlated visitor** pattern is most visible. It walks old and new arrays together, correlating nodes by identity:
+The array walk is where the **side-by-side correlated visitor** pattern is most
+visible. It correlates nodes by identity:
 
 **Step 1: Compute identity keys for each node**
 
@@ -164,28 +164,15 @@ This is where the **side-by-side correlated visitor** pattern is most visible. I
 key = 'component-' .. tostring(tag.name) .. '-' .. tostring(tag.attributes.key or index)
 ```
 
-**Step 2: Use Levenshtein with custom cost function**
+**Step 2: Pair new nodes with old ones by key**
 
-The key insight: nodes with matching identity keys should be updated (cheaper), while different keys require unmount + mount (more expensive):
+A single pass builds `old_by_key`, then a second pass looks each new node's key
+up in it. This is O(n), which matters for long lists.
 
-```lua
-local changes = levenshtein {
-  from = old_nodes,
-  to = new_nodes,
-  are_any_equal = false,  -- all nodes need reconciliation
-  cost = {
-    of_change = function(_, _, old_idx, new_idx)
-      -- Matching keys = cheaper (update existing)
-      -- Different keys = more expensive (unmount + mount)
-      return old_keys[old_idx] == new_keys[new_idx] and 1 or 2
-    end,
-  },
-}
-```
+**Step 3: Reconcile each pair, then unmount the leftovers**
 
-**Step 3: Apply changes**
-
-(Code elided)
+Matched pairs reconcile recursively against their old node; unmatched new nodes
+mount fresh; old nodes whose key was never claimed unmount.
 
 ### Why This Pattern Works
 
@@ -193,7 +180,7 @@ The side-by-side visitor pattern provides several benefits:
 
 1. **State Preservation**: By correlating nodes via identity keys, component state is preserved across re-renders when the same component appears in the same logical position.
 
-2. **Minimal Operations**: Levenshtein finds the minimum edit distance, naturally preferring updates over destroy/recreate.
+2. **Minimal Operations**: Key matching prefers updates over destroy/recreate, so only genuinely new or removed nodes pay mount/unmount costs.
 
 3. **Depth-First Processing**: Children are fully reconciled before their parent's reconciliation completes, ensuring proper unmount order (children before parents).
 
@@ -205,7 +192,6 @@ The `levenshtein()` function is used for:
 
 1. **Line-level diffing**: Transform old buffer lines to new lines
 2. **Character-level diffing**: Within changed lines, find minimal character edits
-3. **Array reconciliation**: Match old/new component arrays
 
 The algorithm:
 
@@ -218,6 +204,15 @@ The algorithm:
 - Computes line-level Levenshtein diff
 - For each changed line, computes character-level diff
 - Applies minimal edits via `nvim_buf_set_lines` and `nvim_buf_set_text`
+
+`patch_lines()` can diff against either the live buffer or a snapshot. A
+snapshot is only valid while the buffer still matches it, and `b:changedtick`
+is the proof: every write (the render's own patch, a user edit, an undo, the
+probe) bumps it. So `render()` records the tick after patching and passes
+`text_content.lines` as the old side on the next render only when the tick
+still matches; a mismatch falls back to fetching the live lines. This skips a
+full-buffer read on the common "render changed nothing" pass without ever
+diffing stale text.
 
 ## Event Handling
 
@@ -240,9 +235,9 @@ The algorithm:
 1. `nvim_buf_attach` with `on_bytes` callback fires during buffer changes
 2. **Problem**: Buffer is in inconsistent state during `on_bytes`
 3. **Solution**: `create_buf_watcher()` batches `on_bytes` events and fires callback on `TextChanged` autocmd (when buffer is stable)
-4. `_on_bytes_after_autocmd()`:
-   - Finds extmarks overlapping the changed region
-   - Compares cached `tag.curr_text` with current extmark text
+4. `_on_bytes_burst()`:
+   - Diffs the render's line snapshot against the live lines to get the dirty band
+   - Reads each tag's live span text in the band and compares it with cached `tag.curr_text`
    - Fires `on_change` handlers from innermost to outermost with bubbling
 
 ### Readonly Guard
@@ -254,40 +249,42 @@ anchors the pieces: an app renders `Filter: [<hole>]` plus a heading that
 re-renders as `## Containers (filter: fl)` whenever the hole's filter
 changes.
 
-- **Detection**: the guard sweeps every rendered element's span text on each
-  buffer-change batch and compares it with the snapshot cached at render time
-  (`tag.curr_text`); span decisions use `tag.curr_span`, stored in PRE-change
-  coordinates so they never depend on where mark adjustment has since moved
-  the live extmarks. Example: typing `f` in the hole changes its live text to
-  `f` while its snapshot still says '' (empty) -- that mismatch is the edit.
-  O(elements) per batch; at TUI scale this is negligible.
-- **Violation**: a locked element whose text changed with no explaining
-  editable hole (one whose accepted span brackets the edit AND sits inside
-  the locked element's span) triggers a full-tree revert via the normal
-  render pipeline. Example: typing into the `Filter: [` chrome changes locked
+- **Detection**: each buffer-change batch is diffed against the render's line
+  snapshot to yield a dirty band, then the tags intersecting that band have
+  their live span text read and compared with the snapshot cached at render
+  time (`tag.curr_text`). Example: typing `f` in the hole changes its live text
+  to `f` while its snapshot still says '' (empty) -- that mismatch is the edit.
+  O(elements in the band) per batch; at TUI scale this is negligible.
+- **Violation**: a locked element whose text changed with no changed editable
+  tag nested inside it (structural nesting via the `parent` chain, not
+  position) triggers a full-tree revert via the normal render pipeline.
+  Example: typing into the `Filter: [` chrome changes locked
   text no hole explains -- the guard reverts it. The violated spans flash
   (`Search` highlight) and the cursor is restored to where the rejected edit
   found it -- sampled before nvim's own cursor adjustment, so line deletes
   recover the pre-clamp column. The restore targets the first window showing
   the buffer; with the buffer displayed in multiple windows simultaneously
   the non-originating window's cursor is not tracked.
-- **Bounded exception**: an edit whose pre-edit range is exactly a hole's
-  last-accepted span is positionally indistinguishable from a whole-content
-  change and is accepted. Example: `ciw` on the hole's whole content and a
-  visual-select of exactly the hole content produce the same pre-edit range;
-  the former must be accepted, so the latter is too. Any edit touching bytes
-  outside the hole reverts.
+- **Bounded exception**: an edit that rewrites a hole's whole content with the
+  same bytes diffs to nothing and is accepted. Example: `ciw` on the hole's
+  whole content, or a visual-select replaced by identical text, leaves the band
+  unchanged. Any edit touching bytes outside the hole reverts.
 ## Buffer Management
 
 ### Per-Buffer State
 
 - Each `Morph` instance is bound to one buffer
 - Namespace created per buffer: `vim.b[bufnr]._renderer_ns`
-- Tracks:
-  - `changedtick`: Detects external buffer changes
+- `Morph` owns the buffer-side state:
   - `changing`: Flag to ignore self-inflicted changes
   - `textlock`: Prevents immediate re-renders during callbacks
-  - `text_content.old/curr`: Lines, extmarks, tag <-> extmark mappings
+  - `text_content`: the render's line snapshot, and the tag <-> extmark id maps
+  - `changedtick`: the buffer tick recorded when that snapshot was last synced;
+    a matching tick proves the snapshot is still the live text
+  - `probe`: the hidden undo-probe buffer, created by the first render with editable holes
+- Each mount adds a `Reconciler`, which owns component state and lifecycle: the
+  tree, the last reconciled tree, the render trace, the after-render callback
+  queue, and the debounce timer
 
 ### Cleanup
 

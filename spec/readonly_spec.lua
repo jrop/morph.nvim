@@ -646,10 +646,10 @@ describe('readonly regions', function()
     assert.are.same('Filter: [myword] Up 3 days', result)
   end)
 
-  -- A violation's revert render rebuilds every tag's curr_text/curr_span,
-  -- so a batch AFTER a reverted edit must still explain hole edits against
-  -- fresh geometry (the next batch's prev span is not corrupted by marks
-  -- that the revert moved).
+  -- A violation's revert render rebuilds every tag's curr_text and re-reads
+  -- its live span, so a batch AFTER a reverted edit must still explain hole
+  -- edits against fresh geometry (the next batch's read is not corrupted by
+  -- marks that the revert moved).
   it('accepts a valid hole edit in the batch after a reverted violation', function()
     nv:exec_func(function()
       local util = require 'morph._test.util'
