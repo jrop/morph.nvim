@@ -12,20 +12,25 @@
 --- Runs in a **child** `nvim --headless --embed` (real event loop, real
 --- autocmds, real input) so `TextChanged`/`TextChangedI` fire naturally from
 --- real keystrokes and programmatic edits — no `vim.cmd.doautocmd` fakes. The
---- child is headless but is NOT subject to the host (busted runner) nvim's
+--- child is headless but is NOT subject to the host (test runner) nvim's
 --- TextChanged-doesn't-fire / insert-pending-leak limitations; see AGENTS.md's
---- "Test Environment Notes" host/child split. Every `exec_func` closure is
+--- "Test Environment Notes" host/child split. Every `run` closure is
 --- self-contained (`string.dump` drops upvalues); requires go inside the
 --- closure body and the Morph handle lives in the child global `_G.m`.
 --- Programmatic mode changes / scheduled work are only observable across an
---- RPC round-trip (a later `exec_func`), not within the same call.
-local Nvim = require 'morph._test.nvim'
+--- RPC round-trip (a later `run`), not within the same call.
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 describe('on_change events', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -37,8 +42,8 @@ describe('on_change events', function()
   --- re-renders) and records into the event sink as 'the-id'.
   --- @param initial string  the tag's text at mount
   local function mount_echo_hole(initial)
-    nv:exec_func(function(...)
-      local util = require 'morph._test.util'
+    nv:run(function(...)
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -47,7 +52,7 @@ describe('on_change events', function()
       --- @param ctx morph.Ctx<{}, { text: string }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { text = initial_text } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           h('text', {
             id = 'the-id',
@@ -60,12 +65,12 @@ describe('on_change events', function()
         }
       end
       _G.m:mount(h(App))
-    end, nil, initial)
+    end, initial)
   end
 
   it('fires when text is replaced', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -80,19 +85,19 @@ describe('on_change events', function()
     end)
 
     nv:input 'ggVGp'
-    local replaced = nv:settled {}
-    assert.are.same('bleh', replaced.text)
-    assert.are.same({ { id = 'tag', text = 'bleh' } }, replaced.events)
+    local replaced = util.settled(nv, {})
+    assert.deep_equal(replaced.text, 'bleh')
+    assert.deep_equal(replaced.events, { { id = 'tag', text = 'bleh' } })
 
     nv:input 'ggdG'
-    local cleared = nv:settled {}
-    assert.are.same('', cleared.text)
-    assert.are.same({ { id = 'tag', text = 'bleh' }, { id = 'tag', text = '' } }, cleared.events)
+    local cleared = util.settled(nv, {})
+    assert.deep_equal(cleared.text, '')
+    assert.deep_equal(cleared.events, { { id = 'tag', text = 'bleh' }, { id = 'tag', text = '' } })
   end)
 
   it('fires when text is deleted', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -105,14 +110,14 @@ describe('on_change events', function()
     end)
 
     nv:input 'vhhd'
-    local result = nv:settled {}
-    assert.are.same('prefix:suffix', result.text)
-    assert.are.same({ { id = 'tag', text = '' } }, result.events)
+    local result = util.settled(nv, {})
+    assert.deep_equal(result.text, 'prefix:suffix')
+    assert.deep_equal(result.events, { { id = 'tag', text = '' } })
   end)
 
   it('fires when newline is inserted', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -123,10 +128,10 @@ describe('on_change events', function()
       }
     end)
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 14, 0, 14, { '', '' }) end)
-    local result = nv:settled {}
-    assert.are.same('Search [filter\n]', result.text)
-    assert.are.same({ { id = 'tag', text = 'filter\n' } }, result.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 14, 0, 14, { '', '' }) end)
+    local result = util.settled(nv, {})
+    assert.deep_equal(result.text, 'Search [filter\n]')
+    assert.deep_equal(result.events, { { id = 'tag', text = 'filter\n' } })
   end)
 
   it('does not corrupt buffer on atomic multi-line insert at end of line', function()
@@ -138,17 +143,17 @@ describe('on_change events', function()
     mount_echo_hole 'jsonPayload.message'
 
     -- Simulate real Cmd+V: atomic multi-line insert at end of line 0.
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 19, 0, 19, { '', 'severity' }) end)
-    local result = nv:settled { ms = 100 }
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 19, 0, 19, { '', 'severity' }) end)
+    local result = util.settled(nv, { ms = 100 })
     -- Buffer must NOT be corrupted by the re-render
-    assert.are.same('jsonPayload.message\nseverity', result.text)
+    assert.deep_equal(result.text, 'jsonPayload.message\nseverity')
     -- on_change must receive the full updated text
-    assert.are.same({ { id = 'the-id', text = 'jsonPayload.message\nseverity' } }, result.events)
+    assert.deep_equal(result.events, { { id = 'the-id', text = 'jsonPayload.message\nseverity' } })
   end)
 
   it('fires with empty string when tag text is deleted entirely', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -158,31 +163,31 @@ describe('on_change events', function()
       }
     end)
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 8, 0, 18, {}) end)
-    local deleted = nv:settled {}
-    assert.are.same('Search: ', deleted.text)
-    assert.are.same({ { id = 'tag', text = '' } }, deleted.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 8, 0, 18, {}) end)
+    local deleted = util.settled(nv, {})
+    assert.deep_equal(deleted.text, 'Search: ')
+    assert.deep_equal(deleted.events, { { id = 'tag', text = '' } })
 
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local h = require('morph').h
       _G.m:render {
         'Filter: ',
         h('text', { id = 'tag', on_change = util.create_event_recorder 'tag' }, 'query'),
       }
     end)
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 8, 0, 13, {}) end)
-    local second = nv:settled {}
-    assert.are.same('Filter: ', second.text)
-    assert.are.same({
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 8, 0, 13, {}) end)
+    local second = util.settled(nv, {})
+    assert.deep_equal(second.text, 'Filter: ')
+    assert.deep_equal(second.events, {
       { id = 'tag', text = '' },
       { id = 'tag', text = '' },
-    }, second.events)
+    })
   end)
 
   it('detects change when new text has same length as original', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -202,15 +207,15 @@ describe('on_change events', function()
       _G.m:mount(h(App))
     end)
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, { 'p' }) end)
-    local result = nv:settled {}
-    assert.are.same('hellp', result.text)
-    assert.are.same({ { id = 'the-id', text = 'hellp' } }, result.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, { 'p' }) end)
+    local result = util.settled(nv, {})
+    assert.deep_equal(result.text, 'hellp')
+    assert.deep_equal(result.events, { { id = 'the-id', text = 'hellp' } })
   end)
 
   it('detects change when text changes back to original content', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -230,24 +235,24 @@ describe('on_change events', function()
       _G.m:mount(h(App))
     end)
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, {}) end)
-    local deleted = nv:settled {}
-    assert.are.same('hell', deleted.text)
-    assert.are.same({ { id = 'the-id', text = 'hell' } }, deleted.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 5, {}) end)
+    local deleted = util.settled(nv, {})
+    assert.deep_equal(deleted.text, 'hell')
+    assert.deep_equal(deleted.events, { { id = 'the-id', text = 'hell' } })
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 4, { 'o' }) end)
-    local restored = nv:settled {}
-    assert.are.same('hello', restored.text)
-    assert.are.same({
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 4, 0, 4, { 'o' }) end)
+    local restored = util.settled(nv, {})
+    assert.deep_equal(restored.text, 'hello')
+    assert.deep_equal(restored.events, {
       { id = 'the-id', text = 'hell' },
       { id = 'the-id', text = 'hello' },
-    }, restored.events)
+    })
   end)
 
   describe('event bubbling', function()
     it('fires handlers from inner to outer, not affecting siblings', function()
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         local Morph = require 'morph'
         local h = Morph.h
         _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -276,45 +281,45 @@ describe('on_change events', function()
       end)
 
       -- Change innermost element -> fires inner then outer
-      nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 21, 0, 26, { 'changed' }) end)
-      local inner = nv:settled {}
-      assert.are.same('sibling outer middle changed', inner.text)
-      assert.are.same(2, #inner.events)
-      assert.are.same('inner', inner.events[1].id)
-      assert.are.same('changed', inner.events[1].text)
-      assert.are.same('outer', inner.events[2].id)
-      assert.are.same('outer middle changed', inner.events[2].text)
+      nv:run(function() vim.api.nvim_buf_set_text(0, 0, 21, 0, 26, { 'changed' }) end)
+      local inner = util.settled(nv, {})
+      assert.deep_equal(inner.text, 'sibling outer middle changed')
+      assert.deep_equal(#inner.events, 2)
+      assert.deep_equal(inner.events[1].id, 'inner')
+      assert.deep_equal(inner.events[1].text, 'changed')
+      assert.deep_equal(inner.events[2].id, 'outer')
+      assert.deep_equal(inner.events[2].text, 'outer middle changed')
 
       -- Change sibling -> only sibling handler fires
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         util.events { clear = true }
         _G.__render()
         vim.api.nvim_buf_set_text(0, 0, 0, 0, 7, { 'modified' })
       end)
-      local sibling = nv:settled {}
-      assert.are.same('modified outer middle inner', sibling.text)
-      assert.are.same(1, #sibling.events)
-      assert.are.same('sibling', sibling.events[1].id)
-      assert.are.same('modified', sibling.events[1].text)
+      local sibling = util.settled(nv, {})
+      assert.deep_equal(sibling.text, 'modified outer middle inner')
+      assert.deep_equal(#sibling.events, 1)
+      assert.deep_equal(sibling.events[1].id, 'sibling')
+      assert.deep_equal(sibling.events[1].text, 'modified')
 
       -- Change middle (no handler) -> only outer handler fires
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         util.events { clear = true }
         _G.__render()
         vim.api.nvim_buf_set_text(0, 0, 14, 0, 20, { 'center' })
       end)
-      local middle = nv:settled {}
-      assert.are.same('sibling outer center inner', middle.text)
-      assert.are.same(1, #middle.events)
-      assert.are.same('outer', middle.events[1].id)
-      assert.are.same('outer center inner', middle.events[1].text)
+      local middle = util.settled(nv, {})
+      assert.deep_equal(middle.text, 'sibling outer center inner')
+      assert.deep_equal(#middle.events, 1)
+      assert.deep_equal(middle.events[1].id, 'outer')
+      assert.deep_equal(middle.events[1].text, 'outer center inner')
     end)
 
     it('bubbles through multiple nested levels', function()
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         local Morph = require 'morph'
         local h = Morph.h
         _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -331,17 +336,17 @@ describe('on_change events', function()
         }
       end)
 
-      nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 0, 0, 5, { 'changed' }) end)
-      local result = nv:settled {}
-      assert.are.same(3, #result.events)
-      assert.are.same('level3', result.events[1].id)
-      assert.are.same('level2', result.events[2].id)
-      assert.are.same('level1', result.events[3].id)
+      nv:run(function() vim.api.nvim_buf_set_text(0, 0, 0, 0, 5, { 'changed' }) end)
+      local result = util.settled(nv, {})
+      assert.deep_equal(#result.events, 3)
+      assert.deep_equal(result.events[1].id, 'level3')
+      assert.deep_equal(result.events[2].id, 'level2')
+      assert.deep_equal(result.events[3].id, 'level1')
     end)
 
     it('stops bubbling when bubble_up is set to false', function()
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         local Morph = require 'morph'
         local h = Morph.h
         _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -359,10 +364,10 @@ describe('on_change events', function()
         }
       end)
 
-      nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 0, 0, 4, { 'new' }) end)
-      local result = nv:settled {}
-      assert.are.same(1, #result.events)
-      assert.are.same('inner', result.events[1].id)
+      nv:run(function() vim.api.nvim_buf_set_text(0, 0, 0, 0, 4, { 'new' }) end)
+      local result = util.settled(nv, {})
+      assert.deep_equal(#result.events, 1)
+      assert.deep_equal(result.events[1].id, 'inner')
     end)
   end)
 
@@ -375,17 +380,17 @@ describe('on_change events', function()
     mount_echo_hole 'asldkfjasdlfjkasdfkj'
 
     -- Simulate linewise paste: insert a line after the extmark's range.
-    nv:exec_func(
+    nv:run(
       function()
         vim.api.nvim_buf_set_lines(0, 1, 1, false, { 'logName="projects/-----------/logs/---"' })
       end
     )
-    local result = nv:settled { ms = 100 }
+    local result = util.settled(nv, { ms = 100 })
     -- on_change must receive the full multi-line text
-    assert.are.same('asldkfjasdlfjkasdfkj\nlogName="projects/-----------/logs/---"', result.text)
-    assert.are.same(
-      { { id = 'the-id', text = 'asldkfjasdlfjkasdfkj\nlogName="projects/-----------/logs/---"' } },
-      result.events
+    assert.deep_equal(result.text, 'asldkfjasdlfjkasdfkj\nlogName="projects/-----------/logs/---"')
+    assert.deep_equal(
+      result.events,
+      { { id = 'the-id', text = 'asldkfjasdlfjkasdfkj\nlogName="projects/-----------/logs/---"' } }
     )
   end)
 
@@ -397,11 +402,14 @@ describe('on_change events', function()
     mount_echo_hole 'asldkfjasdlfjkasdfkj'
 
     -- Prepend a line before the extmark range.
-    nv:exec_func(function() vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'prepended' }) end)
-    local result = nv:settled { ms = 100 }
+    nv:run(function() vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'prepended' }) end)
+    local result = util.settled(nv, { ms = 100 })
     -- on_change must fire with the full buffer including prepended content
-    assert.are.same('prepended\nasldkfjasdlfjkasdfkj', result.text)
-    assert.are.same({ { id = 'the-id', text = 'prepended\nasldkfjasdlfjkasdfkj' } }, result.events)
+    assert.deep_equal(result.text, 'prepended\nasldkfjasdlfjkasdfkj')
+    assert.deep_equal(
+      result.events,
+      { { id = 'the-id', text = 'prepended\nasldkfjasdlfjkasdfkj' } }
+    )
   end)
 
   -- The guard must police USER edits only. A re-render that the app's own
@@ -413,8 +421,8 @@ describe('on_change events', function()
   -- in-flight typing: chrome flashes readonly, characters are clobbered, and
   -- the region's text diverges from app state.
   it('does not revert when the app re-renders from on_change', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -424,7 +432,7 @@ describe('on_change events', function()
           ctx.state = { filter = '', count = 0 }
           _G.app_state = ctx.state
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           'Header\n\n',
           'Filter: [',
@@ -470,16 +478,16 @@ describe('on_change events', function()
     nv:input '-5.3'
     nv:drain(150)
 
-    local result = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local result = nv:run(function()
+      local util = dofile 'spec/util.lua'
       return { text = util.text(0), state = _G.app_state.filter, reverts = _G.reverts or 0 }
     end)
 
     -- No keystroke -- slow or fast -- may schedule a revert render.
-    assert.are.equal(0, result.reverts)
+    assert.equal(result.reverts, 0)
     -- And the region must stay in sync with the app state it feeds.
-    assert.are.same('Header\n\nFilter: [glm-5.3] (7 models)\n\nFooter chrome', result.text)
-    assert.are.same('glm-5.3', result.state)
+    assert.deep_equal(result.text, 'Header\n\nFilter: [glm-5.3] (7 models)\n\nFooter chrome')
+    assert.deep_equal(result.state, 'glm-5.3')
   end)
 
   -- Deleting the last word of the filter with <C-w> is an edit owned by the
@@ -490,8 +498,8 @@ describe('on_change events', function()
   -- no longer exists in the emptied line, which lands the cursor to the
   -- right of the closing bracket.
   it('accepts <C-w> deleting the last word of the filter at its end', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -500,7 +508,7 @@ describe('on_change events', function()
       --- @param ctx morph.Ctx<{}, { filter: string }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { filter = '' } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           'Search: [',
           h('text', {
@@ -531,14 +539,14 @@ describe('on_change events', function()
     -- Type the filter, then delete its last word with <C-w> while still in
     -- insert mode: the cursor sits at the hole's end, before the locked ']'.
     nv:input 'ifilter'
-    local typed = nv:settled { ms = 150, cursor = true }
-    assert.are.same('Search: [filter]', typed.text)
-    assert.are.same({ { id = 'filter', text = 'filter' } }, typed.events)
-    assert.are.same({ 1, 15 }, typed.cursor)
+    local typed = util.settled(nv, { ms = 150, cursor = true })
+    assert.deep_equal(typed.text, 'Search: [filter]')
+    assert.deep_equal(typed.events, { { id = 'filter', text = 'filter' } })
+    assert.deep_equal(typed.cursor, { 1, 15 })
 
     nv:input '<C-w>'
-    local result = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local result = nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(150)
       return {
         text = util.text(0),
@@ -550,21 +558,21 @@ describe('on_change events', function()
 
     -- The deletion emptied the hole: no revert, one on_change with '', and
     -- the cursor back between the brackets ([|], not []|).
-    assert.are.equal(0, result.reverts)
-    assert.are.same('Search: []', result.text)
-    assert.are.same({
+    assert.equal(result.reverts, 0)
+    assert.deep_equal(result.text, 'Search: []')
+    assert.deep_equal(result.events, {
       { id = 'filter', text = 'filter' },
       { id = 'filter', text = '' },
-    }, result.events)
-    assert.are.same({ 1, 9 }, result.cursor)
+    })
+    assert.deep_equal(result.cursor, { 1, 9 })
   end)
 end)
 
 describe('undo/redo', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -572,8 +580,8 @@ describe('undo/redo', function()
   end)
 
   it('tracks extmarks correctly through undo/redo', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -587,34 +595,34 @@ describe('undo/redo', function()
 
     -- Real keystrokes; TextChangedI fires by itself (no doautocmd).
     nv:input 'ifilter'
-    local typed = nv:settled {}
-    assert.are.same('Search: [filter]', typed.text)
-    assert.are.same({ { id = 'filter', text = 'filter' } }, typed.events)
+    local typed = util.settled(nv, {})
+    assert.deep_equal(typed.text, 'Search: [filter]')
+    assert.deep_equal(typed.events, { { id = 'filter', text = 'filter' } })
 
     nv:input '<Esc>u'
-    local undone = nv:settled {}
-    assert.are.same('Search: []', undone.text)
-    assert.are.same({
+    local undone = util.settled(nv, {})
+    assert.deep_equal(undone.text, 'Search: []')
+    assert.deep_equal(undone.events, {
       { id = 'filter', text = 'filter' },
       { id = 'filter', text = '' },
-    }, undone.events)
+    })
 
     nv:input '<C-r>'
-    local redone = nv:settled {}
-    assert.are.same('Search: [filter]', redone.text)
-    assert.are.same({
+    local redone = util.settled(nv, {})
+    assert.deep_equal(redone.text, 'Search: [filter]')
+    assert.deep_equal(redone.events, {
       { id = 'filter', text = 'filter' },
       { id = 'filter', text = '' },
       { id = 'filter', text = 'filter' },
-    }, redone.events)
+    })
   end)
 end)
 
-describe('morph._test.util', function()
-  --- @type morph._test.Nvim
+describe('spec/util.lua', function()
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -622,8 +630,8 @@ describe('morph._test.util', function()
   end)
 
   it('covers the full helper API through a child', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local bufnr = util.scratch_buf { focus = true, lines = { 'Search: [x]' } }
@@ -636,18 +644,18 @@ describe('morph._test.util', function()
       util.cursor_to_extmark_start(_G.m, 'tag')
     end)
 
-    local cursor = nv:exec_func(function() return vim.api.nvim_win_get_cursor(0) end)
-    assert.are.same({ 1, 9 }, cursor)
+    local cursor = nv:run(function() return vim.api.nvim_win_get_cursor(0) end)
+    assert.deep_equal(cursor, { 1, 9 })
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 9, 0, 10, { 'y' }) end)
-    local result = nv:settled { ms = 30 }
-    assert.are.same('Search: [y]', result.text)
-    assert.are.same({ { id = 'tag', text = 'y' } }, result.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 9, 0, 10, { 'y' }) end)
+    local result = util.settled(nv, { ms = 30 })
+    assert.deep_equal(result.text, 'Search: [y]')
+    assert.deep_equal(result.events, { { id = 'tag', text = 'y' } })
 
-    local cleared = nv:settled({ clear = true }).events
-    assert.are.same({ { id = 'tag', text = 'y' } }, cleared)
+    local cleared = util.settled(nv, { clear = true }).events
+    assert.deep_equal(cleared, { { id = 'tag', text = 'y' } })
 
-    local after_clear = nv:settled({}).events
-    assert.are.same({}, after_clear)
+    local after_clear = util.settled(nv, {}).events
+    assert.deep_equal(after_clear, {})
   end)
 end)

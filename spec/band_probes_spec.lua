@@ -16,13 +16,18 @@
 --- tree) and its superset property: every tag whose content genuinely
 --- changed must intersect the band. Runs in a child nvim so real keystrokes
 --- and real autocmds drive the bursts (see AGENTS.md's host/child split).
-local Nvim = require 'morph._test.nvim'
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 describe('band probes', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -33,8 +38,8 @@ describe('band probes', function()
   --- line-level edits. The hole records on_change events; reverts are
   --- counted through an instance-level wrap.
   local function mount_docker_shape()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -73,11 +78,11 @@ describe('band probes', function()
     -- single in-child drain misses. await_guard polls across round trips
     -- (each request flushes pending key-events); unlike a plain drain, its
     -- failure mode is a loud error with diagnostics, not a nil band.
-    if not nv:await_guard() then
+    if not util.await_guard(nv) then
       error 'guard never judged the burst (TextChanged window never closed)'
     end
-    return nv:exec_func(function()
-      local util = require 'morph._test.util'
+    return nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(200)
       local after = util.tag_snapshot(_G.m)
       return {
@@ -93,13 +98,14 @@ describe('band probes', function()
 
   --- Every genuinely changed tag must intersect the band's rows.
   local function assert_band_covers_changes(result)
-    assert.is_truthy(result.band, 'guard recorded no band for the burst')
+    assert.ok(result.band, 'guard recorded no band for the burst')
     local top, bottom = result.band[1], result.band[2]
     for _, id in ipairs(result.changed) do
       local snap = result.after[id]
-      assert.is_truthy(snap, 'changed tag ' .. id .. ' vanished from the snapshot')
-      assert.is_true(
+      assert.ok(snap, 'changed tag ' .. id .. ' vanished from the snapshot')
+      assert.equal(
         snap.start[1] <= bottom and snap.stop[1] >= top,
+        true,
         ('changed tag "%s" (rows %d..%d) outside band %d..%d'):format(
           id,
           snap.start[1],
@@ -113,8 +119,8 @@ describe('band probes', function()
 
   it('bands a typing burst to the filter line', function()
     mount_docker_shape()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'filter')
       return nil
     end)
@@ -123,23 +129,23 @@ describe('band probes', function()
     local result = observe()
 
     -- The filter sits on 0-based row 2 ('## Docker', '', 'Filter: ...').
-    assert.are.same({ 2, 2 }, result.band)
+    assert.deep_equal(result.band, { 2, 2 })
     assert_band_covers_changes(result)
-    assert.are.same({ { id = 'filter', text = 'filter' } }, result.events)
-    assert.are.equal(0, result.reverts)
+    assert.deep_equal(result.events, { { id = 'filter', text = 'filter' } })
+    assert.equal(result.reverts, 0)
   end)
 
   it('bands a <C-w> word delete to the collapsed filter line', function()
     mount_docker_shape()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'filter')
       return nil
     end)
 
     nv:input 'ifilter'
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(150)
       -- Snapshot before the second burst so its changed set is exact; the
       -- sink is cleared so burst 2's events are the only ones observed.
@@ -153,24 +159,27 @@ describe('band probes', function()
 
     -- All six sub-deletes converge on the filter's line: the probes nvim
     -- adjusted through the batch land on the collapsed hole's row.
-    assert.are.same({ 2, 2 }, result.band)
+    assert.deep_equal(result.band, { 2, 2 })
     assert_band_covers_changes(result)
-    assert.are.same({ { id = 'filter', text = '' } }, result.events)
-    assert.are.equal(0, result.reverts)
-    assert.are.same('## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three', result.text)
+    assert.deep_equal(result.events, { { id = 'filter', text = '' } })
+    assert.equal(result.reverts, 0)
+    assert.deep_equal(
+      result.text,
+      '## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three'
+    )
   end)
 
   it('bands a newline insert to both touched lines', function()
     mount_docker_shape()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'filter')
       return nil
     end)
 
     nv:input 'iab'
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(150)
       -- Snapshot before the second burst so its changed set is exact.
       _G.before = util.tag_snapshot(_G.m)
@@ -183,19 +192,19 @@ describe('band probes', function()
     local result = observe()
 
     -- The burst added one line, so the sound band overshoots by that churn.
-    assert.are.same({ 2, 4 }, result.band)
+    assert.deep_equal(result.band, { 2, 4 })
     assert_band_covers_changes(result)
-    assert.are.same(
-      '## Docker\n\nFilter: [ab\ncd] (3 items)\n\nRow one\nRow two\nRow three',
-      result.text
+    assert.deep_equal(
+      result.text,
+      '## Docker\n\nFilter: [ab\ncd] (3 items)\n\nRow one\nRow two\nRow three'
     )
-    assert.are.same('ab\ncd', result.events[#result.events].text)
-    assert.are.equal(0, result.reverts)
+    assert.deep_equal(result.events[#result.events].text, 'ab\ncd')
+    assert.equal(result.reverts, 0)
   end)
 
   it('bands a deleted locked line to its collapse point and reverts', function()
     mount_docker_shape()
-    nv:exec_func(function()
+    nv:run(function()
       -- Cursor onto 'Row one' (line 5, 1-based row 6? rows: 1 '## Docker',
       -- 2 '', 3 'Filter: ...', 4 '', 5 'Row one').
       vim.api.nvim_win_set_cursor(0, { 5, 0 })
@@ -207,17 +216,20 @@ describe('band probes', function()
 
     -- The deleted line's tags collapse onto the deletion point's row; the
     -- burst removed one line, so the band overshoots upward by that churn.
-    assert.are.same({ 3, 4 }, result.band)
+    assert.deep_equal(result.band, { 3, 4 })
     assert_band_covers_changes(result)
     -- The dd touched locked text: the guard reverts, which restores the
     -- deleted line -- the buffer ends up exactly as mounted.
-    assert.are.equal(1, result.reverts)
-    assert.are.same('## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three', result.text)
+    assert.equal(result.reverts, 1)
+    assert.deep_equal(
+      result.text,
+      '## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three'
+    )
   end)
 
   it('bands an append past the tree and reverts it in a locked app', function()
     mount_docker_shape()
-    nv:exec_func(function()
+    nv:run(function()
       -- Append two lines after 'Row three' (last line, 0-based row 6).
       local last = vim.api.nvim_buf_line_count(0) - 1
       local len = #vim.api.nvim_buf_get_lines(0, last, last + 1, true)[1]
@@ -231,9 +243,12 @@ describe('band probes', function()
     -- end (the content diff of the render snapshot vs the live lines --
     -- see diff_to_band). Nothing there is a tag, so the locked app reverts
     -- the outside-tree edit.
-    assert.are.same({ 7, 9 }, result.band)
+    assert.deep_equal(result.band, { 7, 9 })
     assert_band_covers_changes(result)
-    assert.are.equal(1, result.reverts)
-    assert.are.same('## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three', result.text)
+    assert.equal(result.reverts, 1)
+    assert.deep_equal(
+      result.text,
+      '## Docker\n\nFilter: [] (3 items)\n\nRow one\nRow two\nRow three'
+    )
   end)
 end)

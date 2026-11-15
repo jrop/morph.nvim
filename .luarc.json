@@ -4,13 +4,9 @@
     "version": "LuaJIT"
   },
   "workspace": {
-    "ignoreDir": [
-      ".prefix"
-    ],
     "library": [
       "$VIMRUNTIME",
-      "library/busted",
-      "library/luv"
+      "library/vim-iter"
     ]
   }
 }

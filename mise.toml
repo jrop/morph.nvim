@@ -2,101 +2,82 @@
 ## Tools
 ################################################################################
 
+# Both emmylua tools ship in one GitHub release, and mise lists each repository
+# once, so an alias gives each tool its own name and install directory.
+[tool_alias]
+emmylua_check = "github:EmmyLuaLs/emmylua-analyzer-rust"
+emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
+
 [tools]
-# nvimv needs jq:
-jq = "1.8.2"
-"asdf:mise-plugins/mise-lua" = "5.1.5"
-# Since we have busted configured to look for "nvim", have a "default" version
-# installed. In the tests, we will override with `eval $(nvimv env VERSION)`,
-# but to avoid having to litter a bunch of commands with that environment
-# initialization, this just makes things simpler:
-neovim = "0.12.5"
-"http:nvimv" = { version = "350b9aa", url = "https://raw.githubusercontent.com/jrop/nvimv/350b9aa4e1e77329a636f55851e2810fd142c9de/nvimv" }
-stylua = "2.5.2"
-cargo-binstall = "1.23.0"
-"cargo:emmylua_ls" = { version = "0.25.1", depends = ["cargo-binstall"] }
-"cargo:emmylua_check" = { version = "0.25.1", depends = ["cargo-binstall"] }
+"aqua:neovim/neovim" = "0.12.6"
+stylua = "2.6.0"
+"github:jrop/nvim-bundle" = "0.4.1"
+
+[tools.emmylua_check]
+version = "0.25.1"
+bin = "emmylua_check"
+platforms.linux-x64 = { asset_pattern = "emmylua_check-linux-x64.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "emmylua_check-darwin-arm64.tar.gz" }
+platforms.macos-x64 = { asset_pattern = "emmylua_check-darwin-x64.tar.gz" }
+
+[tools.emmylua_ls]
+version = "0.25.1"
+bin = "emmylua_ls"
+platforms.linux-x64 = { asset_pattern = "emmylua_ls-linux-x64.tar.gz" }
+platforms.macos-arm64 = { asset_pattern = "emmylua_ls-darwin-arm64.tar.gz" }
+platforms.macos-x64 = { asset_pattern = "emmylua_ls-darwin-x64.tar.gz" }
 
 ################################################################################
 # Env
 ################################################################################
 
 [env]
-ASDF_LUA_LUAROCKS_VERSION = "3.12.2"
-_.source = { path = "./scripts/env.sh", tools = true }
+# .emmyrc.json loads Neovim's runtime as a type library through $VIMRUNTIME. An
+# editor sets it for its language server, but a shell running `emmylua_check`
+# does not.
+VIMRUNTIME = { value = "{{ exec(command='nvim --clean --headless +\"lua io.stdout:write(vim.env.VIMRUNTIME)\" +qa') }}", tools = true }
 
 ################################################################################
 # Tasks
 ################################################################################
 
 [tasks]
-lint = "emmylua_check --ignore '.prefix/**/*.*' ."
 fmt = "stylua ."
 "fmt:check" = "stylua --check ."
-"test:prepare" = '''
-# Install Lua test dependencies (busted, etc.):
-luarocks test --prepare
-echo
 
-# Check that the nightly version of Neovim is not more than a day old. The
-# tag directory is recreated on every nvimv install/upgrade, so its own mtime
-# is when we installed it. The mtimes INSIDE the tarball are preserved from
-# the upstream build -- a nightly is already a day old when published -- so
-# testing the binary's mtime can essentially never match and would re-download
-# the release on every run. -maxdepth 0 tests the directory itself without
-# descending (supported by both BSD and GNU find):
-# The path mirrors nvimv's own DATA_DIR ("${XDG_DATA_HOME:-$PREFIX/share}/nvimv")
-# so the check follows installs wherever nvimv actually puts them -- XDG_DATA_HOME
-# wins on Linux, and PREFIX defaults to $HOME/.local when unset.
-nightly_dir="${XDG_DATA_HOME:-${PREFIX:-$HOME/.local}/share}/nvimv/tags/nightly"
-if [ -n "$(find "$nightly_dir" -maxdepth 0 -mtime -1 2>/dev/null)" ]; then
-  echo "Neovim Nightly is up-to-date"
-else
-  if nvimv ls | grep nightly >/dev/null; then
-    nvimv upgrade nightly
-  else
-    nvimv install nightly
-  fi
-fi
-echo
-'''
-
-[tasks."test:version:no-prep"]
-hide = true
-usage = '''
-arg "<version>" help="The version of Neovim to test with"
-'''
-run = '''
-echo
-echo -----------------------------
-echo -----------------------------
-echo Neovim version=$usage_version
-echo -----------------------------
-echo -----------------------------
-echo
-nvimv install $usage_version
-eval $(nvimv env $usage_version)
-busted --verbose
-'''
+[tasks.lint]
+run = "emmylua_check --warnings-as-errors ."
 
 [tasks."test:version"]
-depends = ["test:prepare"]
 usage = '''
-arg "<version>" help="The version of Neovim to test with"
+arg "<version>"
+flag "--coverage"
 '''
-run = 'mise test:version:no-prep $usage_version'
+run = '''
+tool="aqua:neovim/neovim@$usage_version"
+[ "$usage_version" = nightly ] && tool='vfox:jdx/vfox-neovim@nightly'
+# With auto-install off, `mise exec` on a missing version warns and runs the
+# default `nvim` from PATH, so the suite would pass under the wrong version.
+# Installing first makes a missing version an error instead.
+mise install "$tool"
+# The nightly tag moves, so refresh it when its checksum changed.
+[ "$usage_version" = nightly ] && { mise upgrade "$tool" >/dev/null 2>&1 || true; }
+echo "--- Neovim $usage_version ---"
+mise exec "$tool" -- nvim --clean -l lua/morph/vendor/test.lua ${usage_coverage:+--coverage}
+'''
 
-[tasks."test"]
-run = 'mise test:version 0.12.5'
+[tasks.test]
+run = "mise run test:version 0.12.5"
 
 [tasks."test:all"]
-depends = ["test:prepare"]
 run = '''
-VERSIONS="0.10.4 0.11.7 0.12.5 nightly"
-for v in $VERSIONS; do
-  mise test:version:no-prep $v
+for v in 0.10.4 0.11.7 0.12.5 nightly; do
+  mise run test:version "$v"
 done
 '''
+
+[tasks."test:coverage"]
+run = "mise run test:version --coverage 0.12.5"
 
 [tasks.bench]
 description = "Run headless benchmarks (benches/change_pipeline.lua)"
@@ -105,16 +86,7 @@ arg "[filter]" help="Only run bench groups whose name contains this substring"
 '''
 run = 'nvim --headless -l benches/change_pipeline.lua ${usage_filter}'
 
-[tasks."test:coverage"]
-depends = ["test:prepare"]
-run = '''
-rm -f ./luacov.*.*
-busted --coverage --verbose
-luacov
-awk '/^Summary$/{flag=1;next} flag{print}' luacov.report.out
-'''
-
-[tasks."ci"]
+[tasks.ci]
 run = '''
 mise run fmt:check
 mise run lint

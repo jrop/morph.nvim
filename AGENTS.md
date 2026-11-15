@@ -6,13 +6,69 @@ When asked to add a feature, start with adding a failing test, then the feature.
 
 ## Build/Lint/Test Commands
 
-- `mise run ci` - Run lint, format check, and tests
-- `mise run lint` - Typecheck with emmylua_check
+- `mise run ci` - `fmt:check` → `lint` → `test:all`
+- `mise run lint` - Typecheck with emmylua_check (warnings are errors)
 - `mise run fmt` - Format code with stylua
 - `mise run fmt:check` - Check code formatting
-- `mise run test` - Run tests with busted
+- `mise run test` - Run the specs against Neovim 0.12.5
+- `mise run test:all` - Run the specs against 0.10.4, 0.11.7, 0.12.5, and
+  nightly
+- `mise run test:version [--coverage] <version>` - Run the specs against one
+  Neovim version, which mise installs first (`nightly` is refreshed when its
+  tag moves)
+- `mise run test:coverage` - Run the 0.12.5 specs with line coverage
+- `mise run bench` - Run the headless benchmarks
 
-**Single test**: Use busted directly: `busted --verbose --filter='"<FULL TEST NAME HERE>"'`
+The specs run on test.nvim's own runner, so the suite needs no Lua, luarocks,
+or busted install. Run one spec file, or narrow by case name (a plain substring
+of the full name), by invoking the vendored file directly:
+
+```sh
+mise exec -- nvim --clean -l lua/morph/vendor/test.lua spec/on_change_spec.lua
+mise exec -- nvim --clean -l lua/morph/vendor/test.lua --filter 'region-aware undo'
+```
+
+## Test Framework
+
+`lua/morph/vendor/test.lua` is test.nvim (spec API, assertions, child-nvim RPC
+harness, runner, and coverage), vendored by `nvim-bundle` from
+`nvim-bundle.json`. The file is generated and stylua-ignored, so change the pin
+and run `nvim-bundle install` rather than editing it.
+
+Specs import the spec API from it, i.e., `describe`, `it`, the hooks, and
+`assert` are file locals, not busted globals. Two consequences follow:
+
+1. **Assertions take `(got, want)`.** `assert.deep_equal(got, want)` and
+   `assert.equal(got, want)` put the observed value first, which is the
+   reverse of busted's `assert.are.same(want, got)`. `assert.matches(str,
+   pattern)` likewise takes the string first.
+2. **Child closures must spell `_G.assert`.** Every `nv:run` closure is
+   `string.dump`'d, so it keeps no upvalues. A bare `assert(...)` inside one
+   refers to the file's `local assert`, i.e., an upvalue that is nil in the
+   child, so the call raises with an empty RPC error. `_G.assert` reaches the
+   child's builtin instead.
+
+Prefer `assert.ok` over a `nil` check for a value that must be present: it
+fails on `false` as well, so a predicate like `type(x) == 'string' and
+x:match(...)` cannot pass vacuously.
+
+Specs drive children through `test.Nvim` directly. The one morph-specific
+layer is `spec/util.lua`, which holds the helpers that only make sense for
+morph. An example of this is `util.settled(nv, opts)`: it waits out the
+guard's burst window, then reads back the child's text and recorded
+`on_change` events. The file serves both sides of the RPC boundary:
+
+1. **Host side:** a spec loads it once at the top with
+   `local util = dofile 'spec/util.lua'`, typed by a `--- @type spec.util`
+   line above it, and starts each child with `util.start(opts)`. That call is `test.Nvim.start` with
+   `NVIM_TEST` set in the child's environment.
+2. **Child side:** each `nv:run` closure loads it again itself with
+   `local util = dofile 'spec/util.lua'`, because the closure cannot see the
+   host's copy.
+
+It is loaded with `dofile`, not `require`, because neither nvim puts `spec/`
+on its module path. The runner only collects `*_spec.lua` files, so it never
+runs this file as a spec.
 
 ## Test Environment Notes
 
@@ -20,10 +76,10 @@ Tests run across two distinct neovim instances. **Both are headless**, but they
 behave differently — the word "headless" alone is NOT the distinguishing axis;
 the host/child boundary is.
 
-- **Host (busted runner) nvim**: the process running the busted test suite. Its
+- **Host (test runner) nvim**: the process running the spec suite. Its
   event loop is driven by the test runner, not real input.
 - **Child (embedded) nvim**: a fresh `nvim --headless --embed` spawned per test
-  via `lua/morph/_test/nvim.lua`, driven over msgpack-RPC. It has a real event
+  via `test.Nvim` (`util.start`), driven over msgpack-RPC. It has a real event
   loop, real autocmds, and real input — the host's limitations do NOT transfer
   to the child.
 
@@ -34,7 +90,7 @@ loop end to end.
 
 ### Host: TextChanged autocmds never fire
 
-`TextChanged` autocmds don't fire in the **host** (busted runner) nvim due to
+`TextChanged` autocmds don't fire in the **host** (test runner) nvim due to
 typeahead/operator pending behavior:
 
 - **`TextChanged`/`TextChangedI`/`TextChangedP` autocmds**: Do NOT fire in the
@@ -69,14 +125,14 @@ the cursor on subsequent `nvim_buf_set_text` calls. This is why host-side specs
 
 ### Child: real autocmds, real input, RPC round-trips flush
 
-The **child** (`morph._test.nvim`) is also `--headless`, but it has a real
+The **child** (`test.Nvim`) is also `--headless`, but it has a real
 event loop driven by RPC. Key consequences — all proven by green tests:
 
 - **Programmatic `:startinsert` DOES enter insert** in the child. It is just
-  not visible within the *same* `exec_func` call that issued it; the mode
-  change is only observable across an **RPC round-trip** (a later `exec_func`),
+  not visible within the *same* `run` call that issued it; the mode
+  change is only observable across an **RPC round-trip** (a later `run`),
   which acts as the event-loop flush point. So: read mode/insert observability
-  *after* a round-trip, never in the same `exec_func`.
+  *after* a round-trip, never in the same `run`.
 - **Real input** (`nv:input 'i'`, `nv:input 'w'`) drives genuine mode changes
   and inserts into buffers — observable via buffer content or `mode()` after a
   round-trip.
@@ -107,7 +163,7 @@ Text-change behavior (`on_change`, `TextChanged`-driven reconciliation) is
 tested in two different ways depending on what is under test:
 
 1. **In-process + fake autocmd** (`spec/morph_spec.lua`): The morph instance,
-   buffer, and event loop all live in the **host** (busted runner) nvim.
+   buffer, and event loop all live in the **host** (test runner) nvim.
    Because `TextChanged` never fires in the host, the test itself triggers it
    manually with `vim.cmd.doautocmd 'TextChanged'` after a programmatic buffer
    change (`nvim_buf_set_text`/`nvim_buf_set_lines`). This is the right choice
@@ -115,7 +171,7 @@ tested in two different ways depending on what is under test:
    fire, bubbling, batching) and no real user-input timing matters.
 
 2. **Child-nvim + real input** (`spec/on_change_spec.lua`): A fresh **child**
-   nvim (via `lua/morph/_test/nvim.lua`) receives real typed input through
+   nvim (via `test.Nvim`) receives real typed input through
    `nv:input`; real `TextChanged`/`TextChangedI` autocmds and `on_bytes` events
    fire naturally (see "Child" above). Choose this when the behavior depends
    on real input timing or genuine autocmd firing (undo/redo granularity, typed

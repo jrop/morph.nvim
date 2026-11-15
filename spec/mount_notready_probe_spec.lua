@@ -16,15 +16,20 @@
 --- (which the runaway starves). It intercepts `vim.schedule`, calls the
 --- *first* deferred mount attempt manually, and reports whether mount ever
 --- completes or whether it only ever re-defers. It runs in a child
---- `nvim --headless --embed` so module state is pristine; each `exec_func`
+--- `nvim --headless --embed` so module state is pristine; each `run`
 --- closure is self-contained (`string.dump` drops upvalues).
-local Nvim = require 'morph._test.nvim'
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 describe('Morph:mount readiness retry', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -32,7 +37,7 @@ describe('Morph:mount readiness retry', function()
   end)
 
   it('does not retry forever when the buffer is named but not loaded', function()
-    local result = nv:exec_func(function()
+    local result = nv:run(function()
       local Morph = require 'morph'
 
       -- A named, scratch, unloaded buffer: the `bufloaded == 0` clause of
@@ -111,7 +116,7 @@ describe('Morph:mount readiness retry', function()
   -- here, and one that force-mounts without loading fails too (the render would
   -- share the buffer with whatever bunload left behind).
   it('loads a named-but-unloaded buffer and renders into it', function()
-    local result = nv:exec_func(function()
+    local result = nv:run(function()
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -134,9 +139,9 @@ describe('Morph:mount readiness retry', function()
       }
     end)
 
-    assert.are.same(0, result.loaded_before)
-    assert.is_true(result.mounted_ok, 'mount should succeed, got: ' .. result.err)
-    assert.are.same(1, result.loaded_after)
-    assert.are.same({ 'RENDERED' }, result.lines)
+    assert.deep_equal(result.loaded_before, 0)
+    assert.equal(result.mounted_ok, true, 'mount should succeed, got: ' .. result.err)
+    assert.deep_equal(result.loaded_after, 1)
+    assert.deep_equal(result.lines, { 'RENDERED' })
   end)
 end)

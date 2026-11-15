@@ -5,6 +5,13 @@
 --- @diagnostic disable: redundant-parameter
 --- @diagnostic disable: undefined-field
 
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_all, after_all, before_each, after_each =
+  Test.before_all, Test.after_all, Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 local Morph = require 'morph'
 local FloatingWindow = Morph.FloatingWindow
 local h = Morph.h
@@ -71,13 +78,13 @@ describe('FloatingWindow', function()
   -- does. Save/restore so other specs are unaffected.
   --- @type string?
   local saved_nvim_test
-  setup(function()
+  before_all(function()
     saved_nvim_test = vim.env.NVIM_TEST
     vim.env.NVIM_TEST = 'true'
   end)
-  teardown(function() vim.env.NVIM_TEST = saved_nvim_test end)
+  after_all(function() vim.env.NVIM_TEST = saved_nvim_test end)
   after_each(function()
-    -- HOST-only artifact (the busted runner nvim, not the morph._test.nvim
+    -- HOST-only artifact (the test runner nvim, not the test.Nvim
     -- child): `:startinsert` leaves nvim's internal insert-pending state set
     -- even though the host never truly enters insert mode (mode() reports 'n').
     -- The float-close path short-circuits (mode already 'n'), so `:stopinsert`
@@ -96,7 +103,7 @@ describe('FloatingWindow', function()
 
     local float_win = first_float_win()
 
-    assert.is_not_nil(float_win, 'Floating window not created')
+    assert.ok(float_win, 'Floating window not created')
 
     cleanup_buffers { buf }
     if float_win and vim.api.nvim_win_is_valid(float_win) then
@@ -124,12 +131,12 @@ describe('FloatingWindow', function()
     r:mount(h(App))
 
     -- open=false: no float, original context untouched.
-    assert.are.equal(0, count_float_wins())
+    assert.equal(count_float_wins(), 0)
 
     -- false -> true: float opens, focus moves away from original window.
     box[1]:update { open = true }
-    assert.are.equal(1, count_float_wins())
-    assert.are_not.equal(original_win, vim.api.nvim_get_current_win())
+    assert.equal(count_float_wins(), 1)
+    assert.not_equal(vim.api.nvim_get_current_win(), original_win)
 
     -- true -> false: float closes, original context restored.
     box[1]:update { open = false }
@@ -140,10 +147,10 @@ describe('FloatingWindow', function()
       end,
       10
     )
-    assert.are.equal(0, count_float_wins())
-    assert.are.equal(original_win, vim.api.nvim_get_current_win())
-    assert.are.same({ 5, 3 }, vim.api.nvim_win_get_cursor(original_win))
-    assert.are.equal('n', vim.fn.mode():sub(1, 1))
+    assert.equal(count_float_wins(), 0)
+    assert.equal(vim.api.nvim_get_current_win(), original_win)
+    assert.deep_equal(vim.api.nvim_win_get_cursor(original_win), { 5, 3 })
+    assert.equal(vim.fn.mode():sub(1, 1), 'n')
   end)
 
   it('should restore original context when closing after mount with open=true', function()
@@ -159,14 +166,14 @@ describe('FloatingWindow', function()
     local r = Morph.new(create_test_buffer())
     r:mount(h(App))
 
-    assert.are.equal(1, count_float_wins())
+    assert.equal(count_float_wins(), 1)
 
     box[1]:update { open = false }
     vim.wait(1000, function() return vim.api.nvim_get_current_win() == original_win end, 10)
 
-    assert.are.equal(0, count_float_wins())
-    assert.are.equal(original_win, vim.api.nvim_get_current_win())
-    assert.are.same({ 2, 2 }, vim.api.nvim_win_get_cursor(original_win))
+    assert.equal(count_float_wins(), 0)
+    assert.equal(vim.api.nvim_get_current_win(), original_win)
+    assert.deep_equal(vim.api.nvim_win_get_cursor(original_win), { 2, 2 })
   end)
 
   it('should not create floating window when open is false', function()
@@ -175,7 +182,7 @@ describe('FloatingWindow', function()
     local r = Morph.new(buf)
     r:mount(h(FloatingWindow, { open = false, config = CFG }, h('text', {}, { 'Hello' })))
 
-    assert.are.equal(0, count_float_wins(), 'Floating window should not be created when open=false')
+    assert.equal(count_float_wins(), 0, 'Floating window should not be created when open=false')
 
     cleanup_buffers { buf }
   end)
@@ -188,12 +195,12 @@ describe('FloatingWindow', function()
 
     local float_win = first_float_win()
 
-    assert.is_not_nil(float_win, 'Floating window should be created')
+    assert.ok(float_win, 'Floating window should be created')
 
     local win_buf = vim.api.nvim_win_get_buf(float_win)
     local lines = vim.api.nvim_buf_get_lines(win_buf, 0, -1, false)
 
-    assert.are.equal('Test Content', lines[1])
+    assert.equal(lines[1], 'Test Content')
 
     cleanup_buffers { buf }
     if float_win and vim.api.nvim_win_is_valid(float_win) then
@@ -209,15 +216,16 @@ describe('FloatingWindow', function()
 
     local float_win = first_float_win()
 
-    assert.is_not_nil(float_win, 'Floating window should be created')
+    assert.ok(float_win, 'Floating window should be created')
 
     cleanup_buffers { buf }
 
     -- Wait for the window to be closed (unmount happens asynchronously)
     vim.wait(1000, function() return not vim.api.nvim_win_is_valid(float_win) end, 10)
 
-    assert.is_false(
+    assert.equal(
       vim.api.nvim_win_is_valid(float_win),
+      false,
       'Floating window should be closed on unmount'
     )
   end)
@@ -243,22 +251,22 @@ describe('FloatingWindow', function()
     local r = Morph.new(create_test_buffer())
     r:mount(h(App))
 
-    assert.are.equal(1, count_float_wins())
-    assert.are.equal(0, fired)
+    assert.equal(count_float_wins(), 1)
+    assert.equal(fired, 0)
 
     box[1]:update { open = false }
     vim.wait(2000, function() return fired > 0 end, 10)
 
-    assert.are.equal(1, fired)
-    assert.are.equal(original_win, fire_win)
-    assert.are.equal('n', fire_mode)
-    assert.are.equal(0, fire_floats)
-    assert.are.same({ 2, 2 }, vim.api.nvim_win_get_cursor(original_win))
+    assert.equal(fired, 1)
+    assert.equal(fire_win, original_win)
+    assert.equal(fire_mode, 'n')
+    assert.equal(fire_floats, 0)
+    assert.deep_equal(vim.api.nvim_win_get_cursor(original_win), { 2, 2 })
 
     -- Unmount must NOT fire on_closed a second time.
     cleanup_buffers { host_buf }
     vim.wait(1000, function() return not vim.api.nvim_buf_is_valid(host_buf) end, 10)
-    assert.are.equal(1, fired)
+    assert.equal(fired, 1)
   end)
 
   it('restores normal mode even when the previous window was closed mid-flight', function()
@@ -278,7 +286,7 @@ describe('FloatingWindow', function()
 
     local r = Morph.new(morph_buf)
     r:mount(h(App))
-    assert.are.equal(1, count_float_wins())
+    assert.equal(count_float_wins(), 1)
 
     -- Enter insert mode in the float so mode restore is meaningful.
     vim.cmd.startinsert()
@@ -294,10 +302,10 @@ describe('FloatingWindow', function()
       10
     )
 
-    assert.are.equal('n', vim.fn.mode():sub(1, 1))
-    assert.are.equal(0, count_float_wins())
-    assert.is_false(vim.api.nvim_win_is_valid(w1))
-    assert.are.equal(w2, vim.api.nvim_get_current_win())
+    assert.equal(vim.fn.mode():sub(1, 1), 'n')
+    assert.equal(count_float_wins(), 0)
+    assert.equal(vim.api.nvim_win_is_valid(w1), false)
+    assert.equal(vim.api.nvim_get_current_win(), w2)
 
     close_all_floats()
     cleanup_buffers { morph_buf, display_buf }
@@ -316,8 +324,8 @@ describe('FloatingWindow', function()
 
     local r = Morph.new(morph_buf)
     r:mount(h(App))
-    assert.are.equal(1, count_float_wins())
-    assert.are.equal(0, fired)
+    assert.equal(count_float_wins(), 1)
+    assert.equal(fired, 0)
 
     -- Enter insert mode in the float so mode restore is meaningful.
     vim.cmd.startinsert()
@@ -330,10 +338,10 @@ describe('FloatingWindow', function()
       10
     )
 
-    assert.are.equal(1, fired)
-    assert.are.equal(0, count_float_wins())
-    assert.are.equal('n', vim.fn.mode():sub(1, 1))
-    assert.are.equal(w1, vim.api.nvim_get_current_win())
+    assert.equal(fired, 1)
+    assert.equal(count_float_wins(), 0)
+    assert.equal(vim.fn.mode():sub(1, 1), 'n')
+    assert.equal(vim.api.nvim_get_current_win(), w1)
 
     close_all_floats()
     cleanup_buffers { display_buf }
@@ -349,10 +357,10 @@ end)
 --
 -- The bug only manifests on the `i->n` ModeChanged route, so float A must be
 -- in insert at close time. A's own `on_win_create` calls `startinsert`; that
--- suffices -- in the `morph._test.nvim` child (a real `--embed`ded nvim)
+-- suffices -- in the `test.Nvim` child (a real `--embed`ded nvim)
 -- programmatic `startinsert` DOES enter insert, it just is not visible within
--- the same `exec_func` call. The mode change is only observable across an RPC
--- round-trip (a later `exec_func`), which acts as the event-loop flush point
+-- the same `run` call. The mode change is only observable across an RPC
+-- round-trip (a later `run`), which acts as the event-loop flush point
 -- (see AGENTS.md). So no real `nv:input 'i'` is needed to set up A.
 --
 -- The assertion is the user-facing symptom itself: after A closes and B
@@ -365,21 +373,20 @@ end)
 -- content distinguishes bug from fix. Do not "simplify" this to a mode
 -- assertion.
 describe('FloatingWindow nested open from on_closed', function()
-  local Nvim = require 'morph._test.nvim'
-  --- @type morph._test.Nvim?
+  --- @type test.Nvim?
   local nv
-  before_each(function() nv = Nvim.start { columns = 60, rows = 20 } end)
+  before_each(function() nv = util.start { columns = 60, rows = 20 } end)
   after_each(function()
     if nv then nv:stop() end
     nv = nil
   end)
 
   it('second float opened from first on_closed is editable in insert mode', function()
-    nv:exec_func(function()
+    nv:run(function()
       local Morph = require 'morph'
       local h = Morph.h
       local FloatingWindow = Morph.FloatingWindow
-      local util = require 'morph._test.util'
+      local util = dofile 'spec/util.lua'
       _G.m = Morph.new(util.scratch_buf { focus = true })
       _G.b_buf = nil
       --- @type morph.Ctx<any, any>
@@ -425,7 +432,7 @@ describe('FloatingWindow nested open from on_closed', function()
     --- @return boolean
     local function poll_child(predicate, attempts)
       for _ = 1, attempts or 150 do
-        if nv:exec_func(predicate) then return true end
+        if nv:run(predicate) then return true end
       end
       return false
     end
@@ -433,19 +440,23 @@ describe('FloatingWindow nested open from on_closed', function()
     -- Round-trip so A's on_win_create startinsert flushes: the child is a real
     -- embedded nvim and programmatic startinsert DOES enter insert, but the
     -- mode change is only visible across an RPC round-trip, not within the
-    -- same exec_func. This puts A in insert so the close takes the i->n
+    -- same run. This puts A in insert so the close takes the i->n
     -- ModeChanged route (the only path the bug manifests on).
     local a_ready = poll_child(function()
       vim.wait(5)
       return vim.fn.mode():sub(1, 1) == 'i'
     end)
-    assert.is_true(a_ready, 'float A never entered insert mode; the i->n route was not exercised')
+    assert.equal(
+      a_ready,
+      true,
+      'float A never entered insert mode; the i->n route was not exercised'
+    )
 
     -- Close A: its on_closed opens B, whose on_win_create startinsert is
     -- deferred onto a clean tick by the fix. _G.app rides the dump boundary:
-    -- exec_func string.dumps its callback into the child nvim, so a host-side
+    -- run string.dumps its callback into the child nvim, so a host-side
     -- local could not carry the ctx across.
-    nv:exec_func(function()
+    nv:run(function()
       (_G.app --[[@as morph.Ctx<any, any>]]):update { show_a = false }
     end)
 
@@ -461,17 +472,17 @@ describe('FloatingWindow nested open from on_closed', function()
         and vim.api.nvim_get_current_buf() == _G.b_buf
         and vim.fn.mode():sub(1, 1) == 'i'
     end)
-    assert.is_true(b_ready, 'second float never became editable in insert mode')
+    assert.equal(b_ready, true, 'second float never became editable in insert mode')
     nv:input 'w'
 
-    local b_buf = nv:exec_func(function() return _G.b_buf end)
-    local lines = nv:exec_func(function()
+    local b_buf = nv:run(function() return _G.b_buf end)
+    local lines = nv:run(function()
       local b = _G.b_buf
       if not (b and vim.api.nvim_buf_is_valid(b)) then return {} end
       return vim.api.nvim_buf_get_lines(b, 0, -1, false)
     end)
 
-    assert.is_not_nil(b_buf, 'second float on_win_create never ran')
-    assert.are.same({ 'w' }, lines, 'second float was not editable; startinsert was lost')
+    assert.ok(b_buf, 'second float on_win_create never ran')
+    assert.deep_equal(lines, { 'w' }, 'second float was not editable; startinsert was lost')
   end)
 end)

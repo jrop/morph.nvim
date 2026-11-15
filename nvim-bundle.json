@@ -1,0 +1,10 @@
+{
+  "dependencies": {
+    "test": {
+      "entry": "test",
+      "ref": "v0.3.0",
+      "repo": "jrop/test.nvim"
+    }
+  },
+  "name": "morph"
+}

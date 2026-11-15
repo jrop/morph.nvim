@@ -2,6 +2,9 @@
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: undefined-field
 
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local assert = Test.assert
 local Morph = require 'morph'
 local Portal = Morph.Portal
 local h = Morph.h
@@ -29,11 +32,11 @@ describe('Portal', function()
     local portal_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
 
     -- Portal should not render anything to source buffer
-    assert.are.equal(1, #source_lines)
-    assert.are.equal('', source_lines[1])
+    assert.equal(#source_lines, 1)
+    assert.equal(source_lines[1], '')
     -- Portal should render children to portal buffer
-    assert.are.equal(1, #portal_lines)
-    assert.are.equal('Hello from Portal!', portal_lines[1])
+    assert.equal(#portal_lines, 1)
+    assert.equal(portal_lines[1], 'Hello from Portal!')
 
     cleanup_buffers { source_buf, portal_buf }
   end)
@@ -46,7 +49,7 @@ describe('Portal', function()
     r:mount(h(Portal, { bufnr = portal_buf }, h('text', {}, { 'Initial text' })))
 
     local initial_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
-    assert.are.equal('Initial text', initial_lines[1])
+    assert.equal(initial_lines[1], 'Initial text')
 
     -- Create new portal buffer with same name to simulate update
     local portal_buf2 = create_test_buffer()
@@ -55,7 +58,7 @@ describe('Portal', function()
     r2:mount(h(Portal, { bufnr = portal_buf2 }, h('text', {}, { 'Updated text' })))
 
     local updated_lines = vim.api.nvim_buf_get_lines(portal_buf2, 0, -1, false)
-    assert.are.equal('Updated text', updated_lines[1])
+    assert.equal(updated_lines[1], 'Updated text')
 
     cleanup_buffers { source_buf, source_buf2, portal_buf, portal_buf2 }
   end)
@@ -68,16 +71,16 @@ describe('Portal', function()
     r:mount(h(Portal, { bufnr = portal_buf }, h('text', {}, { 'Test content' })))
 
     local mounted_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
-    assert.are.equal(1, #mounted_lines)
-    assert.are.equal('Test content', mounted_lines[1])
+    assert.equal(#mounted_lines, 1)
+    assert.equal(mounted_lines[1], 'Test content')
 
     -- Unmount by deleting the buffer which triggers cleanup
     cleanup_buffers { portal_buf }
     source_buf = create_test_buffer()
 
     -- Portal buffer should be deleted, so verify source buffer still exists
-    assert.is_true(vim.api.nvim_buf_is_valid(source_buf))
-    assert.is_false(vim.api.nvim_buf_is_valid(portal_buf))
+    assert.equal(vim.api.nvim_buf_is_valid(source_buf), true)
+    assert.equal(vim.api.nvim_buf_is_valid(portal_buf), false)
 
     vim.api.nvim_buf_delete(source_buf, { force = true })
   end)
@@ -88,15 +91,15 @@ describe('Portal', function()
 
     local r = Morph.new(source_buf)
     r:mount(h(Portal, { bufnr = portal_buf }, h('text', {}, { 'First content' })))
-    assert.are.equal('First content', vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1], 'First content')
 
     -- Unmount releases the inner document; portal buffer content stays
     r:unmount()
-    assert.are.equal('First content', vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1], 'First content')
 
     -- Toggle back on: a fresh mount on the same portal buffer must not error
     r:mount(h(Portal, { bufnr = portal_buf }, h('text', {}, { 'Second content' })))
-    assert.are.equal('Second content', vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1], 'Second content')
 
     cleanup_buffers { source_buf, portal_buf }
   end)
@@ -109,10 +112,10 @@ describe('Portal', function()
     r:mount(h(Portal, { bufnr = portal_buf }, h('text', {}, { 'Line 1\n', 'Line 2\n', 'Line 3' })))
 
     local portal_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
-    assert.are.equal(3, #portal_lines)
-    assert.are.equal('Line 1', portal_lines[1])
-    assert.are.equal('Line 2', portal_lines[2])
-    assert.are.equal('Line 3', portal_lines[3])
+    assert.equal(#portal_lines, 3)
+    assert.equal(portal_lines[1], 'Line 1')
+    assert.equal(portal_lines[2], 'Line 2')
+    assert.equal(portal_lines[3], 'Line 3')
 
     cleanup_buffers { source_buf, portal_buf }
   end)
@@ -134,8 +137,8 @@ describe('Portal', function()
     r:mount(h(Portal, { bufnr = portal_buf }, h(CustomComponent, {}, { 'Outer' })))
 
     local portal_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
-    assert.are.equal(1, #portal_lines)
-    assert.are.equal('Custom: Outer', portal_lines[1])
+    assert.equal(#portal_lines, 1)
+    assert.equal(portal_lines[1], 'Custom: Outer')
 
     cleanup_buffers { source_buf, portal_buf }
   end)
@@ -148,8 +151,8 @@ describe('Portal', function()
     r:mount(h(Portal, { bufnr = portal_buf }))
 
     local portal_lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)
-    assert.are.equal(1, #portal_lines)
-    assert.are.equal('', portal_lines[1])
+    assert.equal(#portal_lines, 1)
+    assert.equal(portal_lines[1], '')
 
     cleanup_buffers { source_buf, portal_buf }
   end)
@@ -162,17 +165,17 @@ describe('Portal', function()
     local source_buf1 = create_test_buffer()
     local r1 = Morph.new(source_buf1)
     r1:mount(h(Portal, { bufnr = portal_buf1 }, h('text', {}, { 'Version 1' })))
-    assert.are.equal('Version 1', vim.api.nvim_buf_get_lines(portal_buf1, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf1, 0, -1, false)[1], 'Version 1')
 
     local source_buf2 = create_test_buffer()
     local r2 = Morph.new(source_buf2)
     r2:mount(h(Portal, { bufnr = portal_buf2 }, h('text', {}, { 'Version 2' })))
-    assert.are.equal('Version 2', vim.api.nvim_buf_get_lines(portal_buf2, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf2, 0, -1, false)[1], 'Version 2')
 
     local source_buf3 = create_test_buffer()
     local r3 = Morph.new(source_buf3)
     r3:mount(h(Portal, { bufnr = portal_buf3 }, h('text', {}, { 'Version 3' })))
-    assert.are.equal('Version 3', vim.api.nvim_buf_get_lines(portal_buf3, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf3, 0, -1, false)[1], 'Version 3')
 
     cleanup_buffers { source_buf1, source_buf2, source_buf3, portal_buf1, portal_buf2, portal_buf3 }
   end)
@@ -199,13 +202,13 @@ describe('Portal', function()
 
     local r = Morph.new(source_buf)
     r:mount(h(App, {}), { debounce_ms = 0 })
-    assert.are.equal('v1', vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1], 'v1')
 
     state.text = 'v2'
     app_ctx:update { text = 'v2' }
 
     -- The push must land synchronously: no deferred render is needed.
-    assert.are.equal('v2', vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1])
+    assert.equal(vim.api.nvim_buf_get_lines(portal_buf, 0, -1, false)[1], 'v2')
 
     cleanup_buffers { source_buf, portal_buf }
     vim.env.NVIM_TEST = saved

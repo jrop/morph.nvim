@@ -8,15 +8,20 @@
 --- visible content ("I am parent"), and opens the portal target buffer in a
 --- vsplit on the right.  Screenshots show BOTH buffers side by side.
 ---
---- Every exec_func must be fully self-contained (string.dump does not
+--- Every run must be fully self-contained (string.dump does not
 --- capture upvalues). All requires and data are defined inside the closure.
-local Nvim = require 'morph._test.nvim'
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 describe('Portal screenshot', function()
-  --- @type morph._test.Nvim?
+  --- @type test.Nvim?
   local nv
 
-  before_each(function() nv = Nvim.start { columns = 80, rows = 24 } end)
+  before_each(function() nv = util.start { columns = 80, rows = 24 } end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -29,8 +34,8 @@ describe('Portal screenshot', function()
   -- simple text: parent visible in source, portal content in target
   -----------------------------------------------------------------------
   it('simple text renders to portal buffer', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -47,7 +52,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Hello from Portal!                      ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -79,8 +84,8 @@ describe('Portal screenshot', function()
   -- parent state update triggers portal re-render
   -----------------------------------------------------------------------
   it('parent state update triggers portal re-render', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -96,7 +101,7 @@ describe('Portal screenshot', function()
           ctx.state = { count = 1 }
           vim.defer_fn(function() ctx:update { count = 2 } end, 200)
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return h('text', {}, {
           'Parent: ' .. state.count,
           h(Portal, { bufnr = portal_buf }, h('text', {}, { 'Portal: ' .. state.count })),
@@ -109,7 +114,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'Parent: 1                              │Portal: 1                               ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -138,7 +143,7 @@ describe('Portal screenshot', function()
 
     -- The app's own defer_fn (~200ms after mount) updates the count; wait for
     -- that update to land rather than sleeping a fixed 500ms.
-    nv:exec_func(function()
+    nv:run(function()
       vim.wait(
         2000,
         function() return vim.api.nvim_buf_get_lines(0, 0, 1, false)[1]:find 'Parent: 2' ~= nil end,
@@ -146,7 +151,7 @@ describe('Portal screenshot', function()
       )
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'Parent: 2                              │Portal: 2                               ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -178,8 +183,8 @@ describe('Portal screenshot', function()
   -- portal keymap triggers parent state update
   -----------------------------------------------------------------------
   it('portal keymap triggers parent state update', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -192,7 +197,7 @@ describe('Portal screenshot', function()
       --- @param ctx morph.Ctx<{}, { count: integer }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { count = 0 } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return h('text', {}, {
           'count: ' .. state.count,
           h(
@@ -216,7 +221,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'count: 0                               │count: 0                                ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -243,13 +248,13 @@ describe('Portal screenshot', function()
       '                                                                                ',
     }, 'portal keymap: count=0')
 
-    nv:exec_func(function()
+    nv:run(function()
       vim.cmd 'wincmd l'
       vim.api.nvim_feedkeys('i', 'x', false)
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'count: 1                               │count: 1                                ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -281,8 +286,8 @@ describe('Portal screenshot', function()
   -- multi-line content
   -----------------------------------------------------------------------
   it('multi-line content renders to portal buffer', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -303,7 +308,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Line 1                                  ',
       '~                                      │Line 2                                  ',
       '~                                      │Line 3                                  ',
@@ -336,8 +341,8 @@ describe('Portal screenshot', function()
   -----------------------------------------------------------------------
   it('updates propagate to portal buffer', function()
     -- Mount v1
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -354,7 +359,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Version 1                               ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -382,8 +387,8 @@ describe('Portal screenshot', function()
     }, 'updates v1: source shows parent, portal shows Version 1')
 
     -- Create fresh v2 (close old split first)
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       vim.cmd 'only'
       local Morph = require 'morph'
       local h = Morph.h
@@ -401,7 +406,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Version 2                               ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -433,8 +438,8 @@ describe('Portal screenshot', function()
   -- nested component children
   -----------------------------------------------------------------------
   it('nested components render through portal', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -458,7 +463,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Label: nested content                   ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -490,8 +495,8 @@ describe('Portal screenshot', function()
   -- empty portal renders empty buffer
   -----------------------------------------------------------------------
   it('empty portal renders empty buffer', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -508,7 +513,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │                                        ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -540,8 +545,8 @@ describe('Portal screenshot', function()
   -- multiple portals to different buffers
   -----------------------------------------------------------------------
   it('multiple portals render to separate buffers', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -564,7 +569,7 @@ describe('Portal screenshot', function()
       _G._test_portal_bufs = { portal_buf1, portal_buf2, portal_buf3 }
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Portal A                                ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -591,24 +596,24 @@ describe('Portal screenshot', function()
       '                                                                                ',
     }, 'multiple portals: source shows parent, portal A visible in vsplit')
 
-    local contents = nv:exec_func(function()
+    local contents = nv:run(function()
       local results = {}
       for _, buf in ipairs(_G._test_portal_bufs) do
         table.insert(results, vim.api.nvim_buf_get_lines(buf, 0, -1, false)[1])
       end
       return results
     end)
-    assert.are.equal('Portal A', contents[1])
-    assert.are.equal('Portal B', contents[2])
-    assert.are.equal('Portal C', contents[3])
+    assert.equal(contents[1], 'Portal A')
+    assert.equal(contents[2], 'Portal B')
+    assert.equal(contents[3], 'Portal C')
   end)
 
   -----------------------------------------------------------------------
   -- on_buf_create callback fires
   -----------------------------------------------------------------------
   it('on_buf_create callback receives morph document', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -635,7 +640,7 @@ describe('Portal screenshot', function()
       _G._test_expected_bufnr = portal_buf
     end)
 
-    local result = nv:exec_func(
+    local result = nv:run(
       function()
         return {
           fired = _G._test_callback_fired,
@@ -644,16 +649,16 @@ describe('Portal screenshot', function()
         }
       end
     )
-    assert.is_true(result.fired)
-    assert.are.equal(result.expected, result.received)
+    assert.equal(result.fired, true)
+    assert.equal(result.received, result.expected)
   end)
 
   -----------------------------------------------------------------------
   -- portal with highlighted text
   -----------------------------------------------------------------------
   it('highlighted text renders through portal', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -674,7 +679,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │Error: something went wrong             ',
       '~                                      │~                                       ',
       '~                                      │~                                       ',
@@ -706,8 +711,8 @@ describe('Portal screenshot', function()
   -- complex nested tree through portal
   -----------------------------------------------------------------------
   it('complex nested tree renders through portal', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       local Portal = Morph.Portal
@@ -746,7 +751,7 @@ describe('Portal screenshot', function()
       vim.cmd 'wincmd h'
     end)
 
-    nv:assert_screenshot({
+    assert.deep_equal(nv:screen(), {
       'I am parent                            │[header]                                ',
       '~                                      │Hello, world!                           ',
       '~                                      │line3                                   ',

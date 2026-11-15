@@ -9,27 +9,32 @@
 --- Region-aware undo/redo (the undo-probe buffer).
 ---
 --- Runs in a child `nvim --headless --embed` so real input drives real
---- `TextChanged`/`TextChangedI` autocmds and real undo/redo. Every `exec_func`
+--- `TextChanged`/`TextChangedI` autocmds and real undo/redo. Every `run`
 --- closure is self-contained (`string.dump` drops upvalues); the Morph handle
 --- lives in the child global `_G.m`.
-local Nvim = require 'morph._test.nvim'
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 --- Drain the edit's echo re-render, run the app's chrome refresh, drain that.
---- The exec_func closure stays self-contained (no upvalues).
---- @param nv morph._test.Nvim
+--- The run closure stays self-contained (no upvalues).
+--- @param nv test.Nvim
 local function drain_refresh(nv)
   nv:drain(150)
-  nv:exec_func(function() _G.refresh() end)
+  nv:run(function() _G.refresh() end)
   nv:drain(150)
 end
 
 --- Move the child's cursor to the region named `r` (element-lookup variant).
---- @param nv morph._test.Nvim
+--- @param nv test.Nvim
 local function cursor_to_r(nv)
-  nv:exec_func(function()
-    local util = require 'morph._test.util'
+  nv:run(function()
+    local util = dofile 'spec/util.lua'
     util.drain(150)
-    local el = assert(_G.m:get_element_by_id 'r')
+    local el = _G.assert(_G.m:get_element_by_id 'r')
     vim.api.nvim_win_set_cursor(0, { el.extmark.start[1] + 1, el.extmark.start[2] })
   end)
 end
@@ -38,12 +43,12 @@ end
 --- region `r` whose on_change echoes into app state, plus 'status: ...'
 --- chrome; `_G.refresh` re-renders the chrome the way async data would, and
 --- the cursor starts on the region.
---- @param nv morph._test.Nvim
+--- @param nv test.Nvim
 --- @param remount? boolean  unmount + remount the same instance after the
 ---   first mount (the interception-reinstallation test's subject)
 local function mount_status_filter(nv, remount)
-  nv:exec_func(function(...)
-    local util = require 'morph._test.util'
+  nv:run(function(...)
+    local util = dofile 'spec/util.lua'
     local Morph = require 'morph'
     local h = Morph.h
 
@@ -53,7 +58,7 @@ local function mount_status_filter(nv, remount)
         ctx.state = { filter = 'base', status = 'idle' }
         _G.app_ctx = ctx
       end
-      local state = assert(ctx.state)
+      local state = _G.assert(ctx.state)
       return {
         'status: ',
         h('text', {}, state.status),
@@ -77,18 +82,18 @@ local function mount_status_filter(nv, remount)
       _G.m:mount(h(App), { debounce_ms = 0 })
     end
     _G.refresh = function()
-      local state = assert(_G.app_ctx.state)
+      local state = _G.assert(_G.app_ctx.state)
       _G.app_ctx:update { filter = state.filter, status = 'working' }
     end
     util.cursor_to_extmark_start(_G.m, 'r')
-  end, nil, { remount = remount })
+  end, { remount = remount })
 end
 
 describe('region-aware undo', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -100,15 +105,15 @@ describe('region-aware undo', function()
   -- heading shape). One `u` must revert the hole edit and the app's rendered
   -- reflection together, rather than landing on the app's render entry.
   it('undoes a hole edit together with the app render it caused', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
       --- @param ctx morph.Ctx<{}, { filter: string }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { filter = 'aaa' } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           'Filter: ',
           h('text', { hl = 'Comment' }, state.filter), -- chrome embeds the hole text
@@ -129,32 +134,32 @@ describe('region-aware undo', function()
       _G.m:mount(h(App), { debounce_ms = 0 })
     end)
 
-    local before = nv:settled({}).text
-    assert.are.same('Filter: aaa\n[aaa]', before)
+    local before = util.settled(nv, {}).text
+    assert.deep_equal(before, 'Filter: aaa\n[aaa]')
 
     -- Type into the hole; the app re-renders the heading reflection.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
-      local el = assert(_G.m:get_element_by_id 'filter')
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
+      local el = _G.assert(_G.m:get_element_by_id 'filter')
       vim.api.nvim_win_set_cursor(0, { el.extmark.start[1] + 1, el.extmark.start[2] })
       util.drain(50)
     end)
     nv:input 'iZZZ<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('Filter: ZZZaaa\n[ZZZaaa]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'Filter: ZZZaaa\n[ZZZaaa]')
 
     -- One `u` must revert the hole edit; the app re-renders the reflection.
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('Filter: aaa\n[aaa]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'Filter: aaa\n[aaa]')
   end)
 
   -- Region awareness means a traversal steps through edits in the order they
   -- happened, regardless of which region they touched: undo must revert only
   -- the most recent edit, and only the next undo may touch an earlier region.
   it('undoes edits in order across two regions', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -169,37 +174,37 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>' -- edit region a -> A:[Xaaa]
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(100)
       util.cursor_to_extmark_start(_G.m, 'b')
       return nil
     end)
     nv:input 'iY<Esc>' -- edit region b -> B:[Ybbb]
-    local both = nv:settled({ ms = 150 }).text
-    assert.are.same('A:[Xaaa] B:[Ybbb]', both)
+    local both = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(both, 'A:[Xaaa] B:[Ybbb]')
 
     nv:input 'u' -- only b's edit reverts
-    local first = nv:settled({ ms = 150 }).text
-    assert.are.same('A:[Xaaa] B:[bbb]', first)
+    local first = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(first, 'A:[Xaaa] B:[bbb]')
 
     nv:input 'u' -- now a's edit reverts
-    local second = nv:settled({ ms = 150 }).text
-    assert.are.same('A:[aaa] B:[bbb]', second)
+    local second = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(second, 'A:[aaa] B:[bbb]')
   end)
 
   -- Redo must replay the undone edit, and the region-scoped story only holds
   -- if redo also restores the app's rendered reflection of the region text.
   it('redoes an undone edit across regions', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
       --- @param ctx morph.Ctx<{}, { filter: string }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { filter = 'aaa' } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           'Filter: ',
           h('text', { hl = 'Comment' }, state.filter),
@@ -219,16 +224,16 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('Filter: Xaaa\n[Xaaa]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'Filter: Xaaa\n[Xaaa]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('Filter: aaa\n[aaa]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'Filter: aaa\n[aaa]')
 
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
-    assert.are.same('Filter: Xaaa\n[Xaaa]', redone)
+    local redone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone, 'Filter: Xaaa\n[Xaaa]')
   end)
 
   -- The headline win. An app refresh (a timer, async data) renders chrome
@@ -236,8 +241,8 @@ describe('region-aware undo', function()
   -- abandons the undone branch, silently killing redo; the probe never sees
   -- that render, so its redo tip survives and `<C-r>` still restores the edit.
   it('redoes after an app chrome render lands between undo and redo', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -250,7 +255,7 @@ describe('region-aware undo', function()
           ctx.state = { filter = 'aaa', status = 'idle', tick = 0 }
           _G.app_ctx = ctx
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           'status: ',
           h('text', {}, state.status),
@@ -275,43 +280,43 @@ describe('region-aware undo', function()
       _G.m:mount(h(App), { debounce_ms = 0 })
       -- Chrome-only refresh: update non-edited state, keep the region text.
       _G.refresh = function()
-        local state = assert(_G.app_ctx.state)
+        local state = _G.assert(_G.app_ctx.state)
         _G.app_ctx:update { filter = state.filter, status = 'working', tick = state.tick + 1 }
       end
       util.cursor_to_extmark_start(_G.m, 'filter')
     end)
 
     nv:input 'iX<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('status: idle tick: 0\nFilter: Xaaa\n[Xaaa]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'status: idle tick: 0\nFilter: Xaaa\n[Xaaa]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('status: idle tick: 0\nFilter: aaa\n[aaa]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'status: idle tick: 0\nFilter: aaa\n[aaa]')
 
     -- The async app refresh lands here, straight onto the main buffer's tree.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       _G.refresh()
       util.drain(150)
       return nil
     end)
-    local refreshed = nv:settled({}).text
-    assert.are.same('status: working tick: 1\nFilter: aaa\n[aaa]', refreshed)
+    local refreshed = util.settled(nv, {}).text
+    assert.deep_equal(refreshed, 'status: working tick: 1\nFilter: aaa\n[aaa]')
 
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
+    local redone = util.settled(nv, { ms = 150 }).text
     -- The region edit is restored, and the app's refresh of non-region chrome
     -- survives it (the probe never touched that chrome).
-    assert.are.same('status: working tick: 1\nFilter: Xaaa\n[Xaaa]', redone)
+    assert.deep_equal(redone, 'status: working tick: 1\nFilter: Xaaa\n[Xaaa]')
   end)
 
   -- Native granularity. A single insert session is one user-perceived edit, so
   -- it must be one undo step, not one per character. The probe inherits this
   -- from Neovim's own undo coalescing rather than reimplementing it.
   it('treats one insert session as a single undo step', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -324,20 +329,20 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iabc<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[abcbase]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'X:[abcbase]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[base]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'X:[base]')
   end)
 
   -- The floor is mount state, not empty. Pressing `u` with no user edits yet
   -- (or after all edits are undone) must stop at the mounted region text; it
   -- must never sail out to an empty buffer.
   it('stops undo at the mount state instead of emptying regions', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -351,8 +356,8 @@ describe('region-aware undo', function()
 
     -- Undo with nothing to undo: the region must survive untouched.
     nv:input 'u'
-    local at_floor = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[base]', at_floor)
+    local at_floor = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(at_floor, 'X:[base]')
 
     -- One edit and undo returns to mount state; a further undo is a no-op.
     nv:input 'iZ<Esc>'
@@ -360,15 +365,15 @@ describe('region-aware undo', function()
     nv:input 'u'
     nv:input 'u'
     nv:input 'u'
-    local still_floor = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[base]', still_floor)
+    local still_floor = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(still_floor, 'X:[base]')
   end)
 
   -- A region may contain multiple lines, and an edit can add or remove them.
   -- Undo/redo must carry the line structure across, not just a single line.
   it('undoes a multiline edit inside a region', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -382,16 +387,16 @@ describe('region-aware undo', function()
 
     -- Insert a newline inside the region: the region becomes two lines.
     nv:input 'i<CR>line two<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[\nline twoone]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'X:[\nline twoone]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[one]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'X:[one]')
 
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[\nline twoone]', redone)
+    local redone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone, 'X:[\nline twoone]')
   end)
 
   -- A region's text can end with a newline, which puts its extmark stop at
@@ -400,8 +405,8 @@ describe('region-aware undo', function()
   -- the comparison against the stored text never settles. Undo/redo must
   -- round-trip the region intact, newline and all.
   it('undoes an edit inside a region whose text ends with a newline', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -413,28 +418,28 @@ describe('region-aware undo', function()
       util.cursor_to_extmark_start(_G.m, 'r')
     end)
 
-    local initial = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[one\n]', initial)
+    local initial = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(initial, 'X:[one\n]')
 
     nv:input 'iX<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[Xone\n]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'X:[Xone\n]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[one\n]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'X:[one\n]')
 
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[Xone\n]', redone)
+    local redone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone, 'X:[Xone\n]')
   end)
 
   -- Enabling the probe must not weaken the locked-chrome guard: editing
   -- outside every editable region is still a violation, still reverted, and
   -- still leaves the app's on_change unfired.
   it('still reverts an edit to locked chrome while the probe is active', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -453,9 +458,9 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:settled { ms = 200 }
-    assert.are.same('Name: [editable]', result.text)
-    assert.are.same({}, result.events)
+    local result = util.settled(nv, { ms = 200 })
+    assert.deep_equal(result.text, 'Name: [editable]')
+    assert.deep_equal(result.events, {})
   end)
 
   -- The ex-command forms of traversal must route through the probe too. They
@@ -468,12 +473,12 @@ describe('region-aware undo', function()
 
     nv:input 'iZ<Esc>'
     drain_refresh(nv)
-    local refreshed = nv:settled({}).text
-    assert.are.same('status: working\nX:[Zbase]', refreshed)
+    local refreshed = util.settled(nv, {}).text
+    assert.deep_equal(refreshed, 'status: working\nX:[Zbase]')
 
     nv:input ':undo<CR>'
-    local undone = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[base]', undone)
+    local undone = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(undone, 'status: working\nX:[base]')
   end)
 
   -- Unmount deletes the ex-command interception autocmd, so a remount must
@@ -489,14 +494,14 @@ describe('region-aware undo', function()
     -- Native undo would revert the chrome render instead, leaving the region
     -- edited and the status stale.
     nv:input ':undo<CR>'
-    local undone = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[base]', undone)
+    local undone = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(undone, 'status: working\nX:[base]')
 
     -- Redo must also route through the probe within the remounted session
     -- (history is reset across remounts, but not across an undo/redo pair).
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[Zbase]', redone)
+    local redone = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(redone, 'status: working\nX:[Zbase]')
   end)
 
   -- `:earlier N` and `:later N` carry a step count, and must step the probe
@@ -513,12 +518,12 @@ describe('region-aware undo', function()
     drain_refresh(nv)
 
     nv:input ':earlier 2<CR>'
-    local back = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[base]', back)
+    local back = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(back, 'status: working\nX:[base]')
 
     nv:input ':later 2<CR>'
-    local forward = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[BAbase]', forward)
+    local forward = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(forward, 'status: working\nX:[BAbase]')
   end)
 
   -- `g-` and `g+` traverse the tree by one entry, like `u` and `<C-r>`. They
@@ -531,12 +536,12 @@ describe('region-aware undo', function()
     drain_refresh(nv)
 
     nv:input 'g-'
-    local undone = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[base]', undone)
+    local undone = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(undone, 'status: working\nX:[base]')
 
     nv:input 'g+'
-    local redone = nv:settled({ ms = 200 }).text
-    assert.are.same('status: working\nX:[Zbase]', redone)
+    local redone = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(redone, 'status: working\nX:[Zbase]')
   end)
 
   -- The probe is the default undo mode, not something that requires the
@@ -544,8 +549,8 @@ describe('region-aware undo', function()
   -- false`) is enough to engage region-scoped undo, so an app that only marks
   -- its editable fields gets region undo without opting into a locked render.
   it('engages region undo for an explicit hole without a locked renderer', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       -- No `{ readonly = true }`: only the hole is declared editable.
@@ -558,35 +563,35 @@ describe('region-aware undo', function()
       util.cursor_to_extmark_start(_G.m, 'r')
     end)
 
-    local engaged = nv:exec_func(function() return _G.m.probe ~= nil end)
-    assert.is_true(engaged)
+    local engaged = nv:run(function() return _G.m.probe ~= nil end)
+    assert.equal(engaged, true)
 
     nv:input 'iZ<Esc>'
-    local typed = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[Zbase]', typed)
+    local typed = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(typed, 'X:[Zbase]')
 
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[base]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'X:[base]')
   end)
 
   -- The probe governs by resolution, not declaration: any resolved-editable
   -- tag is a region, so even a render of plain text with no declared holes
   -- gets region-scoped undo instead of native undo.
   it('engages region undo for a render with no declared holes', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       _G.m = Morph.new(util.scratch_buf { focus = true })
       _G.m:render { 'just chrome, no holes' }
     end)
-    local engaged = nv:exec_func(function() return _G.m.probe ~= nil end)
-    assert.is_true(engaged)
+    local engaged = nv:run(function() return _G.m.probe ~= nil end)
+    assert.equal(engaged, true)
 
     nv:input 'iZ<Esc>'
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('just chrome, no holes', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'just chrome, no holes')
   end)
 
   -- Nested editable tags are regions of their own. An undo entry snapshots
@@ -594,8 +599,8 @@ describe('region-aware undo', function()
   -- inner regions' text, so replay restores both consistently without any
   -- maximality or nesting bookkeeping.
   it('treats nested editable tags as regions of their own', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -613,8 +618,8 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iZ<Esc>'
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(150)
       -- Drop the typing event so the assertion below sees replay events only.
       util.events { clear = true }
@@ -622,24 +627,24 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'u'
-    local undone = nv:settled { ms = 150, clear = true }
-    assert.are.same('abc', undone.text)
-    assert.are.same({ { id = 'inner', text = 'ab' } }, undone.events)
+    local undone = util.settled(nv, { ms = 150, clear = true })
+    assert.deep_equal(undone.text, 'abc')
+    assert.deep_equal(undone.events, { { id = 'inner', text = 'ab' } })
 
     -- A second traversal must be as clean as the first: the redo rewrites the
     -- inner region, and the containing region's snapshot already matches the
     -- restored buffer, so its write must be skipped rather than drag the
     -- inner region's marks.
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
-    assert.are.same('Zabc', redone)
+    local redone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone, 'Zabc')
   end)
 
   -- The probe buffer is per-mount state. Unmounting must delete it, or every
   -- mount/unmount cycle leaks a hidden buffer plus its undo tree.
   it('deletes the probe buffer on unmount', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       --- @param _ctx morph.Ctx<any, any>
@@ -656,12 +661,12 @@ describe('region-aware undo', function()
       return nil
     end)
 
-    local valid = nv:exec_func(function()
+    local valid = nv:run(function()
       if not _G.probe_bufnr then error 'probe buffer was never created' end
       _G.m:unmount()
       return vim.api.nvim_buf_is_valid(_G.probe_bufnr)
     end)
-    assert.is_false(valid)
+    assert.equal(valid, false)
   end)
 
   -- `:undo N` addresses an absolute undo state, not N steps. With three edits
@@ -680,15 +685,15 @@ describe('region-aware undo', function()
 
     -- State 2 is baseline + first edit, i.e. 'Abase'.
     nv:input ':undo 2<CR>'
-    local at_two = nv:settled({ ms = 200 }).text
-    assert.are.same('status: idle\nX:[Abase]', at_two)
+    local at_two = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(at_two, 'status: idle\nX:[Abase]')
   end)
 
   -- The probe's mappings are buffer-local, so a buffer with no Morph keeps
   -- Neovim's native undo for `u` and `g-`/`g+` untouched.
   it('leaves native undo alone in a buffer with no morph instance', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local bufnr = util.scratch_buf { focus = true, lines = { 'base' } }
       vim.api.nvim_buf_call(bufnr, function() vim.cmd 'let &undolevels = &undolevels' end)
       vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { 'one' })
@@ -699,20 +704,20 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'u'
-    local after_u = nv:settled({ ms = 100 }).text
-    assert.are.same('one', after_u)
+    local after_u = util.settled(nv, { ms = 100 }).text
+    assert.deep_equal(after_u, 'one')
 
     nv:input 'g-'
-    local after_gminus = nv:settled({ ms = 100 }).text
-    assert.are.same('base', after_gminus)
+    local after_gminus = util.settled(nv, { ms = 100 }).text
+    assert.deep_equal(after_gminus, 'base')
   end)
 
   -- A re-render may drop an editable region entirely (a conditional field
   -- disappears). The probe must disengage cleanly rather than leave a stale
   -- slot mapping or crash on the next traversal.
   it('disengages cleanly when a re-render removes the editable region', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -725,36 +730,36 @@ describe('region-aware undo', function()
     end)
 
     nv:input 'iZ<Esc>'
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(150)
       -- Capture the probe buffer id while it exists, so the teardown
       -- assertion below can check the buffer was really deleted.
       _G.probe_buf = _G.m.probe and _G.m.probe.bufnr or nil
       return nil
     end)
-    local edited = nv:settled({}).text
-    assert.are.same('A:[Zaaa]', edited)
+    local edited = util.settled(nv, {}).text
+    assert.deep_equal(edited, 'A:[Zaaa]')
 
     -- Re-render without the hole: the probe is torn down.
-    local engaged = nv:exec_func(function()
+    local engaged = nv:run(function()
       local Morph = require 'morph'
       local h = Morph.h
       _G.m:render { h('text', {}, 'A:[] (no hole)') }
       return _G.m.probe ~= nil
     end)
-    assert.is_false(engaged)
+    assert.equal(engaged, false)
 
     -- Dropping the probe must delete its buffer: the disengage path runs on
     -- every render that loses its holes, and an orphaned hidden buffer (with
     -- its undo tree) would leak one per render.
-    local deleted = nv:exec_func(function() return not vim.api.nvim_buf_is_valid(_G.probe_buf) end)
-    assert.is_true(deleted)
+    local deleted = nv:run(function() return not vim.api.nvim_buf_is_valid(_G.probe_buf) end)
+    assert.equal(deleted, true)
 
     -- Traversal after the removal is a harmless no-op, not a crash.
     nv:input 'u'
-    local after = nv:settled({ ms = 150 }).text
-    assert.are.same('A:[] (no hole)', after)
+    local after = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(after, 'A:[] (no hole)')
   end)
 
   -- Removing a region is no longer a rebuild trigger: probe entries are keyed
@@ -764,8 +769,8 @@ describe('region-aware undo', function()
   -- rebuild would wipe survivor history and orphan another hidden buffer),
   -- and an edit recorded before the removal must stay undoable afterwards.
   it('keeps the probe when the region set shrinks, so survivors keep history', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -784,7 +789,7 @@ describe('region-aware undo', function()
     nv:drain(150)
 
     -- Shrink the set: b is gone, a survives under the same declared id.
-    nv:exec_func(function()
+    nv:run(function()
       local Morph = require 'morph'
       local h = Morph.h
       _G.m:render {
@@ -796,15 +801,15 @@ describe('region-aware undo', function()
       return nil
     end)
 
-    local kept = nv:exec_func(
+    local kept = nv:run(
       function() return _G.new_probe_buf ~= nil and _G.new_probe_buf == _G.old_probe_buf end
     )
-    assert.is_true(kept)
+    assert.equal(kept, true)
 
     -- The pre-shrink edit is still undoable: it belongs to a, which survived.
     nv:input 'u'
-    local after = nv:settled({ ms = 150 }).text
-    assert.are.same('A:[aaa]', after)
+    local after = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(after, 'A:[aaa]')
   end)
 
   -- A render that swaps in a DIFFERENT set of regions with the SAME count
@@ -815,8 +820,8 @@ describe('region-aware undo', function()
   -- region swap: regions that did not exist in the recorded history keep
   -- their rendered text.
   it('does not replay swapped-out region text into swapped-in regions', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -832,12 +837,12 @@ describe('region-aware undo', function()
 
     -- One accepted edit gives the probe history above its baseline.
     nv:input 'iX<Esc>'
-    nv:settled { ms = 150 } -- drain, discard the value
+    util.settled(nv, { ms = 150 }) -- drain, discard the value
 
     -- Re-render with the same number of editable regions but different
     -- ones (a,b -> c,d); the probe is kept and only its tags are re-pointed.
-    local swapped = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local swapped = nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m:render {
@@ -849,13 +854,13 @@ describe('region-aware undo', function()
       }
       return util.text(0)
     end)
-    assert.are.same('C:[ccc] D:[ddd]', swapped)
+    assert.deep_equal(swapped, 'C:[ccc] D:[ddd]')
 
     -- Undo must have nothing to say about regions that never existed in its
     -- recorded history: c must not inherit a's text, d must not inherit b's.
     nv:input 'u'
-    local after = nv:settled({ ms = 150 }).text
-    assert.are.same('C:[ccc] D:[ddd]', after)
+    local after = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(after, 'C:[ccc] D:[ddd]')
   end)
 
   -- A prepend grows the region set while shifting every survivor's position
@@ -868,8 +873,8 @@ describe('region-aware undo', function()
   -- only ever write a region it can positively identify, and degrade to a
   -- no-op rather than a cross-write.
   it('makes undo a no-op, not a cross-write, when an unkeyed render prepends', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -882,7 +887,7 @@ describe('region-aware undo', function()
             ctx:update { items = items }
           end
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         local out = {}
         for i, item in ipairs(state.items) do
           out[#out + 1] = h('text', {
@@ -909,16 +914,16 @@ describe('region-aware undo', function()
     nv:drain(150)
 
     -- Prepend a new item: the set grows 2 -> 3, every survivor shifts down.
-    nv:exec_func(function() _G.add_top() end)
-    local grown = nv:settled({ ms = 150 }).text
-    assert.are.same('new3\nXone\ntwo\n', grown)
+    nv:run(function() _G.add_top() end)
+    local grown = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(grown, 'new3\nXone\ntwo\n')
 
     -- Undo with NO edits since the add: nothing in the current region set can
     -- be identified with the recorded history, so this must be a no-op --
     -- every region keeps the text it rendered with, typed text included.
     nv:input 'u'
-    local after = nv:settled({ ms = 150 }).text
-    assert.are.same('new3\nXone\ntwo\n', after)
+    local after = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(after, 'new3\nXone\ntwo\n')
   end)
 
   -- Declared ids are the app's authority channel: when they name items (not
@@ -927,8 +932,8 @@ describe('region-aware undo', function()
   -- the very item it was made on, while the prepended region enters with no
   -- history of its own.
   it('keeps region history across a prepend when regions declare ids', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -944,7 +949,7 @@ describe('region-aware undo', function()
             ctx:update { items = items }
           end
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         local out = {}
         for i, item in ipairs(state.items) do
           out[#out + 1] = h('text', {
@@ -974,14 +979,14 @@ describe('region-aware undo', function()
     nv:drain(150)
 
     -- Prepend "new3": one and two keep their ids, new3 has none.
-    nv:exec_func(function() _G.add_top() end)
-    local grown = nv:settled({ ms = 150 }).text
-    assert.are.same('new3\nXone\ntwo\n', grown)
+    nv:run(function() _G.add_top() end)
+    local grown = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(grown, 'new3\nXone\ntwo\n')
 
     -- Undo reverts the pre-prepend edit on the item it was made on.
     nv:input 'u'
-    local after = nv:settled({ ms = 150 }).text
-    assert.are.same('new3\none\ntwo\n', after)
+    local after = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(after, 'new3\none\ntwo\n')
   end)
 
   -- The probe's headline promise: history attaches to ITEMS, not positions.
@@ -997,8 +1002,8 @@ describe('region-aware undo', function()
   -- safe-reset case. Key-only identity is used here on purpose: declared
   -- ids are trusted blindly, so only the stamp proves the hook works.)
   it('keeps item history across a keyed reorder', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -1018,7 +1023,7 @@ describe('region-aware undo', function()
             ctx:update { items = items }
           end
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         local out = {}
         for i, item in ipairs(state.items) do
           out[#out + 1] = h('text', {
@@ -1044,39 +1049,39 @@ describe('region-aware undo', function()
     -- Edit item #2, then chrome-moves it above #1: #2, #1, #3.
     nv:input 'iX<Esc>'
     nv:drain(150)
-    nv:exec_func(function() _G.move_up(2) end)
-    local moved = nv:settled({ ms = 150 }).text
-    assert.are.same('Xtwo\none\nthree\n', moved)
+    nv:run(function() _G.move_up(2) end)
+    local moved = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(moved, 'Xtwo\none\nthree\n')
 
     -- Edit item #1 at its NEW position: an edit made after the reorder, on a
     -- region whose position the reorder changed.
-    nv:exec_func(function()
+    nv:run(function()
       vim.api.nvim_win_set_cursor(0, { 2, 0 })
       return nil
     end)
     nv:input 'iY<Esc>'
-    local edited = nv:settled({ ms = 150 }).text
-    assert.are.same('Xtwo\nYone\nthree\n', edited)
+    local edited = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(edited, 'Xtwo\nYone\nthree\n')
 
     -- Undo walks back through BOTH edits, each landing on its own item:
     -- first the #1 edit (recorded after the reorder, on line two), then the
     -- #2 edit (recorded before it, now on line one).
     nv:input 'u'
-    local first = nv:settled({ ms = 150 }).text
-    assert.are.same('Xtwo\none\nthree\n', first)
+    local first = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(first, 'Xtwo\none\nthree\n')
 
     nv:input 'u'
-    local second = nv:settled({ ms = 150 }).text
-    assert.are.same('two\none\nthree\n', second)
+    local second = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(second, 'two\none\nthree\n')
 
     -- Redo walks forward again, landing each text back on its item.
     nv:input '<C-r>'
-    local redone = nv:settled({ ms = 150 }).text
-    assert.are.same('Xtwo\none\nthree\n', redone)
+    local redone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone, 'Xtwo\none\nthree\n')
 
     nv:input '<C-r>'
-    local redone_again = nv:settled({ ms = 150 }).text
-    assert.are.same('Xtwo\nYone\nthree\n', redone_again)
+    local redone_again = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(redone_again, 'Xtwo\nYone\nthree\n')
   end)
 
   -- A render that GROWS the region set (an Add button) must keep the probe's
@@ -1085,8 +1090,8 @@ describe('region-aware undo', function()
   -- controlled-input list: every hole echoes into state, so the re-render
   -- after the add preserves the typed text.
   it('undoes edits from before the region set grew', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
 
@@ -1099,7 +1104,7 @@ describe('region-aware undo', function()
             ctx:update { items = items }
           end
         end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         local out = {}
         for i, item in ipairs(state.items) do
           out[#out + 1] = h('text', {
@@ -1121,16 +1126,16 @@ describe('region-aware undo', function()
     end)
 
     -- Edit item 1, then item 2: two probe entries above the baseline.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'item-1')
       return nil
     end)
     nv:input 'iX<Esc>'
     nv:drain(150)
 
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'item-2')
       return nil
     end)
@@ -1138,14 +1143,14 @@ describe('region-aware undo', function()
     nv:drain(150)
 
     -- The add grows the set; the re-render preserves the typed edits.
-    nv:exec_func(function() _G.add_item() end)
-    nv:exec_func(function() _G.add_item() end)
-    local grown = nv:settled({ ms = 150 }).text
-    assert.are.same('Xone\nYtwo\nitem3\nitem4\n', grown)
+    nv:run(function() _G.add_item() end)
+    nv:run(function() _G.add_item() end)
+    local grown = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(grown, 'Xone\nYtwo\nitem3\nitem4\n')
 
     -- Edit one of the NEW regions.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.cursor_to_extmark_start(_G.m, 'item-3')
       return nil
     end)
@@ -1153,16 +1158,16 @@ describe('region-aware undo', function()
     nv:drain(150)
 
     nv:input 'u' -- reverts item-3's edit
-    local first = nv:settled({ ms = 150 }).text
-    assert.are.same('Xone\nYtwo\nitem3\nitem4\n', first)
+    local first = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(first, 'Xone\nYtwo\nitem3\nitem4\n')
 
     nv:input 'u' -- reverts item-2's edit (recorded before the add)
-    local second = nv:settled({ ms = 150 }).text
-    assert.are.same('Xone\ntwo\nitem3\nitem4\n', second)
+    local second = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(second, 'Xone\ntwo\nitem3\nitem4\n')
 
     nv:input 'u' -- reverts item-1's edit
-    local third = nv:settled({ ms = 150 }).text
-    assert.are.same('one\ntwo\nitem3\nitem4\n', third)
+    local third = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(third, 'one\ntwo\nitem3\nitem4\n')
   end)
 
   -- A hole declared inside a component must engage the probe even in an
@@ -1170,8 +1175,8 @@ describe('region-aware undo', function()
   -- declarations, wherever they appear in the tree, not off renderer-level
   -- locking.
   it('engages region undo for a hole nested in a component', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       --- @param _ctx morph.Ctx<any, any>
@@ -1182,12 +1187,12 @@ describe('region-aware undo', function()
       util.cursor_to_extmark_start(_G.m, 'r')
     end)
 
-    local engaged = nv:exec_func(function() return _G.m.probe ~= nil end)
-    assert.is_true(engaged)
+    local engaged = nv:run(function() return _G.m.probe ~= nil end)
+    assert.equal(engaged, true)
 
     nv:input 'iZ<Esc>'
     nv:input 'u'
-    local undone = nv:settled({ ms = 150 }).text
-    assert.are.same('X:[base]', undone)
+    local undone = util.settled(nv, { ms = 150 }).text
+    assert.deep_equal(undone, 'X:[base]')
   end)
 end)

@@ -1,20 +1,24 @@
 ---@diagnostic disable: global-in-non-module
---- Test utilities for child-nvim specs.
+--- Helpers the specs share, on both sides of the child-nvim RPC boundary.
 ---
---- Each `exec_func` closure is a separate child-side chunk, `string.dump`'d with
---- NO upvalues. Nothing survives between calls except child globals. This module
---- provides the shared helpers those closures need; `require` it inside each
---- closure body.
+--- Each `nv:run` closure is a separate child-side chunk, `string.dump`'d with
+--- NO upvalues. Nothing survives between calls except child globals, so a
+--- closure that needs these helpers loads them itself:
+--- `local util = dofile 'spec/util.lua'`. A `dofile` (not `require`) is what
+--- reaches this file, because neither nvim puts `spec/` on its module path; the
+--- relative path resolves because the runner and its children share the
+--- repository root as their cwd. The runner only collects `*_spec.lua` files,
+--- so this file is never run as a spec.
 ---
---- @class morph._test.util
+--- @class spec.util
 local M = {}
 
---- @class morph._test.util.Event
+--- @class spec.util.Event
 --- @field id string
 --- @field text string
 
 --- The child-global event sink shared by every `create_event_recorder` handler.
---- @return morph._test.util.Event[]
+--- @return spec.util.Event[]
 local function sink()
   _G.__morph_test_events = _G.__morph_test_events or {}
   return _G.__morph_test_events
@@ -61,7 +65,7 @@ end
 
 --- Read (and optionally clear) the event sink as plain data for host asserts.
 --- @param opts? { clear?: boolean }
---- @return morph._test.util.Event[]
+--- @return spec.util.Event[]
 function M.events(opts)
   opts = opts or {}
   local events = sink()
@@ -139,6 +143,76 @@ function M.drain(ms)
   local done = false
   vim.schedule(function() done = true end)
   vim.wait(ms or 1000, function() return done end, 1)
+end
+
+--------------------------------------------------------------------------------
+-- Host-side readbacks over a child
+--------------------------------------------------------------------------------
+
+--- Start a child nvim with `NVIM_TEST` set. Morph exports its internals and
+--- drops its render debounce under that variable, and the specs rely on both,
+--- so every child must see the variable the host specs set for themselves.
+--- @param opts? test.NvimStartOpts
+--- @return test.Nvim
+function M.start(opts)
+  local Test = require 'morph.vendor.test'
+  return Test.Nvim.start(vim.tbl_extend('force', { env = { NVIM_TEST = 'true' } }, opts or {}))
+end
+
+--- Poll across RPC round trips until the guard has judged every captured
+--- edit -- the buffer watcher's pending_edits drains to 0, i.e. the
+--- TextChanged window that opened for the burst has closed. A programmatic
+--- edit (nvim_buf_set_text from a spec) gets its TextChanged dispatched by
+--- nvim's main loop, and on some versions that dispatch is only guaranteed
+--- when the loop regains control BETWEEN RPC requests -- a single in-child
+--- vim.wait can pump the loop without ever reaching that checkpoint, so the
+--- guard never runs and the readback observes a half-processed burst.
+--- Each attempt is its own request (the arrival flushes pending events) plus
+--- an in-child wait. Best effort: returns false on timeout so callers can
+--- decide whether a half-processed burst is a failure (see observe-style
+--- readbacks) or irrelevant. Requires the spec's instance in `_G.m` (the
+--- convention every child spec follows); without one it passes immediately.
+--- @param nv test.Nvim
+--- @param ms? integer  per-attempt in-child wait cap (default 50)
+--- @return boolean  true once no burst window is open
+function M.await_guard(nv, ms)
+  for _ = 1, 40 do
+    local done = nv:run(function(...)
+      local cap = ... --- @type integer?
+      local window_open = function()
+        local w = _G.m and _G.m.buf_watcher
+        return (w and w.pending_edits or 0) > 0
+      end
+      vim.wait(cap or 50, function() return not window_open() end, 5)
+      return not window_open()
+    end, ms)
+    if done then return true end
+  end
+  return false
+end
+
+--- Drain scheduled child work (when `opts.ms` is given) and read back the
+--- child's buffer text and event sink: the read-after-action most child specs
+--- end with. Without `ms`, no drain happens -- the read observes whatever has
+--- settled by the time this RPC round-trip executes, exactly like a bare
+--- `run` readback. `opts.clear` empties the event sink after reading;
+--- `opts.cursor` adds the child's cursor to the result. Before reading, the
+--- guard's burst window is awaited (see await_guard) -- a pending window
+--- means the action has not fully settled, and its judgment would land after
+--- the read on some nvim versions.
+--- @param nv test.Nvim
+--- @param opts? { ms?: integer, cursor?: boolean, clear?: boolean }
+--- @return { text: string, events: spec.util.Event[], cursor: integer[]? }
+function M.settled(nv, opts)
+  M.await_guard(nv)
+  return nv:run(function(...)
+    local util = dofile 'spec/util.lua'
+    local o = ... --- @type { ms?: integer, cursor?: boolean, clear?: boolean }
+    if o.ms then util.drain(o.ms) end
+    local out = { text = util.text(0), events = util.events { clear = o.clear } }
+    if o.cursor then out.cursor = vim.api.nvim_win_get_cursor(0) end
+    return out
+  end, opts or {}) --[[@as { text: string, events: spec.util.Event[], cursor: integer[]? }]]
 end
 
 return M

@@ -7,14 +7,18 @@
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: undefined-field
 
-local Nvim = require 'morph._test.nvim'
-local util = require 'morph._test.util'
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local before_each, after_each = Test.before_each, Test.after_each
+local assert = Test.assert
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 describe('readonly regions', function()
-  --- @type morph._test.Nvim
+  --- @type test.Nvim
   local nv
 
-  before_each(function() nv = Nvim.start {} end)
+  before_each(function() nv = util.start {} end)
 
   after_each(function()
     if nv then nv:stop() end
@@ -25,8 +29,8 @@ describe('readonly regions', function()
   --- 'Name: [...]' and an editable '36' hole ('field') that records events.
   --- @param cursor? [integer, integer]  1-based cursor to place after mounting
   local function mount_name_age(cursor)
-    nv:exec_func(function(...)
-      local util = require 'morph._test.util'
+    nv:run(function(...)
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -39,7 +43,7 @@ describe('readonly regions', function()
       }
       local pos = ... --- @type [integer, integer]?
       if pos then vim.api.nvim_win_set_cursor(0, pos) end
-    end, nil, cursor)
+    end, cursor)
   end
 
   -- Tracer bullet: one behavior, one test. A programmatic edit inside a
@@ -47,10 +51,10 @@ describe('readonly regions', function()
   it('reverts a programmatic edit inside a readonly region', function()
     mount_name_age()
 
-    nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 7, 0, 10, { 'XXX' }) end)
-    local result = nv:settled { ms = 100 }
-    assert.are.same('Name: [Ada] Age: [36]', result.text)
-    assert.are.same({}, result.events)
+    nv:run(function() vim.api.nvim_buf_set_text(0, 0, 7, 0, 10, { 'XXX' }) end)
+    local result = util.settled(nv, { ms = 100 })
+    assert.deep_equal(result.text, 'Name: [Ada] Age: [36]')
+    assert.deep_equal(result.events, {})
   end)
 
   it('accepts an insert claimed by two multi-line editable spans (rank tie)', function()
@@ -59,8 +63,8 @@ describe('readonly regions', function()
     -- spans, so any two same-rank claimants crashed the guard mid-keystroke.
     -- Two nested editable tags share their start, so an insert there makes
     -- both rank-2 claimants.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -76,42 +80,42 @@ describe('readonly regions', function()
       }
     end)
 
-    local result = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local result = nv:run(function()
+      local util = dofile 'spec/util.lua'
       vim.api.nvim_buf_set_text(0, 0, 0, 0, 0, { 'X' })
       -- pcall guards the guard: pre-fix, the nil size crashed it here.
       local ok, err = pcall(function() vim.cmd.doautocmd 'TextChanged' end)
       util.drain(100)
       return { ok = ok, err = tostring(err), text = util.text(0), events = util.events() }
     end)
-    assert.is_true(result.ok)
-    assert.are.equal('nil', result.err)
-    assert.are.equal('Xalpha\nbeta\ngamma', result.text)
-    assert.is_true(#result.events > 0)
+    assert.equal(result.ok, true)
+    assert.equal(result.err, 'nil')
+    assert.equal(result.text, 'Xalpha\nbeta\ngamma')
+    assert.equal(#result.events > 0, true)
   end)
 
   it('reverts a typed edit inside a readonly region', function()
     mount_name_age { 1, 9 } -- cursor strictly inside 'Ada'
 
     nv:input 'iX<Esc>'
-    local result = nv:settled { ms = 100 }
-    assert.are.same('Name: [Ada] Age: [36]', result.text)
-    assert.are.same({}, result.events)
+    local result = util.settled(nv, { ms = 100 })
+    assert.deep_equal(result.text, 'Name: [Ada] Age: [36]')
+    assert.deep_equal(result.events, {})
   end)
 
   it('restores the readonly text after dd of its line', function()
     mount_name_age { 1, 0 }
 
     nv:input 'dd'
-    local result = nv:settled { ms = 200 }
-    assert.truthy(string.find(result.text, 'Ada', 1, true) ~= nil)
+    local result = util.settled(nv, { ms = 200 })
+    assert.ok(string.find(result.text, 'Ada', 1, true) ~= nil)
   end)
 
   it(
     'reverts edits inside a readonly child without firing the editable parent on_change',
     function()
-      nv:exec_func(function()
-        local util = require 'morph._test.util'
+      nv:run(function()
+        local util = dofile 'spec/util.lua'
         local Morph = require 'morph'
         local h = Morph.h
         _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -124,36 +128,36 @@ describe('readonly regions', function()
       end)
 
       -- 'outer inner': child span is cols 6..11
-      nv:exec_func(function() vim.api.nvim_buf_set_text(0, 0, 6, 0, 11, { 'XXXXX' }) end)
-      local result = nv:settled { ms = 150 }
-      assert.are.same('outer inner', result.text)
-      assert.are.same({}, result.events)
+      nv:run(function() vim.api.nvim_buf_set_text(0, 0, 6, 0, 11, { 'XXXXX' }) end)
+      local result = util.settled(nv, { ms = 150 })
+      assert.deep_equal(result.text, 'outer inner')
+      assert.deep_equal(result.events, {})
     end
   )
 
   it('reverts replace and paste edits inside a readonly region', function()
     mount_name_age { 1, 8 } -- cursor inside 'Ada'
-    nv:exec_func(function() vim.fn.setreg('"', 'ZZZ') end)
+    nv:run(function() vim.fn.setreg('"', 'ZZZ') end)
 
     -- Single-char replace inside the readonly region
     nv:input 'rQ'
-    local after_replace = nv:settled { ms = 150, clear = true }
-    assert.are.same('Name: [Ada] Age: [36]', after_replace.text)
-    assert.are.same({}, after_replace.events)
+    local after_replace = util.settled(nv, { ms = 150, clear = true })
+    assert.deep_equal(after_replace.text, 'Name: [Ada] Age: [36]')
+    assert.deep_equal(after_replace.events, {})
 
     -- Paste inside the readonly region
     nv:input 'p'
-    local after_paste = nv:settled { ms = 150 }
-    assert.are.same('Name: [Ada] Age: [36]', after_paste.text)
-    assert.are.same({}, after_paste.events)
+    local after_paste = util.settled(nv, { ms = 150 })
+    assert.deep_equal(after_paste.text, 'Name: [Ada] Age: [36]')
+    assert.deep_equal(after_paste.events, {})
   end)
 
   -- Repro: typing multiple characters into the single hole of a
   -- readonly-by-default app. 'ifl' in one input batch left 'Filter: [f]' --
   -- the second character was reverted.
   it('accepts multi-character typing into the single hole', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -170,9 +174,9 @@ describe('readonly regions', function()
     end)
 
     nv:input 'ifl'
-    local result = nv:settled { ms = 150 }
-    assert.are.same('Filter: [fl]', result.text)
-    assert.are.same({ { id = 'filter', text = 'fl' } }, result.events)
+    local result = util.settled(nv, { ms = 150 })
+    assert.deep_equal(result.text, 'Filter: [fl]')
+    assert.deep_equal(result.events, { { id = 'filter', text = 'fl' } })
   end)
 
   -- Regression: fast typing batches SEVERAL keystrokes into one TextChanged
@@ -184,8 +188,8 @@ describe('readonly regions', function()
   -- type "glm-" fast, watch it flash back). Two phases reproduce the field
   -- shape: 'f' gets its own window, then 'lm' arrives batched.
   it('accepts batched multi-char typing into a hole under a locked ancestor', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -204,31 +208,31 @@ describe('readonly regions', function()
     end)
 
     nv:input 'if'
-    nv:settled { ms = 150, clear = true }
+    util.settled(nv, { ms = 150, clear = true })
 
-    -- Two edits in ONE exec_func: both on_bytes events fire before the event
+    -- Two edits in ONE run: both on_bytes events fire before the event
     -- loop yields, so ONE TextChanged window covers both -- the real-fast-
     -- typing shape (separate on_bytes events, one guard decision). The child
     -- coalesces typed nvim_input chars into a single edit, so programmatic
     -- edits are the only way to reproduce the multi-event window here.
-    nv:exec_func(function()
+    nv:run(function()
       vim.api.nvim_buf_set_text(0, 0, 10, 0, 10, { 'l' })
       vim.api.nvim_buf_set_text(0, 0, 11, 0, 11, { 'm' })
     end)
-    local result = nv:settled { ms = 150 }
-    assert.are.same('Filter: [flm]', result.text)
+    local result = util.settled(nv, { ms = 150 })
+    assert.deep_equal(result.text, 'Filter: [flm]')
     -- The window's first event claims the hole and commits the full live
     -- text (including chars from later events in the same window); the
     -- trailing events then find no mismatch and fire nothing.
-    assert.are.same({ { id = 'filter', text = 'flm' } }, result.events)
+    assert.deep_equal(result.events, { { id = 'filter', text = 'flm' } })
   end)
 
   -- Tuis-style flat chrome: SIBLING locked tags around the hole (no wrapper
   -- to explain boundary captures). Typing at the hole's tail must land in
   -- the hole, not inside the following locked tag.
   it('accepts typing at a hole tail adjacent to a locked tag', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -245,14 +249,14 @@ describe('readonly regions', function()
     end)
 
     nv:input 'if'
-    nv:settled { ms = 150, clear = true }
+    util.settled(nv, { ms = 150, clear = true })
 
     -- Still in insert mode: the next keystroke lands at the hole's tail,
     -- exactly where the following locked tag's start mark sits.
     nv:input 'l'
-    local result = nv:settled { ms = 150 }
-    assert.are.same('Filter: [fl]', result.text)
-    assert.are.same({ { id = 'filter', text = 'fl' } }, result.events)
+    local result = util.settled(nv, { ms = 150 })
+    assert.deep_equal(result.text, 'Filter: [fl]')
+    assert.deep_equal(result.events, { { id = 'filter', text = 'fl' } })
   end)
 
   -- Docker.lua shape: a CONTROLLED hole whose on_change re-renders a table
@@ -260,8 +264,8 @@ describe('readonly regions', function()
   -- locked tag's extmark at the hole's tail boundary; typing there must land
   -- in the hole, not inside the locked tag.
   it('accepts multi-char typing into a controlled filter with a filtering table', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -276,7 +280,7 @@ describe('readonly regions', function()
       --- @param ctx morph.Ctx<{}, { filter: string }>
       local function DockerView(ctx)
         if ctx.phase == 'mount' then ctx.state = { filter = '' } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         local rows = {}
         for _, item in ipairs(items) do
           if item:find(state.filter, 1, true) then table.insert(rows, item) end
@@ -300,19 +304,19 @@ describe('readonly regions', function()
         }
       end
       _G.m:mount(h(DockerView), { debounce_ms = 0 })
-      local el = assert(_G.m:get_element_by_id 'filter')
+      local el = _G.assert(_G.m:get_element_by_id 'filter')
       vim.api.nvim_win_set_cursor(0, { el.extmark.start[1] + 1, el.extmark.start[2] })
     end)
 
     nv:input 'if'
-    nv:settled { ms = 200, clear = true }
+    util.settled(nv, { ms = 200, clear = true })
 
     nv:input 'l'
-    local result = nv:settled { ms = 200 }
+    local result = util.settled(nv, { ms = 200 })
     -- the full buffer includes the title and the re-filtered table
-    assert.truthy(string.find(result.text, 'Filter: [fl]', 1, true) ~= nil)
+    assert.ok(string.find(result.text, 'Filter: [fl]', 1, true) ~= nil)
     -- the 'f' event was consumed by the first phase's read+clear
-    assert.are.same({ { id = 'filter', text = 'fl' } }, result.events)
+    assert.deep_equal(result.events, { { id = 'filter', text = 'fl' } })
   end)
 
   -- Regression: an insert at an editable hole's TAIL is absorbed by the
@@ -323,8 +327,8 @@ describe('readonly regions', function()
   -- never fired -- a controlled filter's state lagged the buffer, and its
   -- next debounce render wiped the characters the user had typed.
   it('attributes tail-typed chars to the hole, not the containing region', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -342,30 +346,33 @@ describe('readonly regions', function()
     -- Two keystrokes, each in its own TextChanged window, both inserted at
     -- the hole's tail: 'w' -> 'wX' -> 'wXY'. This is typing at the end of a
     -- filter, one keystroke per guard window.
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local line = vim.api.nvim_buf_get_lines(0, 0, 1, true)[1]
       local col = line:find '%]' - 1 -- the hole's tail == the ']' column
       vim.api.nvim_buf_set_text(0, 0, col, 0, col, { 'X' })
       util.drain(100)
     end)
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local line = vim.api.nvim_buf_get_lines(0, 0, 1, true)[1]
       local col = line:find '%]' - 1 -- the hole's tail == the ']' column
       vim.api.nvim_buf_set_text(0, 0, col, 0, col, { 'Y' })
       util.drain(100)
     end)
-    local result = nv:settled {}
-    assert.are.same('Name: [wXY]', result.text)
-    assert.are.same({ { id = 'hole', text = 'wX' }, { id = 'hole', text = 'wXY' } }, result.events)
+    local result = util.settled(nv, {})
+    assert.deep_equal(result.text, 'Name: [wXY]')
+    assert.deep_equal(
+      result.events,
+      { { id = 'hole', text = 'wX' }, { id = 'hole', text = 'wXY' } }
+    )
   end)
 
   -- On revert, the cursor returns to where the rejected keystroke found it:
   -- the guard derives it from the live cursor minus the on_bytes delta.
   it('restores the cursor after a typed edit into a locked region', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -383,16 +390,16 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX'
-    local result = nv:settled { ms = 200, cursor = true }
-    assert.are.same('Ada] Age: []', result.text)
-    assert.are.same({ 1, 1 }, result.cursor)
+    local result = util.settled(nv, { ms = 200, cursor = true })
+    assert.deep_equal(result.text, 'Ada] Age: []')
+    assert.deep_equal(result.cursor, { 1, 1 })
   end)
 
   -- A line delete's exact column is unrecoverable (it sat inside the deleted
   -- range); the cursor lands on the restored line's start instead.
   it('lands the cursor on the restored line after a reverted line delete', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -409,11 +416,11 @@ describe('readonly regions', function()
     end)
 
     nv:input 'dd'
-    local result = nv:settled { ms = 200, cursor = true }
-    assert.are.same('LOCKED\neditable\nmore', result.text)
+    local result = util.settled(nv, { ms = 200, cursor = true })
+    assert.deep_equal(result.text, 'LOCKED\neditable\nmore')
     -- nvim preserved the cursor's column through the delete, so the full
     -- pre-edit position is recoverable
-    assert.are.same({ 1, 3 }, result.cursor)
+    assert.deep_equal(result.cursor, { 1, 3 })
   end)
 
   -- A revert re-renders the tree, and that render can be deferred (the
@@ -423,8 +430,8 @@ describe('readonly regions', function()
   -- before the render (the bug) left the cursor one line below where the
   -- rejected `dd` found it.
   it('restores the cursor after a reverted line delete under a debounced render', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -447,17 +454,17 @@ describe('readonly regions', function()
     nv:input 'dd'
     -- Wait past the debounce window so the deferred revert render lands.
     nv:request('nvim_exec_lua', 'vim.wait(select(1, ...))', { 300 })
-    local result = nv:settled { ms = 50, cursor = true }
-    assert.are.same('LOCKED\neditable\nmore', result.text)
-    assert.are.same({ 1, 3 }, result.cursor)
+    local result = util.settled(nv, { ms = 50, cursor = true })
+    assert.deep_equal(result.text, 'LOCKED\neditable\nmore')
+    assert.deep_equal(result.cursor, { 1, 3 })
   end)
 
   -- A line delete clamps the cursor column to the next line's length; the
   -- restore must return the PRE-edit column (from the pre-edit snapshot),
   -- not nvim's clamped one.
   it('restores the pre-clamp cursor column after a reverted line delete', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -476,20 +483,20 @@ describe('readonly regions', function()
     end)
 
     nv:input 'dd'
-    local result = nv:settled { ms = 200, cursor = true }
-    assert.are.same(
-      'SHORT\nA_VERY_LONG_READONLY_LINE_GOES_HERE_WITH_MANY_COLUMNS\ntail\nhole',
-      result.text
+    local result = util.settled(nv, { ms = 200, cursor = true })
+    assert.deep_equal(
+      result.text,
+      'SHORT\nA_VERY_LONG_READONLY_LINE_GOES_HERE_WITH_MANY_COLUMNS\ntail\nhole'
     )
-    assert.are.same({ 2, 40 }, result.cursor)
+    assert.deep_equal(result.cursor, { 2, 40 })
   end)
 
   -- Insert-mode typing into locked chrome must also restore the pre-typing
   -- cursor: insert advances the cursor past the typed char, and Esc pulls it
   -- back one, so the live position is wrong in both axes by revert time.
   it('restores the pre-typing cursor after a reverted insert-mode edit', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -508,17 +515,17 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:settled { ms = 200, cursor = true }
-    assert.are.same('Name: [Ada] Age: [36]', result.text)
-    assert.are.same({ 1, 9 }, result.cursor)
+    local result = util.settled(nv, { ms = 200, cursor = true })
+    assert.deep_equal(result.text, 'Name: [Ada] Age: [36]')
+    assert.deep_equal(result.cursor, { 1, 9 })
   end)
 
   -- With region-aware undo, a rejected locked-chrome edit is reverted by the
   -- guard and never reaches the probe, so it must not consume an undo step:
   -- one `u` after a rejected edit reverts the user's last ACCEPTED hole edit.
   it('does not let a rejected edit consume an undo step', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -535,18 +542,18 @@ describe('readonly regions', function()
     end)
 
     nv:input 'if<Esc>' -- accepted: 'Name: [fAda]'
-    local mid = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local mid = nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(100)
       vim.api.nvim_win_set_cursor(0, { 1, 3 }) -- into the locked 'Name: ['
       return util.text(0)
     end)
-    assert.are.same('Name: [fAda]', mid)
+    assert.deep_equal(mid, 'Name: [fAda]')
 
     nv:input 'iX<Esc>' -- rejected and reverted by the guard
     nv:input 'u' -- reverts the accepted 'f' edit, not the rejected one
-    local result = nv:settled({ ms = 200 }).text
-    assert.are.same('Name: [Ada]', result)
+    local result = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(result, 'Name: [Ada]')
   end)
 
   -- Regression: the original repro report -- pasting INTO the hole with the
@@ -554,8 +561,8 @@ describe('readonly regions', function()
   -- brackets, inside the hole). Only pasting BEFORE the '[' (P, or cursor one
   -- column left) lands in locked chrome and correctly flashes.
   it('accepts pasting into the hole with the cursor on the opening bracket', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -568,16 +575,16 @@ describe('readonly regions', function()
         }, ''),
         h('text', {}, ']'),
       }
-      local el = assert(_G.m:get_element_by_id 'filter')
+      local el = _G.assert(_G.m:get_element_by_id 'filter')
       vim.api.nvim_win_set_cursor(0, { el.extmark.start[1] + 1, el.extmark.start[2] - 1 })
       vim.fn.setreg('"', 'word')
       util.drain(50)
     end)
 
     nv:input 'p'
-    local result = nv:settled { ms = 200 }
-    assert.are.same('Filter: [word]', result.text)
-    assert.are.same({ { id = 'filter', text = 'word' } }, result.events)
+    local result = util.settled(nv, { ms = 200 })
+    assert.deep_equal(result.text, 'Filter: [word]')
+    assert.deep_equal(result.events, { { id = 'filter', text = 'word' } })
   end)
 
   -- ciw on the hole's whole content collapses the hole's span to zero width
@@ -586,8 +593,8 @@ describe('readonly regions', function()
   -- the locked ancestor must accept the content swap and let insert mode
   -- continue.
   it('lets ciw replace the entire hole content under a locked ancestor', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -609,17 +616,17 @@ describe('readonly regions', function()
     nv:input 'ciw'
     nv:input 'new'
     nv:input '<Esc>'
-    local result = nv:settled { ms = 200 }
-    assert.are.same('Filter: [new] Up 3 days', result.text)
-    assert.are.same('new', result.events[#result.events].text)
+    local result = util.settled(nv, { ms = 200 })
+    assert.deep_equal(result.text, 'Filter: [new] Up 3 days')
+    assert.deep_equal(result.events[#result.events].text, 'new')
   end)
 
   -- The collapsed-hole acceptance is bounded by the hole's last-accepted
   -- span: an edit whose PRE-edit range reaches past it (here: the filter
   -- content AND the closing bracket) must still revert.
   it('reverts a collapsed-hole edit that also consumed the closing bracket', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -642,8 +649,8 @@ describe('readonly regions', function()
     -- edit's pre-edit range reaches outside the hole's last-accepted span,
     -- so the guard reverts and the full row is restored
     nv:input 'v9ld'
-    local result = nv:settled({ ms = 200 }).text
-    assert.are.same('Filter: [myword] Up 3 days', result)
+    local result = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(result, 'Filter: [myword] Up 3 days')
   end)
 
   -- A violation's revert render rebuilds every tag's curr_text and re-reads
@@ -651,8 +658,8 @@ describe('readonly regions', function()
   -- edits against fresh geometry (the next batch's read is not corrupted by
   -- marks that the revert moved).
   it('accepts a valid hole edit in the batch after a reverted violation', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -671,25 +678,25 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>' -- violated and reverted
-    local mid = nv:exec_func(function()
-      local util = require 'morph._test.util'
+    local mid = nv:run(function()
+      local util = dofile 'spec/util.lua'
       util.drain(200)
       vim.api.nvim_win_set_cursor(0, { 1, 9 }) -- the hole between the brackets
       return util.text(0)
     end)
-    assert.are.same('Filter: []', mid)
+    assert.deep_equal(mid, 'Filter: []')
 
     nv:input 'ifilter'
-    local result = nv:settled { ms = 200 }
-    assert.are.same('Filter: [filter]', result.text)
-    assert.are.same('filter', result.events[#result.events].text)
+    local result = util.settled(nv, { ms = 200 })
+    assert.deep_equal(result.text, 'Filter: [filter]')
+    assert.deep_equal(result.events[#result.events].text, 'filter')
   end)
 
   -- Top-level bare strings get implicit text tags, so a locked renderer
   -- default guards ALL content, not just tagged regions.
   it('guards top-level bare strings under a locked renderer default', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -702,15 +709,15 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:settled({ ms = 200 }).text
-    assert.are.same('bare_head TAGGED bare_tail', result)
+    local result = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(result, 'bare_head TAGGED bare_tail')
   end)
 
   -- Under a classic unlocked default the implicit tag is editable and inert:
   -- bare strings keep accepting edits exactly as before.
   it('leaves top-level bare strings editable under a classic unlocked default', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true })
@@ -723,15 +730,15 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:settled({ ms = 200 }).text
-    assert.are.same('bare_head TAGGED barXe_tail', result)
+    local result = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(result, 'bare_head TAGGED barXe_tail')
   end)
 
   -- Component tags produce no extmark of their own, so bare strings directly
   -- in a component's output need the implicit-tag treatment too.
   it('guards bare strings directly inside component output', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -743,15 +750,15 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>'
-    local result = nv:settled({ ms = 200 }).text
-    assert.are.same('name: value', result)
+    local result = util.settled(nv, { ms = 200 }).text
+    assert.deep_equal(result, 'name: value')
   end)
 
   -- Renderer-default app under real keystrokes: locked chrome reverts, the
   -- explicit hole accepts input and fires on_change.
   it('guards a readonly-by-default wrapper with an input hole under real typing', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -770,24 +777,24 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iX<Esc>'
-    local chrome = nv:settled { ms = 150, clear = true }
-    assert.are.same('Name: []', chrome.text)
-    assert.are.same({}, chrome.events)
+    local chrome = util.settled(nv, { ms = 150, clear = true })
+    assert.deep_equal(chrome.text, 'Name: []')
+    assert.deep_equal(chrome.events, {})
 
     -- Cursor at the empty hole's position (col 7): typing is accepted
-    nv:exec_func(function() vim.api.nvim_win_set_cursor(0, { 1, 7 }) end)
+    nv:run(function() vim.api.nvim_win_set_cursor(0, { 1, 7 }) end)
     nv:input 'iA<Esc>'
-    local typed = nv:settled { ms = 150, clear = true }
-    assert.are.same('Name: [A]', typed.text)
-    assert.are.same({ { id = 'input', text = 'A' } }, typed.events)
+    local typed = util.settled(nv, { ms = 150, clear = true })
+    assert.deep_equal(typed.text, 'Name: [A]')
+    assert.deep_equal(typed.events, { { id = 'input', text = 'A' } })
   end)
 
   -- Typing at a non-empty hole's left edge: the keystroke must land INSIDE
   -- the hole (standard insert-before-cursor editing), not in the locked
   -- chrome before it.
   it('accepts typing at the left edge of a non-empty hole', function()
-    nv:exec_func(function()
-      local util = require 'morph._test.util'
+    nv:run(function()
+      local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       local h = Morph.h
       _G.m = Morph.new(util.scratch_buf { focus = true }, { readonly = true })
@@ -806,9 +813,9 @@ describe('readonly regions', function()
     end)
 
     nv:input 'iB<Esc>'
-    local result = nv:settled { ms = 150 }
-    assert.are.same('Name: [Bx]', result.text)
-    assert.are.same({ { id = 'input', text = 'Bx' } }, result.events)
+    local result = util.settled(nv, { ms = 150 })
+    assert.deep_equal(result.text, 'Name: [Bx]')
+    assert.deep_equal(result.events, { { id = 'input', text = 'Bx' } })
   end)
 end)
 
@@ -817,7 +824,8 @@ end)
 -- programmatic edits + a manual `doautocmd TextChanged` (TextChanged never
 -- fires in the host runner; see AGENTS.md "Test Environment Notes"). The
 -- child-nvim tests above cover real keystroke semantics; this block exercises
--- the same code paths in the host so luacov can observe them.
+-- the same code paths in the host, where the handler logic runs without any
+-- input timing in play.
 --------------------------------------------------------------------------------
 describe('readonly regions (in-process)', function()
   local Morph = require 'morph'
@@ -845,8 +853,8 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('Name: [Ada] Age: [36]', get_text())
-      assert.are.same({}, events)
+      assert.deep_equal(get_text(), 'Name: [Ada] Age: [36]')
+      assert.deep_equal(events, {})
     end)
   end)
 
@@ -865,8 +873,8 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('outer inner', get_text())
-      assert.are.same({}, events)
+      assert.deep_equal(get_text(), 'outer inner')
+      assert.deep_equal(events, {})
     end)
   end)
 
@@ -886,7 +894,7 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('aaa bbb ccc', get_text())
+      assert.deep_equal(get_text(), 'aaa bbb ccc')
     end)
   end)
 
@@ -900,7 +908,7 @@ describe('readonly regions (in-process)', function()
       --- @param ctx morph.Ctx<{}, { v: string }>
       local function App(ctx)
         if ctx.phase == 'mount' then ctx.state = { v = 'a' } end
-        local state = assert(ctx.state)
+        local state = _G.assert(ctx.state)
         return {
           h('text', { id = 'chrome' }, 'static'), -- forgotten: locked by default
           ' ',
@@ -920,15 +928,15 @@ describe('readonly regions (in-process)', function()
       vim.api.nvim_buf_set_text(0, 0, 7, 0, 8, { 'b' })
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
-      assert.are.same('static b', get_text())
-      assert.are.same({ 'b' }, events)
+      assert.deep_equal(get_text(), 'static b')
+      assert.deep_equal(events, { 'b' })
 
       -- Edit inside the forgotten tag: reverted; the controlled hole survives
       vim.api.nvim_buf_set_text(0, 0, 0, 0, 6, { 'STATIC' })
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
-      assert.are.same('static b', get_text())
-      assert.are.same({ 'b' }, events)
+      assert.deep_equal(get_text(), 'static b')
+      assert.deep_equal(events, { 'b' })
     end)
   end)
 
@@ -948,7 +956,7 @@ describe('readonly regions (in-process)', function()
       vim.api.nvim_buf_call(portal_buf, function() vim.cmd.doautocmd 'TextChanged' end)
       util.drain() -- flush the scheduled revert
       local lines = vim.api.nvim_buf_get_lines(portal_buf, 0, -1, true)
-      assert.are.same('inner', table.concat(lines, '\n'))
+      assert.deep_equal(table.concat(lines, '\n'), 'inner')
       vim.api.nvim_buf_delete(portal_buf, { force = true })
     end)
   end)
@@ -970,7 +978,7 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('headxtail', get_text())
+      assert.deep_equal(get_text(), 'headxtail')
     end)
   end)
 
@@ -985,7 +993,7 @@ describe('readonly regions (in-process)', function()
       vim.api.nvim_buf_set_lines(0, 1, 1, false, { 'injected' })
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
-      assert.are.same('only line', get_text())
+      assert.deep_equal(get_text(), 'only line')
     end)
   end)
 
@@ -1005,8 +1013,8 @@ describe('readonly regions (in-process)', function()
       vim.api.nvim_buf_set_text(0, 0, 0, 0, 5, { 'XXXXX' })
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
-      assert.are.same('value', get_text())
-      assert.are.same({}, events)
+      assert.deep_equal(get_text(), 'value')
+      assert.deep_equal(events, {})
     end)
   end)
 
@@ -1026,8 +1034,8 @@ describe('readonly regions (in-process)', function()
       vim.api.nvim_buf_set_text(0, 0, 7, 0, 8, { 'w' })
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
-      assert.are.same('static w', get_text())
-      assert.are.same({ 'w' }, events)
+      assert.deep_equal(get_text(), 'static w')
+      assert.deep_equal(events, { 'w' })
     end)
   end)
 
@@ -1056,8 +1064,8 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('Name: [x]', get_text())
-      assert.are.same({}, events)
+      assert.deep_equal(get_text(), 'Name: [x]')
+      assert.deep_equal(events, {})
     end)
   end)
 
@@ -1082,8 +1090,8 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('Name: [xy]', get_text())
-      assert.are.same({ 'xy' }, events)
+      assert.deep_equal(get_text(), 'Name: [xy]')
+      assert.deep_equal(events, { 'xy' })
     end)
   end)
 
@@ -1099,7 +1107,7 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('héllo', get_text())
+      assert.deep_equal(get_text(), 'héllo')
     end)
   end)
 
@@ -1120,11 +1128,11 @@ describe('readonly regions (in-process)', function()
       vim.cmd.doautocmd 'TextChanged'
       util.drain() -- flush the scheduled revert
 
-      assert.are.same('Ada 36', get_text())
-      assert.are.same({}, events)
+      assert.deep_equal(get_text(), 'Ada 36')
+      assert.deep_equal(events, {})
       local locked = r:get_element_by_id 'locked'
-      assert.are.same(Pos00.new(0, 0), locked.extmark.start)
-      assert.are.same(Pos00.new(0, 3), locked.extmark.stop)
+      assert.deep_equal(locked.extmark.start, Pos00.new(0, 0))
+      assert.deep_equal(locked.extmark.stop, Pos00.new(0, 3))
     end)
   end)
 end)

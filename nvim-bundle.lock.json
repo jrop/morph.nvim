@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "test": {
+      "built_with": "0.4.1",
+      "commit": "4cbcb69e00e62ae9072c8df546bf66d293fc24c6",
+      "entry": "test",
+      "kind": "tag",
+      "ref": "v0.3.0",
+      "sha256": "a0fa2720dab6ed22d8c79f94d783100197fdd285402ad3ca39248de0975abf1f",
+      "source": "https://github.com/jrop/test.nvim"
+    }
+  },
+  "lock_version": 1
+}

@@ -6,6 +6,10 @@
 --- @diagnostic disable: redundant-parameter
 --- @diagnostic disable: undefined-field
 
+local Test = require 'morph.vendor.test'
+local describe, it = Test.describe, Test.it
+local assert = Test.assert
+
 -- Real nvim makes vim.version callable via a __call metatable, which the
 -- analyzer's bundled std does not model, so the call is typed as a plain table.
 --- @diagnostic disable-next-line: call-non-callable
@@ -18,8 +22,8 @@ local Morph = require 'morph'
 local h = Morph.h
 local Pos00 = Morph.Pos00
 local Extmark = Morph.Extmark
-local _assert = require 'morph._test.assert'
-local util = require 'morph._test.util'
+--- @type spec.util
+local util = dofile 'spec/util.lua'
 
 --------------------------------------------------------------------------------
 -- TEST HELPERS
@@ -42,7 +46,7 @@ end
 local function set_cursor(pos) vim.api.nvim_win_set_cursor(0, pos) end
 
 -- Execute a test within a temporary buffer that is cleaned up afterward
--- (the shared implementation lives in morph._test.util).
+-- (the shared implementation lives in spec/util.lua).
 local with_buf = util.with_buf
 
 --------------------------------------------------------------------------------
@@ -56,7 +60,7 @@ local with_buf = util.with_buf
 local function assert_elements_at(renderer, pos, expected_ids)
   local elements = renderer:get_elements_at(pos)
   local actual_ids = vim.tbl_map(function(e) return e.attributes.id end, elements)
-  assert.are.same(expected_ids, actual_ids)
+  assert.deep_equal(actual_ids, expected_ids)
 end
 
 --- Assert that an element has the expected start and stop positions.
@@ -66,9 +70,9 @@ end
 --- @param expected_stop table
 local function assert_element_bounds(renderer, id, expected_start, expected_stop)
   local elem = renderer:get_element_by_id(id)
-  assert.is_not_nil(elem, 'Element with id "' .. id .. '" not found')
-  assert.are.same(expected_start, elem.extmark.start)
-  assert.are.same(expected_stop, elem.extmark.stop)
+  assert.ok(elem, 'Element with id "' .. id .. '" not found')
+  assert.deep_equal(elem.extmark.start, expected_start)
+  assert.deep_equal(elem.extmark.stop, expected_stop)
 end
 
 --------------------------------------------------------------------------------
@@ -102,7 +106,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'hello', ' ', 'world' }
-        assert.are.same({ 'hello world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello world' })
       end)
     end)
 
@@ -110,13 +114,13 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'hello', ' ', 'world' }
-        assert.are.same({ 'hello world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello world' })
 
         r:render { 'goodbye', ' ', 'world' }
-        assert.are.same({ 'goodbye world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'goodbye world' })
 
         r:render { 'hello', ' ', 'universe' }
-        assert.are.same({ 'hello universe' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello universe' })
       end)
     end)
 
@@ -127,7 +131,7 @@ describe('Morph', function()
           h('text', { hl = 'HighlightGroup' }, 'hello '),
           h('text', { hl = 'HighlightGroup' }, 'world'),
         }
-        assert.are.same({ 'hello world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello world' })
       end)
     end)
 
@@ -135,7 +139,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'count: ', 42 }
-        assert.are.same({ 'count: 42' }, get_lines())
+        assert.deep_equal(get_lines(), { 'count: 42' })
       end)
     end)
 
@@ -143,7 +147,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'negative: ', -5, ', decimal: ', 3.14 }
-        assert.are.same({ 'negative: -5, decimal: 3.14' }, get_lines())
+        assert.deep_equal(get_lines(), { 'negative: -5, decimal: 3.14' })
       end)
     end)
 
@@ -153,7 +157,7 @@ describe('Morph', function()
         r:render {
           h('text', { hl = 'Number' }, { 'Value: ', 123 }),
         }
-        assert.are.same({ 'Value: 123' }, get_lines())
+        assert.deep_equal(get_lines(), { 'Value: 123' })
       end)
     end)
 
@@ -161,7 +165,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'before', vim.NIL, 'after' }
-        assert.are.same({ 'beforeafter' }, get_lines())
+        assert.deep_equal(get_lines(), { 'beforeafter' })
       end)
     end)
 
@@ -169,10 +173,10 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'before', false, 'after' }
-        assert.are.same({ 'beforeafter' }, get_lines())
+        assert.deep_equal(get_lines(), { 'beforeafter' })
 
         r:render { 'start', true, 'end' }
-        assert.are.same({ 'startend' }, get_lines())
+        assert.deep_equal(get_lines(), { 'startend' })
       end)
     end)
 
@@ -184,7 +188,7 @@ describe('Morph', function()
           { { 'medium' } },
           { 'shallow' },
         }
-        assert.are.same({ 'deepmediumshallow' }, get_lines())
+        assert.deep_equal(get_lines(), { 'deepmediumshallow' })
       end)
     end)
 
@@ -192,7 +196,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render {}
-        assert.are.same({ '' }, get_lines())
+        assert.deep_equal(get_lines(), { '' })
       end)
     end)
 
@@ -200,7 +204,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { '\n\n\n' }
-        assert.are.same({ '', '', '', '' }, get_lines())
+        assert.deep_equal(get_lines(), { '', '', '', '' })
       end)
     end)
   end)
@@ -214,10 +218,10 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'line 1', '\n', 'line 2' }
-        assert.are.same({ 'line 1', 'line 2' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2' })
 
         r:render { 'line 1', '\n', 'line 2\n', 'line 3' }
-        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2', 'line 3' })
       end)
     end)
 
@@ -225,10 +229,10 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'line 1', '\nline 2', '\nline 3' }
-        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2', 'line 3' })
 
         r:render { 'line 1', '\nline 3' }
-        assert.are.same({ 'line 1', 'line 3' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 3' })
       end)
     end)
 
@@ -236,7 +240,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'line1\n\n\nline4' }
-        assert.are.same({ 'line1', '', '', 'line4' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line1', '', '', 'line4' })
       end)
     end)
   end)
@@ -254,14 +258,14 @@ describe('Morph', function()
           '\n',
           h('text', {}, 'second line'),
         }
-        assert.are.same({ 'first line', 'second line' }, get_lines())
+        assert.deep_equal(get_lines(), { 'first line', 'second line' })
 
         r:render {
           h('text', {}, 'updated first line'),
           '\n',
           h('text', {}, 'third line'),
         }
-        assert.are.same({ 'updated first line', 'third line' }, get_lines())
+        assert.deep_equal(get_lines(), { 'updated first line', 'third line' })
       end)
     end)
 
@@ -275,16 +279,16 @@ describe('Morph', function()
             ' comment end',
           }),
         }
-        assert.are.same('comment start string comment end', get_text())
+        assert.deep_equal(get_text(), 'comment start string comment end')
 
         local comment_elem = r:get_elements_at { 0, 0 }
-        assert.are.same(1, #comment_elem)
-        assert.are.same('Comment', comment_elem[1].attributes.hl)
+        assert.deep_equal(#comment_elem, 1)
+        assert.deep_equal(comment_elem[1].attributes.hl, 'Comment')
 
         local string_elem = r:get_elements_at { 0, 14 }
-        assert.are.same(2, #string_elem)
-        assert.are.same('String', string_elem[1].attributes.hl)
-        assert.are.same('Comment', string_elem[2].attributes.hl)
+        assert.deep_equal(#string_elem, 2)
+        assert.deep_equal(string_elem[1].attributes.hl, 'String')
+        assert.deep_equal(string_elem[2].attributes.hl, 'Comment')
       end)
     end)
   end)
@@ -311,27 +315,27 @@ describe('Morph', function()
       }
       with_buf(lines, function()
         Morph.patch_lines(0, nil, lines)
-        assert.are.same(lines, get_lines())
+        assert.deep_equal(get_lines(), lines)
 
         Morph.patch_lines(0, lines, lines)
-        assert.are.same(lines, get_lines())
+        assert.deep_equal(get_lines(), lines)
 
         Morph.patch_lines(0, lines, lines)
-        assert.are.same(lines, get_lines())
+        assert.deep_equal(get_lines(), lines)
       end)
     end)
 
     it('handles complete content replacement', function()
       with_buf({ 'old line 1', 'old line 2', 'old line 3' }, function()
         Morph.patch_lines(0, { 'old line 1', 'old line 2', 'old line 3' }, { 'new content' })
-        assert.are.same({ 'new content' }, get_lines())
+        assert.deep_equal(get_lines(), { 'new content' })
       end)
     end)
 
     it('handles expanding content', function()
       with_buf({ 'single' }, function()
         Morph.patch_lines(0, { 'single' }, { 'line 1', 'line 2', 'line 3', 'line 4' })
-        assert.are.same({ 'line 1', 'line 2', 'line 3', 'line 4' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2', 'line 3', 'line 4' })
       end)
     end)
 
@@ -347,9 +351,9 @@ describe('Morph', function()
         end
         Morph.patch_lines(0, old, new)
         local lines = get_lines()
-        assert.are.same(1000, #lines)
-        assert.are.same('new line 1', lines[1])
-        assert.are.same('new line 1000', lines[1000])
+        assert.deep_equal(#lines, 1000)
+        assert.deep_equal(lines[1], 'new line 1')
+        assert.deep_equal(lines[1000], 'new line 1000')
       end)
     end)
   end)
@@ -385,8 +389,8 @@ describe('Morph', function()
         r:render { 'alpha\nbeta' }
 
         local calls = count_fetches(function() r:render { 'alpha\nbeta' } end)
-        assert.are.same(0, calls)
-        assert.are.same({ 'alpha', 'beta' }, get_lines())
+        assert.deep_equal(calls, 0)
+        assert.deep_equal(get_lines(), { 'alpha', 'beta' })
       end)
     end)
 
@@ -397,8 +401,8 @@ describe('Morph', function()
         vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'external' })
 
         local calls = count_fetches(function() r:render { 'alpha\nbeta' } end)
-        assert.are.same(1, calls)
-        assert.are.same({ 'alpha', 'beta' }, get_lines())
+        assert.deep_equal(calls, 1)
+        assert.deep_equal(get_lines(), { 'alpha', 'beta' })
       end)
     end)
 
@@ -414,8 +418,8 @@ describe('Morph', function()
         vim.cmd.doautocmd 'TextChanged'
 
         local calls = count_fetches(function() r:render(tree 'HELLO') end)
-        assert.are.same(0, calls)
-        assert.are.same({ 'HELLO' }, get_lines())
+        assert.deep_equal(calls, 0)
+        assert.deep_equal(get_lines(), { 'HELLO' })
       end)
     end)
   end)
@@ -432,7 +436,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         local pos_infos = r:get_elements_at { 0, 0 }
-        assert.are.same({}, pos_infos)
+        assert.deep_equal(pos_infos, {})
       end)
     end)
 
@@ -442,10 +446,10 @@ describe('Morph', function()
         r:render { h('text', { id = 'tag' }, 'short') }
 
         local elems = r:get_elements_at { 0, 100 }
-        assert.are.same(0, #elems)
+        assert.deep_equal(#elems, 0)
 
         elems = r:get_elements_at { 10, 0 }
-        assert.are.same(0, #elems)
+        assert.deep_equal(#elems, 0)
       end)
     end)
 
@@ -462,22 +466,22 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at { 0, 2 }
-        assert.are.same(1, #tags)
-        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
-        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
-        assert.are.same(Pos00.new(0, 5), tags[1].extmark.stop)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].attributes.hl, 'HighlightGroup1')
+        assert.deep_equal(tags[1].extmark.start, Pos00.new(0, 0))
+        assert.deep_equal(tags[1].extmark.stop, Pos00.new(0, 5))
 
         tags = r:get_elements_at { 0, 4 }
-        assert.are.same(1, #tags)
-        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
-        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
-        assert.are.same(Pos00.new(0, 5), tags[1].extmark.stop)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].attributes.hl, 'HighlightGroup1')
+        assert.deep_equal(tags[1].extmark.start, Pos00.new(0, 0))
+        assert.deep_equal(tags[1].extmark.stop, Pos00.new(0, 5))
 
         tags = r:get_elements_at { 0, 5 }
-        assert.are.same(1, #tags)
-        assert.are.same('HighlightGroup2', tags[1].attributes.hl)
-        assert.are.same(Pos00.new(0, 5), tags[1].extmark.start)
-        assert.are.same(Pos00.new(0, 11), tags[1].extmark.stop)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].attributes.hl, 'HighlightGroup2')
+        assert.deep_equal(tags[1].extmark.start, Pos00.new(0, 5))
+        assert.deep_equal(tags[1].extmark.stop, Pos00.new(0, 11))
       end)
     end)
 
@@ -494,9 +498,9 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at({ 0, 5 }, 'i')
-        assert.are.same(2, #tags)
-        assert.are.same('HighlightGroup1', tags[1].attributes.hl)
-        assert.are.same('HighlightGroup2', tags[2].attributes.hl)
+        assert.deep_equal(#tags, 2)
+        assert.deep_equal(tags[1].attributes.hl, 'HighlightGroup1')
+        assert.deep_equal(tags[2].attributes.hl, 'HighlightGroup2')
       end)
     end)
 
@@ -518,14 +522,14 @@ describe('Morph', function()
           end,
           tree = h('text', {}, { 'Header\n\n' }),
         }
-        assert.are.same({ 'Header', '', '' }, lines)
+        assert.deep_equal(lines, { 'Header', '', '' })
 
         r:render(h('text', {}, { 'Header\n\n' }))
 
         local tags = r:get_elements_at { 0, 2 }
-        assert.are.same(1, #tags)
-        assert.are.same(Pos00.new(0, 0), tags[1].extmark.start)
-        assert.are.same(Pos00.new(2, 0), tags[1].extmark.stop)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].extmark.start, Pos00.new(0, 0))
+        assert.deep_equal(tags[1].extmark.stop, Pos00.new(2, 0))
       end)
     end)
 
@@ -544,9 +548,9 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at { 0, 5 }
-        assert.are.same(2, #tags)
-        assert.are.same('HighlightGroup2', tags[1].attributes.hl)
-        assert.are.same('HighlightGroup1', tags[2].attributes.hl)
+        assert.deep_equal(#tags, 2)
+        assert.deep_equal(tags[1].attributes.hl, 'HighlightGroup2')
+        assert.deep_equal(tags[2].attributes.hl, 'HighlightGroup1')
       end)
     end)
 
@@ -597,13 +601,13 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at { 0, 11 }
-        assert.are.same(1, #tags)
-        assert.are.same('outer', tags[1].attributes.id)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].attributes.id, 'outer')
 
         tags = r:get_elements_at { 0, 12 }
-        assert.are.same(2, #tags)
-        assert.are.same('inner', tags[1].attributes.id)
-        assert.are.same('outer', tags[2].attributes.id)
+        assert.deep_equal(#tags, 2)
+        assert.deep_equal(tags[1].attributes.id, 'inner')
+        assert.deep_equal(tags[2].attributes.id, 'outer')
       end)
     end)
 
@@ -662,9 +666,9 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at { 0, 5 }
-        assert.are.same(2, #tags)
-        assert.are.same('inner', tags[1].attributes.id)
-        assert.are.same('outer', tags[2].attributes.id)
+        assert.deep_equal(#tags, 2)
+        assert.deep_equal(tags[1].attributes.id, 'inner')
+        assert.deep_equal(tags[2].attributes.id, 'outer')
       end)
     end)
 
@@ -679,11 +683,11 @@ describe('Morph', function()
         }
 
         local tags = r:get_elements_at { 0, 8 }
-        assert.are.same(1, #tags)
-        assert.are.same('normal', tags[1].attributes.id)
+        assert.deep_equal(#tags, 1)
+        assert.deep_equal(tags[1].attributes.id, 'normal')
 
         tags = r:get_elements_at { 0, 6 }
-        assert.is_true(#tags >= 0) -- Should not error
+        assert.equal(#tags >= 0, true) -- Should not error
       end)
     end)
 
@@ -711,31 +715,31 @@ describe('Morph', function()
 
         -- Test extmark positions:
         local extmarks = r:get_elements_at { 0, 15 } -- position in 'important'
-        assert.are.same(3, #extmarks)
-        assert.are.same('highlight1', extmarks[1].attributes.id) -- innermost first
-        assert.are.same('section1', extmarks[2].attributes.id)
-        assert.are.same('container', extmarks[3].attributes.id) -- outermost last
+        assert.deep_equal(#extmarks, 3)
+        assert.deep_equal(extmarks[1].attributes.id, 'highlight1') -- innermost first
+        assert.deep_equal(extmarks[2].attributes.id, 'section1')
+        assert.deep_equal(extmarks[3].attributes.id, 'container') -- outermost last
 
         -- Verify extmark bounds
-        assert.are.same(Pos00.new(0, 11), extmarks[1].extmark.start) -- highlight1 start
-        assert.are.same(Pos00.new(0, 20), extmarks[1].extmark.stop) -- highlight1 stop
-        assert.are.same(Pos00.new(0, 0), extmarks[2].extmark.start) -- section1 start
-        assert.are.same(Pos00.new(0, 20), extmarks[2].extmark.stop) -- section1 stop
-        assert.are.same(Pos00.new(0, 0), extmarks[3].extmark.start) -- container start
-        assert.are.same(Pos00.new(1, 19), extmarks[3].extmark.stop) -- container stop
+        assert.deep_equal(extmarks[1].extmark.start, Pos00.new(0, 11)) -- highlight1 start
+        assert.deep_equal(extmarks[1].extmark.stop, Pos00.new(0, 20)) -- highlight1 stop
+        assert.deep_equal(extmarks[2].extmark.start, Pos00.new(0, 0)) -- section1 start
+        assert.deep_equal(extmarks[2].extmark.stop, Pos00.new(0, 20)) -- section1 stop
+        assert.deep_equal(extmarks[3].extmark.start, Pos00.new(0, 0)) -- container start
+        assert.deep_equal(extmarks[3].extmark.stop, Pos00.new(1, 19)) -- container stop
 
         -- Test position in second highlight (after newline)
         extmarks = r:get_elements_at { 1, 15 } -- position in 'critical'
-        assert.are.same(3, #extmarks)
-        assert.are.same('highlight2', extmarks[1].attributes.id)
-        assert.are.same('section2', extmarks[2].attributes.id)
-        assert.are.same('container', extmarks[3].attributes.id)
+        assert.deep_equal(#extmarks, 3)
+        assert.deep_equal(extmarks[1].attributes.id, 'highlight2')
+        assert.deep_equal(extmarks[2].attributes.id, 'section2')
+        assert.deep_equal(extmarks[3].attributes.id, 'container')
 
         -- Test position in section text but not in highlight
         extmarks = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
-        assert.are.same(2, #extmarks)
-        assert.are.same('section1', extmarks[1].attributes.id)
-        assert.are.same('container', extmarks[2].attributes.id)
+        assert.deep_equal(#extmarks, 2)
+        assert.deep_equal(extmarks[1].attributes.id, 'section1')
+        assert.deep_equal(extmarks[2].attributes.id, 'container')
       end)
     end)
 
@@ -768,45 +772,45 @@ describe('Morph', function()
         end
 
         -- Test positions via get_element_by_id:
-        assert.are.same(
-          { start = Pos00.new(0, 0), stop = Pos00.new(1, 19) },
-          get_tag_bounds 'container'
+        assert.deep_equal(
+          get_tag_bounds 'container',
+          { start = Pos00.new(0, 0), stop = Pos00.new(1, 19) }
         )
-        assert.are.same(
-          { start = Pos00.new(0, 0), stop = Pos00.new(0, 20) },
-          get_tag_bounds 'section1'
+        assert.deep_equal(
+          get_tag_bounds 'section1',
+          { start = Pos00.new(0, 0), stop = Pos00.new(0, 20) }
         )
-        assert.are.same(
-          { start = Pos00.new(0, 11), stop = Pos00.new(0, 20) },
-          get_tag_bounds 'highlight1'
+        assert.deep_equal(
+          get_tag_bounds 'highlight1',
+          { start = Pos00.new(0, 11), stop = Pos00.new(0, 20) }
         )
-        assert.are.same(
-          { start = Pos00.new(1, 0), stop = Pos00.new(1, 19) },
-          get_tag_bounds 'section2'
+        assert.deep_equal(
+          get_tag_bounds 'section2',
+          { start = Pos00.new(1, 0), stop = Pos00.new(1, 19) }
         )
-        assert.are.same(
-          { start = Pos00.new(1, 11), stop = Pos00.new(1, 19) },
-          get_tag_bounds 'highlight2'
+        assert.deep_equal(
+          get_tag_bounds 'highlight2',
+          { start = Pos00.new(1, 11), stop = Pos00.new(1, 19) }
         )
 
         local tags = r:get_elements_at { 0, 15 } -- position in 'important'
-        assert.are.same(3, #tags)
-        assert.are.same('highlight1', tags[1].attributes.id)
-        assert.are.same('section1', tags[2].attributes.id)
-        assert.are.same('container', tags[3].attributes.id)
+        assert.deep_equal(#tags, 3)
+        assert.deep_equal(tags[1].attributes.id, 'highlight1')
+        assert.deep_equal(tags[2].attributes.id, 'section1')
+        assert.deep_equal(tags[3].attributes.id, 'container')
 
         -- Test position in second highlight (after newline)
         tags = r:get_elements_at { 1, 15 } -- position in 'critical'
-        assert.are.same(3, #tags)
-        assert.are.same('highlight2', tags[1].attributes.id)
-        assert.are.same('section2', tags[2].attributes.id)
-        assert.are.same('container', tags[3].attributes.id)
+        assert.deep_equal(#tags, 3)
+        assert.deep_equal(tags[1].attributes.id, 'highlight2')
+        assert.deep_equal(tags[2].attributes.id, 'section2')
+        assert.deep_equal(tags[3].attributes.id, 'container')
 
         -- Test position in section text but not in highlight
         tags = r:get_elements_at { 0, 5 } -- position in 'Section 1: '
-        assert.are.same(2, #tags)
-        assert.are.same('section1', tags[1].attributes.id)
-        assert.are.same('container', tags[2].attributes.id)
+        assert.deep_equal(#tags, 2)
+        assert.deep_equal(tags[1].attributes.id, 'section1')
+        assert.deep_equal(tags[2].attributes.id, 'container')
       end)
     end)
   end)
@@ -838,7 +842,7 @@ describe('Morph', function()
         local r = Morph.new(0)
         r:render { h('text', { id = 'exists' }, 'content') }
 
-        assert.is_not_nil(r:get_element_by_id 'exists')
+        assert.ok(r:get_element_by_id 'exists')
         assert.is_nil(r:get_element_by_id 'does-not-exist')
       end)
     end)
@@ -858,7 +862,7 @@ describe('Morph', function()
           h('text', { id = 'end-boundary' }, 'end'),
         }
 
-        assert.are.same({ 'start middle end' }, get_lines())
+        assert.deep_equal(get_lines(), { 'start middle end' })
         assert_element_bounds(r, 'start-boundary', Pos00.new(0, 0), Pos00.new(0, 5))
         assert_element_bounds(r, 'end-boundary', Pos00.new(0, 13), Pos00.new(0, 16))
 
@@ -887,26 +891,26 @@ describe('Morph', function()
           'after',
         }
 
-        assert.are.same({ 'beforeafter' }, get_lines())
+        assert.deep_equal(get_lines(), { 'beforeafter' })
 
         local zero_elem = r:get_element_by_id 'zero-width'
-        assert.is_not_nil(zero_elem)
-        assert.are.same(Pos00.new(0, 6), zero_elem.extmark.start)
-        assert.are.same(Pos00.new(0, 6), zero_elem.extmark.stop)
+        assert.ok(zero_elem)
+        assert.deep_equal(zero_elem.extmark.start, Pos00.new(0, 6))
+        assert.deep_equal(zero_elem.extmark.stop, Pos00.new(0, 6))
 
         -- Can detect zero-width extmark at its position (top-level strings
         -- also get implicit text tags now, so filter by id)
         local elements = r:get_elements_at { 0, 6 }
         local ids = vim.tbl_map(function(el) return el.attributes.id end, elements)
-        assert.is_true(vim.tbl_contains(ids, 'zero-width'))
+        assert.equal(vim.tbl_contains(ids, 'zero-width'), true)
 
         -- Inserting text triggers on_change
         set_text(0, 6, 0, 6, { 'inserted' })
         vim.cmd.doautocmd 'TextChanged'
 
-        assert.are.same('beforeinsertedafter', get_text())
-        assert.are.same(1, #captured_events)
-        assert.are.same('inserted', captured_events[1].text)
+        assert.deep_equal(get_text(), 'beforeinsertedafter')
+        assert.deep_equal(#captured_events, 1)
+        assert.deep_equal(captured_events[1].text, 'inserted')
       end)
     end)
 
@@ -921,13 +925,13 @@ describe('Morph', function()
           }),
         }
 
-        assert.are.same({ 'line 1', 'line 2', 'line 3' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2', 'line 3' })
 
         local elem = r:get_element_by_id 'multiline'
-        assert.is_not_nil(elem)
-        assert.are.same(Pos00.new(0, 0), elem.extmark.start)
-        assert.are.same(Pos00.new(2, 6), elem.extmark.stop)
-        assert.are.same('line 1\nline 2\nline 3', elem.extmark:_text())
+        assert.ok(elem)
+        assert.deep_equal(elem.extmark.start, Pos00.new(0, 0))
+        assert.deep_equal(elem.extmark.stop, Pos00.new(2, 6))
+        assert.deep_equal(elem.extmark:_text(), 'line 1\nline 2\nline 3')
       end)
     end)
 
@@ -946,21 +950,21 @@ describe('Morph', function()
           }),
         }
 
-        assert.are.same({ 'line 1', 'line 2', '', '' }, get_lines())
+        assert.deep_equal(get_lines(), { 'line 1', 'line 2', '', '' })
 
         local elems = r:get_elements_at { 0, 1 }
-        assert.are.same(1, #elems)
-        assert.are.same(Pos00.new(0, 0), elems[1].extmark.start)
-        assert.are.same(Pos00.new(3, 0), elems[1].extmark.stop)
+        assert.deep_equal(#elems, 1)
+        assert.deep_equal(elems[1].extmark.start, Pos00.new(0, 0))
+        assert.deep_equal(elems[1].extmark.stop, Pos00.new(3, 0))
 
         -- extmark:_text() handles blank lines at end correctly
-        assert.are.same('line 1\nline 2\n\n', elems[1].extmark:_text())
+        assert.deep_equal(elems[1].extmark:_text(), 'line 1\nline 2\n\n')
 
         set_text(0, 0, 3, 0, { 'modified content' })
         vim.cmd.doautocmd 'TextChanged'
 
-        assert.are.same('modified content', get_text())
-        assert.are.same('modified content', captured_changed_text)
+        assert.deep_equal(get_text(), 'modified content')
+        assert.deep_equal(captured_changed_text, 'modified content')
       end)
     end)
 
@@ -976,13 +980,13 @@ describe('Morph', function()
           'x',
           h('text', { id = 'nl' }, '\n'),
         }
-        assert.are.same({ 'x', '' }, get_lines())
+        assert.deep_equal(get_lines(), { 'x', '' })
 
         local elem = r:get_element_by_id 'nl'
-        assert.is_not_nil(elem)
-        assert.are.same(Pos00.new(0, 1), elem.extmark.start)
-        assert.are.same(Pos00.new(1, 0), elem.extmark.stop)
-        assert.are.same('\n', elem.extmark:_text())
+        assert.ok(elem)
+        assert.deep_equal(elem.extmark.start, Pos00.new(0, 1))
+        assert.deep_equal(elem.extmark.stop, Pos00.new(1, 0))
+        assert.deep_equal(elem.extmark:_text(), '\n')
       end)
     end)
 
@@ -1008,9 +1012,9 @@ describe('Morph', function()
         -- Calling _text() with inverted positions should return empty string
         local result = extmark:_text()
 
-        assert.are.equal(
-          '',
+        assert.equal(
           result,
+          '',
           'Extmark:_text() should handle inverted positions gracefully (return empty string), but got: '
             .. vim.inspect(result)
         )
@@ -1028,8 +1032,8 @@ describe('Morph', function()
         -- Raw stop (2,0) is one past the last row; _from_raw clamps it to the
         -- last line's end before _text runs.
         local extmark = Extmark._from_raw(0, 1, 0, 0, { end_row = 2, end_col = 0 })
-        assert.are.same(Pos00.new(1, 3), extmark.stop)
-        assert.are.same('abc\ndef', extmark:_text())
+        assert.deep_equal(extmark.stop, Pos00.new(1, 3))
+        assert.deep_equal(extmark:_text(), 'abc\ndef')
       end)
     end)
 
@@ -1041,8 +1045,8 @@ describe('Morph', function()
         vim.api.nvim_buf_set_lines(0, 0, -1, true, { 'abc', 'def', 'g' })
 
         local extmark = Extmark._from_raw(0, 1, 0, 0, { end_row = 2, end_col = 0 })
-        assert.are.same(Pos00.new(2, 0), extmark.stop)
-        assert.are.same('abc\ndef\n', extmark:_text())
+        assert.deep_equal(extmark.stop, Pos00.new(2, 0))
+        assert.deep_equal(extmark:_text(), 'abc\ndef\n')
       end)
     end)
   end)
@@ -1069,19 +1073,19 @@ describe('Morph', function()
         }
 
         local expected_text = emoji_text .. ' ' .. cjk_text .. ' ' .. combining_text
-        assert.are.same(expected_text, get_text())
+        assert.deep_equal(get_text(), expected_text)
 
         local emoji_elem = r:get_element_by_id 'emoji-tag'
         local cjk_elem = r:get_element_by_id 'cjk-tag'
         local combining_elem = r:get_element_by_id 'combining-tag'
 
-        assert.is_not_nil(emoji_elem)
-        assert.is_not_nil(cjk_elem)
-        assert.is_not_nil(combining_elem)
+        assert.ok(emoji_elem)
+        assert.ok(cjk_elem)
+        assert.ok(combining_elem)
 
-        assert.are.same(emoji_text, emoji_elem.extmark:_text())
-        assert.are.same(cjk_text, cjk_elem.extmark:_text())
-        assert.are.same(combining_text, combining_elem.extmark:_text())
+        assert.deep_equal(emoji_elem.extmark:_text(), emoji_text)
+        assert.deep_equal(cjk_elem.extmark:_text(), cjk_text)
+        assert.deep_equal(combining_elem.extmark:_text(), combining_text)
       end)
     end)
 
@@ -1095,18 +1099,18 @@ describe('Morph', function()
           'more',
         }
 
-        assert.are.same('ASCII🎯中文more', get_text())
+        assert.deep_equal(get_text(), 'ASCII🎯中文more')
 
         local mixed_elem = r:get_element_by_id 'mixed'
-        assert.is_not_nil(mixed_elem)
+        assert.ok(mixed_elem)
 
         local elements_at_start = r:get_elements_at { 0, 5 }
-        assert.are.same(1, #elements_at_start)
-        assert.are.same('mixed', elements_at_start[1].attributes.id)
+        assert.deep_equal(#elements_at_start, 1)
+        assert.deep_equal(elements_at_start[1].attributes.id, 'mixed')
 
         local elements_in_middle = r:get_elements_at { 0, 7 }
         if #elements_in_middle > 0 then
-          assert.are.same('mixed', elements_in_middle[1].attributes.id)
+          assert.deep_equal(elements_in_middle[1].attributes.id, 'mixed')
         end
       end)
     end)
@@ -1124,14 +1128,14 @@ describe('Morph', function()
 
       -- Buffer: 4 lines (0-3)
       vim.api.nvim_buf_set_lines(0, 0, -1, true, { 'line 0', 'line 1', 'line 2', '' })
-      assert.are.same(4, line_count())
+      assert.deep_equal(line_count(), 4)
 
       -- Extmark at line 3 (the last line)
       local ext_id = vim.api.nvim_buf_set_extmark(0, ns, 3, 0, { end_row = 3, end_col = 0 })
 
       -- Delete the last line → buffer now has 3 lines (0-2)
       vim.api.nvim_buf_set_lines(0, 3, 4, true, {})
-      assert.are.same(3, line_count())
+      assert.deep_equal(line_count(), 3)
 
       -- Neovim returns extmark with stale position (line 3 doesn't exist)
       local raw = vim.api.nvim_buf_get_extmark_by_id(0, ns, ext_id, { details = true })
@@ -1142,8 +1146,9 @@ describe('Morph', function()
 
       -- start should be clamped to valid buffer line
       local last_line_idx = line_count() - 1
-      assert.is_true(
+      assert.equal(
         extmark.start[1] <= last_line_idx,
+        true,
         ('extmark.start[1] (%d) should be <= last_line_idx (%d)'):format(
           extmark.start[1],
           last_line_idx
@@ -1166,7 +1171,7 @@ describe('Morph', function()
 
         set_cursor { 1, 5 }
         local result = r:_dispatch_keypress('n', '<CR>')
-        assert.are.same('<CR>', result)
+        assert.deep_equal(result, '<CR>')
       end)
     end)
 
@@ -1196,24 +1201,24 @@ describe('Morph', function()
         -- Inside clickable region
         set_cursor { 1, 12 }
         local result = r:_dispatch_keypress('n', '<CR>')
-        assert.are.same('', result)
-        assert.are.same(1, #captured_events)
-        assert.are.same('clickable', captured_events[1].tag_id)
-        assert.are.same('<CR>', captured_events[1].key)
+        assert.deep_equal(result, '')
+        assert.deep_equal(#captured_events, 1)
+        assert.deep_equal(captured_events[1].tag_id, 'clickable')
+        assert.deep_equal(captured_events[1].key, '<CR>')
 
         -- In prefix (outside)
         captured_events = {}
         set_cursor { 1, 2 }
         result = r:_dispatch_keypress('n', '<CR>')
-        assert.are.same('<CR>', result)
-        assert.are.same(0, #captured_events)
+        assert.deep_equal(result, '<CR>')
+        assert.deep_equal(#captured_events, 0)
 
         -- In suffix (outside)
         captured_events = {}
         set_cursor { 1, 17 }
         result = r:_dispatch_keypress('n', '<CR>')
-        assert.are.same('<CR>', result)
-        assert.are.same(0, #captured_events)
+        assert.deep_equal(result, '<CR>')
+        assert.deep_equal(#captured_events, 0)
       end)
     end)
 
@@ -1254,24 +1259,24 @@ describe('Morph', function()
         -- In inner region
         set_cursor { 1, 8 }
         local result = r:_dispatch_keypress('n', 'x')
-        assert.are.same('inner-x', result)
-        assert.are.same(1, #captured_events)
-        assert.are.same('inner', captured_events[1].tag_id)
+        assert.deep_equal(result, 'inner-x')
+        assert.deep_equal(#captured_events, 1)
+        assert.deep_equal(captured_events[1].tag_id, 'inner')
 
         -- In outer region but not inner
         captured_events = {}
         set_cursor { 1, 2 }
         result = r:_dispatch_keypress('n', 'x')
-        assert.are.same('outer-x', result)
-        assert.are.same(1, #captured_events)
-        assert.are.same('outer', captured_events[1].tag_id)
+        assert.deep_equal(result, 'outer-x')
+        assert.deep_equal(#captured_events, 1)
+        assert.deep_equal(captured_events[1].tag_id, 'outer')
 
         -- Outside both regions
         captured_events = {}
         set_cursor { 1, 18 }
         result = r:_dispatch_keypress('n', 'x')
-        assert.are.same('x', result)
-        assert.are.same(0, #captured_events)
+        assert.deep_equal(result, 'x')
+        assert.deep_equal(#captured_events, 0)
       end)
     end)
 
@@ -1312,10 +1317,10 @@ describe('Morph', function()
 
           set_cursor { 1, 8 }
           local result = r:_dispatch_keypress('n', 'b')
-          assert.are.same('b', result)
-          assert.are.same(2, #captured_events)
-          assert.are.same('inner', captured_events[1].tag_id)
-          assert.are.same('outer', captured_events[2].tag_id)
+          assert.deep_equal(result, 'b')
+          assert.deep_equal(#captured_events, 2)
+          assert.deep_equal(captured_events[1].tag_id, 'inner')
+          assert.deep_equal(captured_events[2].tag_id, 'outer')
         end)
       end)
 
@@ -1351,9 +1356,9 @@ describe('Morph', function()
 
           set_cursor { 1, 8 }
           local result = r:_dispatch_keypress('n', 'c')
-          assert.are.same('inner-handled', result)
-          assert.are.same(1, #captured_events)
-          assert.are.same('inner', captured_events[1].tag_id)
+          assert.deep_equal(result, 'inner-handled')
+          assert.deep_equal(#captured_events, 1)
+          assert.deep_equal(captured_events[1].tag_id, 'inner')
         end)
       end)
     end)
@@ -1385,21 +1390,21 @@ describe('Morph', function()
           set_cursor { 1, 2 }
 
           local result = r:_dispatch_keypress('n', 'm')
-          assert.are.same('normal-mode', result)
-          assert.are.same(1, #captured_events)
-          assert.are.same('n', captured_events[1].mode)
+          assert.deep_equal(result, 'normal-mode')
+          assert.deep_equal(#captured_events, 1)
+          assert.deep_equal(captured_events[1].mode, 'n')
 
           captured_events = {}
           result = r:_dispatch_keypress('i', 'm')
-          assert.are.same('insert-mode', result)
-          assert.are.same(1, #captured_events)
-          assert.are.same('i', captured_events[1].mode)
+          assert.deep_equal(result, 'insert-mode')
+          assert.deep_equal(#captured_events, 1)
+          assert.deep_equal(captured_events[1].mode, 'i')
 
           -- Mode with no handler returns original key
           captured_events = {}
           result = r:_dispatch_keypress('v', 'm')
-          assert.are.same('m', result)
-          assert.are.same(0, #captured_events)
+          assert.deep_equal(result, 'm')
+          assert.deep_equal(#captured_events, 0)
         end)
       end)
     end)
@@ -1422,11 +1427,11 @@ describe('Morph', function()
 
         set_cursor { 1, 3 }
         local result = r:_dispatch_keypress('n', 'z')
-        assert.are.same('', result)
+        assert.deep_equal(result, '')
 
         set_cursor { 1, 12 }
         result = r:_dispatch_keypress('n', 'z')
-        assert.are.same('z', result)
+        assert.deep_equal(result, 'z')
       end)
     end)
 
@@ -1451,14 +1456,14 @@ describe('Morph', function()
           }, 'hello\n'),
         }
 
-        assert.are.same({ 'hello', '' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello', '' })
 
         -- Cursor on the trailing empty line should still trigger the handler
         set_cursor { 2, 0 } -- 1-based: row 2, col 0 (the empty line)
         local result = r:_dispatch_keypress('n', '<CR>')
 
-        assert.are.same('', result)
-        assert.is_true(handler_called, 'Handler should be called on trailing empty line')
+        assert.deep_equal(result, '')
+        assert.equal(handler_called, true, 'Handler should be called on trailing empty line')
       end)
     end)
 
@@ -1494,20 +1499,20 @@ describe('Morph', function()
           }, 'world'),
         }
 
-        assert.are.same({ 'hello', 'world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello', 'world' })
 
         -- Cursor at start of "world" line - should be in second element only
         set_cursor { 2, 0 } -- 1-based: row 2, col 0
         local result = r:_dispatch_keypress('n', '<CR>')
 
-        assert.are.same('second', result)
-        assert.is_false(first_called, 'First handler should NOT be called')
-        assert.is_true(second_called, 'Second handler should be called')
+        assert.deep_equal(result, 'second')
+        assert.equal(first_called, false, 'First handler should NOT be called')
+        assert.equal(second_called, true, 'Second handler should be called')
 
         -- Verify get_elements_at returns only second element in normal mode
         local elems = r:get_elements_at { 1, 0 } -- 0-based
-        assert.are.same(1, #elems)
-        assert.are.same('second', elems[1].attributes.id)
+        assert.deep_equal(#elems, 1)
+        assert.deep_equal(elems[1].attributes.id, 'second')
       end)
     end)
 
@@ -1521,15 +1526,15 @@ describe('Morph', function()
           h('text', { id = 'second' }, 'world'),
         }
 
-        assert.are.same({ 'hello', 'world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello', 'world' })
 
         -- In insert mode, cursor at boundary should see both elements
         local elems = r:get_elements_at({ 1, 0 }, 'i') -- 0-based, insert mode
-        assert.are.same(2, #elems)
+        assert.deep_equal(#elems, 2)
         -- Second element is "innermost" (starts at cursor), first is "outer" (ends at cursor)
         local ids = vim.tbl_map(function(e) return e.attributes.id end, elems)
-        assert.is_true(vim.tbl_contains(ids, 'first'))
-        assert.is_true(vim.tbl_contains(ids, 'second'))
+        assert.equal(vim.tbl_contains(ids, 'first'), true)
+        assert.equal(vim.tbl_contains(ids, 'second'), true)
       end)
     end)
 
@@ -1552,15 +1557,15 @@ describe('Morph', function()
           'world', -- plain text, no handler
         }
 
-        assert.are.same({ 'hello', 'world' }, get_lines())
+        assert.deep_equal(get_lines(), { 'hello', 'world' })
 
         -- Cursor on "world" line - first element's handler should NOT fire
         set_cursor { 2, 0 }
         local result = r:_dispatch_keypress('n', 'x')
 
         -- Should return original key (no handler matched)
-        assert.are.same('x', result)
-        assert.is_false(first_called)
+        assert.deep_equal(result, 'x')
+        assert.equal(first_called, false)
       end)
     end)
   end)
@@ -1589,16 +1594,16 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount(h(TestComponent))
-        assert.are.same('with keymap', get_text())
+        assert.deep_equal(get_text(), 'with keymap')
 
         local mapping = vim.fn.maparg('<Leader>nonexistent', 'n', false, true)
-        assert.is_false(vim.tbl_isempty(mapping))
+        assert.equal(vim.tbl_isempty(mapping), false)
 
-        assert.has_no.errors(function() leaked_context:update(2) end)
-        assert.are.same('without keymap', get_text())
+        leaked_context:update(2)
+        assert.deep_equal(get_text(), 'without keymap')
 
         mapping = vim.fn.maparg('<Leader>nonexistent', 'n', false, true)
-        assert.is_true(vim.tbl_isempty(mapping))
+        assert.equal(vim.tbl_isempty(mapping), true)
       end)
     end)
 
@@ -1628,14 +1633,14 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         local result = r:_dispatch_keypress('n', '<Leader>abc')
-        assert.are.same('<Leader>abc', result)
-        assert.are.same(0, my_component_callback_count)
+        assert.deep_equal(result, '<Leader>abc')
+        assert.deep_equal(my_component_callback_count, 0)
 
         r:mount(h(TestComponent))
-        assert.are.same('Hello World!', get_text())
-        assert.are_not.same(
-          my_orig_callback,
-          vim.fn.maparg('<Leader>abc', 'n', false, true).callback
+        assert.deep_equal(get_text(), 'Hello World!')
+        assert.not_deep_equal(
+          vim.fn.maparg('<Leader>abc', 'n', false, true).callback,
+          my_orig_callback
         )
 
         -- Position cursor inside the rendered text: patch_lines leaves the
@@ -1643,16 +1648,16 @@ describe('Morph', function()
         -- so set it explicitly (see the sibling test above which does the same).
         set_cursor { 1, 0 }
         result = r:_dispatch_keypress('n', '<Leader>abc')
-        assert.are.same(nil, result)
-        assert.are.same(1, my_component_callback_count)
+        assert.deep_equal(result, nil)
+        assert.deep_equal(my_component_callback_count, 1)
 
         leaked_context:update(2)
-        assert.are.same('Hello World (II)!', get_text())
+        assert.deep_equal(get_text(), 'Hello World (II)!')
 
         set_cursor { 1, 0 }
         result = r:_dispatch_keypress('n', '<Leader>abc')
-        assert.are.same('<Leader>abc', result)
-        assert.are.same(my_orig_callback, vim.fn.maparg('<Leader>abc', 'n', false, true).callback)
+        assert.deep_equal(result, '<Leader>abc')
+        assert.deep_equal(vim.fn.maparg('<Leader>abc', 'n', false, true).callback, my_orig_callback)
       end)
     end)
 
@@ -1694,7 +1699,7 @@ describe('Morph', function()
 
         -- Verify buffer A has the Morph keymap
         local buf_a_mapping = vim.fn.maparg('x', 'n', false, true)
-        assert.is_false(vim.tbl_isempty(buf_a_mapping), 'Buffer A should have x mapping')
+        assert.equal(vim.tbl_isempty(buf_a_mapping), false, 'Buffer A should have x mapping')
 
         -- Create buffer B and make it current
         vim.cmd.new()
@@ -1702,7 +1707,7 @@ describe('Morph', function()
         vim.api.nvim_buf_set_lines(buf_b, 0, -1, false, { 'Buffer B' })
 
         -- Ensure we're in buffer B
-        assert.are.same(buf_b, vim.api.nvim_get_current_buf())
+        assert.deep_equal(vim.api.nvim_get_current_buf(), buf_b)
 
         -- Trigger a rerender of Morph while buffer B is current
         leaked_ctx:update { count = 2 }
@@ -1711,18 +1716,18 @@ describe('Morph', function()
         -- Use nvim_buf_get_keymap to check specific buffer's mappings
         local buf_a_keymaps = vim.api.nvim_buf_get_keymap(buf_a, 'n')
         local buf_a_has_esc = vim.tbl_filter(function(m) return m.lhs == '<Esc>' end, buf_a_keymaps)
-        assert.are.same(
-          1,
+        assert.deep_equal(
           #buf_a_has_esc,
+          1,
           'Buffer A should still have <Esc> mapping after render from buffer B'
         )
 
         -- Verify buffer B does NOT have buffer A's <Esc> mapping leaked into it
         local buf_b_keymaps = vim.api.nvim_buf_get_keymap(buf_b, 'n')
         local buf_b_has_esc = vim.tbl_filter(function(m) return m.lhs == '<Esc>' end, buf_b_keymaps)
-        assert.are.same(
-          0,
+        assert.deep_equal(
           #buf_b_has_esc,
+          0,
           "Buffer B should NOT have buffer A's <Esc> mapping leaked into it"
         )
 
@@ -1753,7 +1758,7 @@ describe('Morph', function()
 
         local r = Morph.new()
         r:mount(h(App))
-        assert.are.same({ 'morph content' }, get_lines())
+        assert.deep_equal(get_lines(), { 'morph content' })
 
         -- Simulate the bug: clear the captured on_bytes args, then fire TextChanged.
         -- This can happen if TextChanged fires without a corresponding on_bytes event,
@@ -1761,7 +1766,7 @@ describe('Morph', function()
         r.buf_watcher.last_user_bytes_args = nil
 
         -- This should NOT throw "attempt to perform arithmetic on local 'start_row0' (a nil value)"
-        assert.has_no.errors(function() vim.cmd.doautocmd 'TextChanged' end)
+        vim.cmd.doautocmd 'TextChanged'
       end)
     end)
 
@@ -1776,8 +1781,8 @@ describe('Morph', function()
         local r = Morph.new()
         local ok, err = pcall(function() r:mount(h(App)) end)
 
-        assert.is_true(ok, 'Mount should succeed when buffer is empty: ' .. tostring(err))
-        assert.are.same({ 'morph content' }, get_lines())
+        assert.equal(ok, true, 'Mount should succeed when buffer is empty: ' .. tostring(err))
+        assert.deep_equal(get_lines(), { 'morph content' })
       end)
     end)
   end)
@@ -1827,8 +1832,8 @@ describe('Morph', function()
         app_ctx:update { items = old_items }
 
         -- Each component should have been mounted only once
-        assert.are.same(1, mount_count.a, 'Component a should be mounted once')
-        assert.are.same(1, mount_count.b, 'Component b should be mounted once')
+        assert.deep_equal(mount_count.a, 1, 'Component a should be mounted once')
+        assert.deep_equal(mount_count.b, 1, 'Component b should be mounted once')
       end)
     end)
 
@@ -1857,11 +1862,11 @@ describe('Morph', function()
 
         local r = Morph.new()
         r:mount(h(App))
-        assert.are.same({ 'a: 1b: 2c: 3' }, get_lines())
+        assert.deep_equal(get_lines(), { 'a: 1b: 2c: 3' })
 
         -- Reverse order - components should be reused
         app_ctx:update { order = { 'c', 'b', 'a' } }
-        assert.are.same({ 'c: 3b: 2a: 1' }, get_lines())
+        assert.deep_equal(get_lines(), { 'c: 3b: 2a: 1' })
       end)
     end)
   end)
@@ -1884,9 +1889,9 @@ describe('Morph', function()
 
         local ok, err = pcall(function() r:mount(h(App)) end)
 
-        assert.is_false(ok, 'Second mount should fail')
-        assert.is_not_nil(err, 'Error should be thrown')
-        assert.is_not_nil(err:match 'once per buffer', 'Should show helpful error message')
+        assert.equal(ok, false, 'Second mount should fail')
+        assert.ok(err, 'Error should be thrown')
+        assert.ok(err:match 'once per buffer', 'Should show helpful error message')
       end)
     end)
 
@@ -1904,9 +1909,9 @@ describe('Morph', function()
         local r2 = Morph.new()
         local ok, err = pcall(function() r2:mount(h(App)) end)
 
-        assert.is_false(ok, 'Second Morph instance should fail')
-        assert.is_not_nil(err, 'Error should be thrown')
-        assert.is_not_nil(err:match 'once per buffer', 'Should show helpful error message')
+        assert.equal(ok, false, 'Second Morph instance should fail')
+        assert.ok(err, 'Error should be thrown')
+        assert.ok(err:match 'once per buffer', 'Should show helpful error message')
       end)
     end)
   end)
@@ -1942,9 +1947,9 @@ describe('Morph', function()
         }
 
         local lines = Morph.markup_to_lines { tree = tree }
-        assert.are.same({ 'Prefix: Hello World! Suffix' }, lines)
-        assert.are.same({ 'World' }, mount_calls)
-        assert.are.same({ 'World' }, unmount_calls)
+        assert.deep_equal(lines, { 'Prefix: Hello World! Suffix' })
+        assert.deep_equal(mount_calls, { 'World' })
+        assert.deep_equal(unmount_calls, { 'World' })
       end)
 
       it('executes do_after_render callbacks immediately after mount', function()
@@ -1968,13 +1973,13 @@ describe('Morph', function()
           r:mount(h(TestComponent))
           table.insert(callback_execution_order, 'after-mount')
 
-          assert.is_true(callback_executed)
-          assert.are.same({
+          assert.equal(callback_executed, true)
+          assert.deep_equal(callback_execution_order, {
             'component-render',
             'callback',
             'after-mount',
-          }, callback_execution_order)
-          assert.are.same('Hello World', get_text())
+          })
+          assert.deep_equal(get_text(), 'Hello World')
         end)
       end)
 
@@ -1995,7 +2000,7 @@ describe('Morph', function()
 
           r:mount(h(TestComponent))
 
-          assert.are.same({ 'first', 'second', 'third' }, execution_order)
+          assert.deep_equal(execution_order, { 'first', 'second', 'third' })
         end)
       end)
 
@@ -2025,16 +2030,17 @@ describe('Morph', function()
 
             local r = Morph.new(0)
             r:mount(h(ComponentWithCallback))
-            assert.are.same('closed', get_text())
-            assert.is_false(callback_executed)
+            assert.deep_equal(get_text(), 'closed')
+            assert.equal(callback_executed, false)
 
             -- Now trigger the update that causes the issue
             capture_ctx.state.open = true
             capture_ctx:refresh()
 
             -- The callback should have been executed
-            assert.is_true(
+            assert.equal(
               callback_executed,
+              true,
               'do_after_render callback should be executed even when ctx:update is called during update phase'
             )
           end)
@@ -2058,8 +2064,8 @@ describe('Morph', function()
           local r = Morph.new(0)
           r:mount(h(TestComponent))
 
-          assert.are.same(1, render_count)
-          assert.are.same('Value: 2', get_text())
+          assert.deep_equal(render_count, 1)
+          assert.deep_equal(get_text(), 'Value: 2')
         end)
       end)
     end)
@@ -2085,34 +2091,34 @@ describe('Morph', function()
           local renderer = Morph.new()
           renderer:mount(h(App, {}, {}))
 
-          assert.are.same({ 'Value: 1', '', 'Value: 1' }, get_lines())
-          assert.are.same('mount', leaked_ctx.c1.state.phase)
-          assert.are.same('mount', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Value: 1', '', 'Value: 1' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'mount')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'mount')
 
           leaked_ctx.app:update { toggle1 = true, show2 = true }
-          assert.are.same({ 'Toggle1', '', 'Value: 1' }, get_lines())
-          assert.are.same('unmount', leaked_ctx.c1.state.phase)
-          assert.are.same('update', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Toggle1', '', 'Value: 1' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'unmount')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'update')
 
           leaked_ctx.app:update { toggle1 = true, show2 = false }
-          assert.are.same({ 'Toggle1', '' }, get_lines())
-          assert.are.same('unmount', leaked_ctx.c1.state.phase)
-          assert.are.same('unmount', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Toggle1', '' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'unmount')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'unmount')
 
           leaked_ctx.app:update { toggle1 = false, show2 = true }
-          assert.are.same({ 'Value: 1', '', 'Value: 1' }, get_lines())
-          assert.are.same('mount', leaked_ctx.c1.state.phase)
-          assert.are.same('mount', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Value: 1', '', 'Value: 1' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'mount')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'mount')
 
           leaked_ctx.c1:update { count = 2 }
-          assert.are.same({ 'Value: 2', '', 'Value: 1' }, get_lines())
-          assert.are.same('update', leaked_ctx.c1.state.phase)
-          assert.are.same('update', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Value: 2', '', 'Value: 1' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'update')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'update')
 
           leaked_ctx.c2:update { count = 3 }
-          assert.are.same({ 'Value: 2', '', 'Value: 3' }, get_lines())
-          assert.are.same('update', leaked_ctx.c1.state.phase)
-          assert.are.same('update', leaked_ctx.c2.state.phase)
+          assert.deep_equal(get_lines(), { 'Value: 2', '', 'Value: 3' })
+          assert.deep_equal(leaked_ctx.c1.state.phase, 'update')
+          assert.deep_equal(leaked_ctx.c2.state.phase, 'update')
         end)
       end)
 
@@ -2143,13 +2149,13 @@ describe('Morph', function()
           local r = Morph.new(0)
           r:mount(h(Parent))
 
-          assert.are.same('Label: A\nCount: 0', get_text())
+          assert.deep_equal(get_text(), 'Label: A\nCount: 0')
 
           child_ctx_ref:update { count = 5 }
-          assert.are.same('Label: A\nCount: 5', get_text())
+          assert.deep_equal(get_text(), 'Label: A\nCount: 5')
 
           parent_ctx_ref:update { label = 'B' }
-          assert.are.same('Label: B\nCount: 5', get_text())
+          assert.deep_equal(get_text(), 'Label: B\nCount: 5')
         end)
       end)
 
@@ -2195,32 +2201,36 @@ describe('Morph', function()
           local r = Morph.new(0)
           r:mount(h(App))
 
-          assert.are.same('Header\nFilter: []', get_text())
-          assert.are.same(1, services_mount_count, 'Services should mount once initially')
+          assert.deep_equal(get_text(), 'Header\nFilter: []')
+          assert.deep_equal(services_mount_count, 1, 'Services should mount once initially')
 
           -- Update Services state
           services_ctx_ref:update { filter = 'docker' }
-          assert.are.same('Header\nFilter: [docker]', get_text())
+          assert.deep_equal(get_text(), 'Header\nFilter: [docker]')
 
           -- Toggle help ON - this should NOT cause Services to remount
           parent_ctx_ref:update { show_help = true }
-          assert.are.same('Header\nHelp content\nFilter: [docker]', get_text())
-          assert.are.same(
-            1,
+          assert.deep_equal(get_text(), 'Header\nHelp content\nFilter: [docker]')
+          assert.deep_equal(
             services_mount_count,
+            1,
             'Services should NOT remount when sibling conditional changes'
           )
-          assert.are.same(
-            'docker',
+          assert.deep_equal(
             services_ctx_ref.state.filter,
+            'docker',
             'Services state should be preserved'
           )
 
           -- Toggle help OFF - state should still be preserved
           parent_ctx_ref:update { show_help = false }
-          assert.are.same('Header\nFilter: [docker]', get_text())
-          assert.are.same(1, services_mount_count, 'Services should still not have remounted')
-          assert.are.same('docker', services_ctx_ref.state.filter, 'Services state still preserved')
+          assert.deep_equal(get_text(), 'Header\nFilter: [docker]')
+          assert.deep_equal(services_mount_count, 1, 'Services should still not have remounted')
+          assert.deep_equal(
+            services_ctx_ref.state.filter,
+            'docker',
+            'Services state still preserved'
+          )
         end)
       end)
 
@@ -2243,12 +2253,12 @@ describe('Morph', function()
           end
 
           r:mount(h(TestComponent))
-          assert.are.same('Count: 1', get_text())
-          assert.are.same(1, called)
+          assert.deep_equal(get_text(), 'Count: 1')
+          assert.deep_equal(called, 1)
 
           local orig_schedule = vim.schedule
           vim.schedule = function(f) return f() end
-          assert.has_no.errors(function() leaked_context:update { count = 2 } end)
+          leaked_context:update { count = 2 }
           vim.schedule = orig_schedule
         end)
       end)
@@ -2277,8 +2287,8 @@ describe('Morph', function()
 
           vim.schedule = orig_schedule
 
-          assert.are.same(2, render_count)
-          assert.are.same('ready', get_text())
+          assert.deep_equal(render_count, 2)
+          assert.deep_equal(get_text(), 'ready')
         end)
       end)
 
@@ -2316,31 +2326,31 @@ describe('Morph', function()
           r:mount(h(App))
 
           -- Phase 1: Initial mount -> CompA mounts
-          assert.are.same({ 'mount' }, phases_a, 'CompA mounts on initial render')
-          assert.are.same({}, phases_b, 'CompB not called yet')
-          assert.are.same('CompA', get_text())
+          assert.deep_equal(phases_a, { 'mount' }, 'CompA mounts on initial render')
+          assert.deep_equal(phases_b, {}, 'CompB not called yet')
+          assert.deep_equal(get_text(), 'CompA')
 
           -- Phase 2: Switch to CompB -> CompA unmounts, CompB mounts
           parent_ctx:update { use_b = true }
 
-          assert.are.same(
-            { 'mount', 'unmount' },
+          assert.deep_equal(
             phases_a,
+            { 'mount', 'unmount' },
             'CompA unmounts when component function changes'
           )
-          assert.are.same({ 'mount' }, phases_b, 'CompB mounts when component function changes')
-          assert.are.same('CompB', get_text())
+          assert.deep_equal(phases_b, { 'mount' }, 'CompB mounts when component function changes')
+          assert.deep_equal(get_text(), 'CompB')
 
           -- Phase 3: Switch back to CompA -> CompB unmounts, CompA mounts fresh
           parent_ctx:update { use_b = false }
 
-          assert.are.same(
-            { 'mount', 'unmount', 'mount' },
+          assert.deep_equal(
             phases_a,
+            { 'mount', 'unmount', 'mount' },
             'CompA mounts fresh when switched back'
           )
-          assert.are.same({ 'mount', 'unmount' }, phases_b, 'CompB unmounts when switched away')
-          assert.are.same('CompA', get_text())
+          assert.deep_equal(phases_b, { 'mount', 'unmount' }, 'CompB unmounts when switched away')
+          assert.deep_equal(get_text(), 'CompA')
         end)
       end)
     end)
@@ -2379,16 +2389,16 @@ describe('Morph', function()
         local r = Morph.new(bufnr)
         r:mount(h(App))
 
-        assert.are.same({ 'Component first', 'Component second' }, get_lines())
-        assert.is_true(vim.tbl_contains(mount_calls, 'first'))
-        assert.is_true(vim.tbl_contains(mount_calls, 'second'))
-        assert.are.same({}, unmount_calls)
+        assert.deep_equal(get_lines(), { 'Component first', 'Component second' })
+        assert.equal(vim.tbl_contains(mount_calls, 'first'), true)
+        assert.equal(vim.tbl_contains(mount_calls, 'second'), true)
+        assert.deep_equal(unmount_calls, {})
 
         vim.api.nvim_buf_delete(bufnr, { force = true })
 
-        assert.is_true(vim.tbl_contains(unmount_calls, 'first'))
-        assert.is_true(vim.tbl_contains(unmount_calls, 'second'))
-        assert.is_true(vim.tbl_contains(unmount_calls, 'app'))
+        assert.equal(vim.tbl_contains(unmount_calls, 'first'), true)
+        assert.equal(vim.tbl_contains(unmount_calls, 'second'), true)
+        assert.equal(vim.tbl_contains(unmount_calls, 'app'), true)
       end)
 
       it('executes do_after_render callbacks registered during a terminal unmount', function()
@@ -2407,11 +2417,11 @@ describe('Morph', function()
         end
 
         r:mount(h(TestComponent))
-        assert.are.same({}, order)
+        assert.deep_equal(order, {})
 
         vim.api.nvim_buf_delete(bufnr, { force = true })
 
-        assert.are.same({ 'unmount', 'callback' }, order)
+        assert.deep_equal(order, { 'unmount', 'callback' })
       end)
 
       it('unmounts on demand and can be remounted on the same buffer', function()
@@ -2427,13 +2437,13 @@ describe('Morph', function()
         end
 
         r:mount(h(TestComponent))
-        assert.are.equal('Hello', get_text())
+        assert.equal(get_text(), 'Hello')
 
         r:unmount()
-        assert.are.equal(1, unmount_calls)
+        assert.equal(unmount_calls, 1)
 
         r:mount(h(TestComponent))
-        assert.are.equal('Hello', get_text())
+        assert.equal(get_text(), 'Hello')
       end)
 
       it('unmount is idempotent', function()
@@ -2453,7 +2463,7 @@ describe('Morph', function()
         r:unmount()
         r:unmount()
 
-        assert.are.equal(1, unmount_calls)
+        assert.equal(unmount_calls, 1)
       end)
 
       it('executes do_after_render callbacks registered during an explicit unmount', function()
@@ -2474,7 +2484,7 @@ describe('Morph', function()
         r:mount(h(TestComponent))
         r:unmount()
 
-        assert.are.same({ 'unmount', 'callback' }, order)
+        assert.deep_equal(order, { 'unmount', 'callback' })
       end)
 
       it('restores pre-morph keymaps on unmount', function()
@@ -2483,7 +2493,7 @@ describe('Morph', function()
 
         local original_callback = function() return 'original' end
         vim.keymap.set('n', '<Leader>x', original_callback, { buffer = bufnr })
-        assert.is_not_nil(vim.fn.maparg('<Leader>x', 'n', false, true).callback)
+        assert.ok(vim.fn.maparg('<Leader>x', 'n', false, true).callback)
 
         local r = Morph.new(bufnr)
 
@@ -2496,10 +2506,10 @@ describe('Morph', function()
         end
 
         r:mount(h(TestComponent))
-        assert.are.equal('morph', vim.fn.maparg('<Leader>x', 'n', false, true).callback())
+        assert.equal(vim.fn.maparg('<Leader>x', 'n', false, true).callback(), 'morph')
 
         r:unmount()
-        assert.are.equal('original', vim.fn.maparg('<Leader>x', 'n', false, true).callback())
+        assert.equal(vim.fn.maparg('<Leader>x', 'n', false, true).callback(), 'original')
       end)
 
       it('unmounts deeply nested components on state change', function()
@@ -2570,7 +2580,7 @@ describe('Morph', function()
 
           r:mount(h(App))
 
-          assert.are.same({
+          assert.deep_equal(get_lines(), {
             'App Root',
             'Level1: main',
             'Level2: main-sub',
@@ -2580,24 +2590,24 @@ describe('Morph', function()
             'Level2: secondary-sub',
             'Container: Level3: secondary-sub-child1',
             'Level3: secondary-sub-child2',
-          }, get_lines())
+          })
 
           leaked_contexts.app:update { show_nested = false }
 
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child1'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-main-sub-child2'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level2-main-sub'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level1-main'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child1'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child2'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level2-secondary-sub'))
-          assert.is_true(vim.tbl_contains(unmount_calls, 'level1-secondary'))
+          assert.equal(vim.tbl_contains(unmount_calls, 'level3-main-sub-child1'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level3-main-sub-child2'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level2-main-sub'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level1-main'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child1'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level3-secondary-sub-child2'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level2-secondary-sub'), true)
+          assert.equal(vim.tbl_contains(unmount_calls, 'level1-secondary'), true)
 
-          assert.are.same('App Root\nNo nested components', get_text())
+          assert.deep_equal(get_text(), 'App Root\nNo nested components')
 
           unmount_calls = {}
           leaked_contexts.app:update { show_nested = true }
-          assert.are.same({}, unmount_calls)
+          assert.deep_equal(unmount_calls, {})
         end)
       end)
 
@@ -2631,12 +2641,12 @@ describe('Morph', function()
           end
 
           r:mount(h(App))
-          assert.are.same({ 'AB' }, get_lines())
+          assert.deep_equal(get_lines(), { 'AB' })
 
           app_ctx:update { show = false }
 
-          assert.are.same({ 'gone' }, get_lines())
-          assert.are.same({ 'A', 'B' }, unmount_calls)
+          assert.deep_equal(get_lines(), { 'gone' })
+          assert.deep_equal(unmount_calls, { 'A', 'B' })
         end)
       end)
     end)
@@ -2686,22 +2696,22 @@ describe('Morph', function()
           local r = Morph.new(0)
           r:mount(h(App))
 
-          assert.are.same('ab', get_text())
-          assert.are.same({}, illegal_transitions)
+          assert.deep_equal(get_text(), 'ab')
+          assert.deep_equal(illegal_transitions, {})
 
           leaked_ctx:update { items = { 'a' } }
 
-          assert.are.same('a', get_text())
-          assert.are.same({}, illegal_transitions)
+          assert.deep_equal(get_text(), 'a')
+          assert.deep_equal(illegal_transitions, {})
 
           local a_has_unmount = vim.tbl_contains(lifecycle_history['a'] or {}, 'unmount')
-          assert.is_false(a_has_unmount)
+          assert.equal(a_has_unmount, false)
 
           local b_unmounts = vim.tbl_filter(
             function(phase) return phase == 'unmount' end,
             lifecycle_history['b'] or {}
           )
-          assert.are.same(1, #b_unmounts)
+          assert.deep_equal(#b_unmounts, 1)
         end)
       end)
     end)
@@ -2726,8 +2736,8 @@ describe('Morph', function()
         local r = Morph.new()
         r:mount(h(Counter), { debounce_ms = 100 })
 
-        assert.are.same(1, render_count)
-        assert.are.same('Count: 0', get_text())
+        assert.deep_equal(render_count, 1)
+        assert.deep_equal(get_text(), 'Count: 0')
 
         -- Simulate a stream of updates
         ctx_ref:update { count = 1 }
@@ -2735,14 +2745,14 @@ describe('Morph', function()
         ctx_ref:update { count = 3 }
 
         -- State is updated immediately, but no rerender yet
-        assert.are.same(3, ctx_ref.state.count)
-        assert.are.same(1, render_count)
-        assert.are.same('Count: 0', get_text())
+        assert.deep_equal(ctx_ref.state.count, 3)
+        assert.deep_equal(render_count, 1)
+        assert.deep_equal(get_text(), 'Count: 0')
 
         -- Wait for the debounced render to fire AND update the buffer
         local ok = vim.wait(500, function() return get_text():find 'Count: 3' ~= nil end, 10)
-        assert.is_true(ok, 'debounce should render latest state, got: ' .. get_text())
-        assert.are.same('Count: 3', get_text())
+        assert.equal(ok, true, 'debounce should render latest state, got: ' .. get_text())
+        assert.deep_equal(get_text(), 'Count: 3')
       end)
     end)
 
@@ -2761,14 +2771,14 @@ describe('Morph', function()
         local r = Morph.new()
         r:mount(h(Counter), { debounce_ms = 30 })
 
-        assert.are.same(1, render_count)
+        assert.deep_equal(render_count, 1)
 
         ctx_ref:refresh()
         ctx_ref:refresh()
 
         local ok = vim.wait(200, function() return render_count >= 2 end, 5)
-        assert.is_true(ok, 'debounce should fire trailing render after refresh')
-        assert.are.same(2, render_count)
+        assert.equal(ok, true, 'debounce should fire trailing render after refresh')
+        assert.deep_equal(render_count, 2)
       end)
     end)
 
@@ -2787,11 +2797,11 @@ describe('Morph', function()
         local r = Morph.new()
         r:mount(h(Counter)) -- no opts
 
-        assert.are.same(1, render_count)
+        assert.deep_equal(render_count, 1)
         ctx_ref:update { count = 1 }
-        assert.are.same(2, render_count) -- immediate
+        assert.deep_equal(render_count, 2) -- immediate
         ctx_ref:refresh()
-        assert.are.same(3, render_count) -- immediate
+        assert.deep_equal(render_count, 3) -- immediate
       end)
     end)
 
@@ -2834,8 +2844,8 @@ describe('Morph', function()
           local text = get_text()
           return text:find 'Count: 42'
         end, 5)
-        assert.is_true(ok, 'debounced render should use latest state')
-        assert.are.same('Count: 42', get_text())
+        assert.equal(ok, true, 'debounced render should use latest state')
+        assert.deep_equal(get_text(), 'Count: 42')
       end)
     end)
   end)
@@ -2852,7 +2862,7 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount(h(Wrapper, {}, { 'child content' }))
-        assert.are.same('[child content]', get_text())
+        assert.deep_equal(get_text(), '[child content]')
       end)
     end)
 
@@ -2863,7 +2873,7 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount { 'before', h(EmptyComponent), 'after' }
-        assert.are.same('beforeafter', get_text())
+        assert.deep_equal(get_text(), 'beforeafter')
       end)
     end)
 
@@ -2874,7 +2884,7 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount { 'before', h(NilComponent), 'after' }
-        assert.are.same('beforeafter', get_text())
+        assert.deep_equal(get_text(), 'beforeafter')
       end)
     end)
 
@@ -2887,7 +2897,7 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:mount(h(NumberDisplay, { value = 99 }))
-        assert.are.same({ 'The value is: 99' }, get_lines())
+        assert.deep_equal(get_lines(), { 'The value is: 99' })
       end)
     end)
   end)
@@ -2929,27 +2939,27 @@ describe('Morph', function()
         local r = Morph.new(0)
         r:mount(h(App))
 
-        assert.are.same('abc', get_text())
-        assert.are.same(3, mount_count)
-        assert.are.same(0, unmount_count)
+        assert.deep_equal(get_text(), 'abc')
+        assert.deep_equal(mount_count, 3)
+        assert.deep_equal(unmount_count, 0)
 
         -- Same items - no mounts/unmounts
         mount_count = 0
         unmount_count = 0
         leaked_ctx:update { items = { 'a', 'b', 'c' } }
 
-        assert.are.same('abc', get_text())
-        assert.are.same(0, mount_count)
-        assert.are.same(0, unmount_count)
+        assert.deep_equal(get_text(), 'abc')
+        assert.deep_equal(mount_count, 0)
+        assert.deep_equal(unmount_count, 0)
 
         -- Different items - remounting occurs
         mount_count = 0
         unmount_count = 0
         leaked_ctx:update { items = { 'x', 'y' } }
 
-        assert.are.same('xy', get_text())
-        assert.is_true(mount_count > 0)
-        assert.is_true(unmount_count > 0)
+        assert.deep_equal(get_text(), 'xy')
+        assert.equal(mount_count > 0, true)
+        assert.equal(unmount_count > 0, true)
       end)
     end)
 
@@ -2979,20 +2989,20 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount(h(App))
-        assert.are.same('abc', get_text())
+        assert.deep_equal(get_text(), 'abc')
 
         -- Clear events from initial mount
         events = {}
         leaked_ctx:update { items = { 'a', 'b' } }
 
-        assert.are.same('ab', get_text())
+        assert.deep_equal(get_text(), 'ab')
 
         local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, events)
         local unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, events)
 
-        assert.are.same(0, #mounts)
-        assert.are.same(1, #unmounts)
-        assert.are.same('c', unmounts[1].id)
+        assert.deep_equal(#mounts, 0)
+        assert.deep_equal(#unmounts, 1)
+        assert.deep_equal(unmounts[1].id, 'c')
       end)
     end)
 
@@ -3022,20 +3032,20 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount(h(App))
-        assert.are.same('abc', get_text())
+        assert.deep_equal(get_text(), 'abc')
 
         -- Clear events from initial mount
         events = {}
         leaked_ctx:update { items = { 'a', 'c' } }
 
-        assert.are.same('ac', get_text())
+        assert.deep_equal(get_text(), 'ac')
 
         local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, events)
         local unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, events)
 
-        assert.are.same(0, #mounts)
-        assert.are.same(1, #unmounts)
-        assert.are.same('b', unmounts[1].id)
+        assert.deep_equal(#mounts, 0)
+        assert.deep_equal(#unmounts, 1)
+        assert.deep_equal(unmounts[1].id, 'b')
       end)
     end)
 
@@ -3069,14 +3079,14 @@ describe('Morph', function()
         local r = Morph.new(0)
         r:mount(h(App))
 
-        assert.are.same('first', get_text())
-        assert.are.same({ 'first' }, mount_ids)
+        assert.deep_equal(get_text(), 'first')
+        assert.deep_equal(mount_ids, { 'first' })
 
         leaked_ctx:update { show_first = false }
 
-        assert.are.same('second', get_text())
-        assert.are.same({ 'first' }, unmount_ids)
-        assert.are.same({ 'first', 'second' }, mount_ids)
+        assert.deep_equal(get_text(), 'second')
+        assert.deep_equal(unmount_ids, { 'first' })
+        assert.deep_equal(mount_ids, { 'first', 'second' })
       end)
     end)
 
@@ -3109,8 +3119,8 @@ describe('Morph', function()
         local r = Morph.new(0)
         r:mount(h(App))
 
-        assert.are.same('comp: 0', get_text())
-        assert.are.same(1, #lifecycle_events)
+        assert.deep_equal(get_text(), 'comp: 0')
+        assert.deep_equal(#lifecycle_events, 1)
         local original_ctx = component_ctxs['comp']
 
         lifecycle_events = {}
@@ -3122,21 +3132,21 @@ describe('Morph', function()
           lifecycle_events
         )
 
-        assert.are.same(0, #mounts, 'Should not mount when key is same')
-        assert.are.same(0, #unmounts, 'Should not unmount when key is same')
-        assert.are.same(original_ctx, component_ctxs['comp'], 'Context should be preserved')
+        assert.deep_equal(#mounts, 0, 'Should not mount when key is same')
+        assert.deep_equal(#unmounts, 0, 'Should not unmount when key is same')
+        assert.deep_equal(component_ctxs['comp'], original_ctx, 'Context should be preserved')
 
         lifecycle_events = {}
         original_ctx:update { value = 42 }
 
-        assert.are.same('comp: 42', get_text())
+        assert.deep_equal(get_text(), 'comp: 42')
 
         mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, lifecycle_events)
         unmounts = vim.tbl_filter(function(e) return e.phase == 'unmount' end, lifecycle_events)
 
-        assert.are.same(0, #mounts, 'Should not mount when key is same')
-        assert.are.same(0, #unmounts, 'Should not unmount when key is same')
-        assert.are.same(original_ctx, component_ctxs['comp'], 'Context should be preserved')
+        assert.deep_equal(#mounts, 0, 'Should not mount when key is same')
+        assert.deep_equal(#unmounts, 0, 'Should not unmount when key is same')
+        assert.deep_equal(component_ctxs['comp'], original_ctx, 'Context should be preserved')
       end)
     end)
 
@@ -3164,15 +3174,15 @@ describe('Morph', function()
         local r = Morph.new(0)
         r:mount(h(App))
 
-        assert.are.same('a', get_text())
-        assert.are.same(1, #lifecycle_events)
-        assert.are.same('a', lifecycle_events[1].id)
-        assert.are.same('mount', lifecycle_events[1].phase)
+        assert.deep_equal(get_text(), 'a')
+        assert.deep_equal(#lifecycle_events, 1)
+        assert.deep_equal(lifecycle_events[1].id, 'a')
+        assert.deep_equal(lifecycle_events[1].phase, 'mount')
 
         lifecycle_events = {}
         leaked_ctx:update { show_variant = 'b' }
 
-        assert.are.same('b', get_text())
+        assert.deep_equal(get_text(), 'b')
 
         local mounts = vim.tbl_filter(function(e) return e.phase == 'mount' end, lifecycle_events)
         local unmounts = vim.tbl_filter(
@@ -3180,18 +3190,18 @@ describe('Morph', function()
           lifecycle_events
         )
 
-        assert.are.same(
-          1,
+        assert.deep_equal(
           #mounts,
+          1,
           'Should mount new component when key differs (delete+add in levenshtein)'
         )
-        assert.are.same(
-          1,
+        assert.deep_equal(
           #unmounts,
+          1,
           'Should unmount old component when key differs (delete+add in levenshtein)'
         )
-        assert.are.same('b', mounts[1].id)
-        assert.are.same('a', unmounts[1].id)
+        assert.deep_equal(mounts[1].id, 'b')
+        assert.deep_equal(unmounts[1].id, 'a')
       end)
     end)
   end)
@@ -3221,10 +3231,10 @@ describe('Morph', function()
         end
 
         r:mount { h(Root) }
-        assert.are.same('single string', get_text())
+        assert.deep_equal(get_text(), 'single string')
 
         leaked_ctx:update { show_array = true }
-        assert.are.same('item1 item2', get_text())
+        assert.deep_equal(get_text(), 'item1 item2')
       end)
     end)
 
@@ -3248,10 +3258,10 @@ describe('Morph', function()
         end
 
         r:mount { h(Root) }
-        assert.are.same('item1 item2', get_text())
+        assert.deep_equal(get_text(), 'item1 item2')
 
         leaked_ctx:update { show_array = false }
-        assert.are.same('single string', get_text())
+        assert.deep_equal(get_text(), 'single string')
       end)
     end)
 
@@ -3282,12 +3292,12 @@ describe('Morph', function()
         end
 
         r:mount { h(Root) }
-        assert.are.same('child component', get_text())
-        assert.is_false(child_unmounted)
+        assert.deep_equal(get_text(), 'child component')
+        assert.equal(child_unmounted, false)
 
         leaked_ctx:update { show_array = true }
-        assert.are.same('item1 item2', get_text())
-        assert.is_true(child_unmounted)
+        assert.deep_equal(get_text(), 'item1 item2')
+        assert.equal(child_unmounted, true)
       end)
     end)
 
@@ -3328,10 +3338,10 @@ describe('Morph', function()
         end
 
         r:mount { h(Root) }
-        assert.are.same({ 'child:mount' }, events)
+        assert.deep_equal(events, { 'child:mount' })
 
         leaked_ctx:update { show_array = true }
-        assert.are.same({ 'child:mount', 'child:unmount', 'array-item:mount' }, events)
+        assert.deep_equal(events, { 'child:mount', 'child:unmount', 'array-item:mount' })
       end)
     end)
 
@@ -3365,7 +3375,7 @@ describe('Morph', function()
 
       vim.wait(100, function() return schedule_called end)
 
-      assert.is_true(schedule_called, 'the scheduled callback never fired')
+      assert.equal(schedule_called, true, 'the scheduled callback never fired')
       assert.is_nil(render_error, 'render should not error when buffer is deleted')
     end)
 
@@ -3402,7 +3412,7 @@ describe('Morph', function()
 
       vim.wait(100, function() return schedule_called end)
 
-      assert.is_true(schedule_called, 'the scheduled callback never fired')
+      assert.equal(schedule_called, true, 'the scheduled callback never fired')
       assert.is_nil(update_error, 'mount should not error when buffer is deleted')
     end)
   end)
@@ -3420,7 +3430,7 @@ describe('Morph', function()
           '\nline 3',
         },
       }
-      assert.are.same('line 1\nstyled\nline 3', result)
+      assert.deep_equal(result, 'line 1\nstyled\nline 3')
     end)
 
     it('handles arrays with nil holes in markup_to_lines', function()
@@ -3431,7 +3441,7 @@ describe('Morph', function()
           'after',
         },
       }
-      assert.are.same({ 'beforeafter' }, lines)
+      assert.deep_equal(lines, { 'beforeafter' })
     end)
 
     it('handles multiple nil holes in markup_to_lines', function()
@@ -3444,7 +3454,7 @@ describe('Morph', function()
           nil,
         },
       }
-      assert.are.same({ 'ab' }, lines)
+      assert.deep_equal(lines, { 'ab' })
     end)
 
     it('handles conditional rendering with nil holes', function()
@@ -3466,13 +3476,13 @@ describe('Morph', function()
 
         local r = Morph.new(0)
         r:mount(h(App))
-        assert.are.same({ 'first', '', 'last' }, get_lines())
+        assert.deep_equal(get_lines(), { 'first', '', 'last' })
 
         leaked_ctx:update { show_optional = true }
-        assert.are.same({ 'first', 'optional', 'last' }, get_lines())
+        assert.deep_equal(get_lines(), { 'first', 'optional', 'last' })
 
         leaked_ctx:update { show_optional = false }
-        assert.are.same({ 'first', '', 'last' }, get_lines())
+        assert.deep_equal(get_lines(), { 'first', '', 'last' })
       end)
     end)
 
@@ -3480,12 +3490,12 @@ describe('Morph', function()
       with_buf({}, function()
         local r = Morph.new(0)
         r:render { 'initial content' }
-        assert.are.same('initial content', get_text())
+        assert.deep_equal(get_text(), 'initial content')
 
         vim.api.nvim_buf_set_lines(0, 0, -1, false, { 'external change' })
 
         r:render { 'new morph content' }
-        assert.are.same('new morph content', get_text())
+        assert.deep_equal(get_text(), 'new morph content')
       end)
     end)
   end)
@@ -3506,12 +3516,12 @@ describe('Morph', function()
         enter_mode_fn()
 
         local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-        assert.are.same(mode_char, initial_mode)
+        assert.deep_equal(initial_mode, mode_char)
 
         r:render { h('text', {}, 'updated content') }
 
         local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-        assert.are.same(mode_char, final_mode)
+        assert.deep_equal(final_mode, mode_char)
 
         exit_mode_fn()
       end)
@@ -3537,12 +3547,12 @@ describe('Morph', function()
         set_cursor { 1, 0 }
         vim.cmd.normal { args = { 'V' }, bang = true }
         local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-        assert.are.same('V', initial_mode)
+        assert.deep_equal(initial_mode, 'V')
 
         r:render { h('text', {}, 'updated line 1\nupdated line 2') }
 
         local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-        assert.are.same('V', final_mode)
+        assert.deep_equal(final_mode, 'V')
 
         vim.cmd.normal { args = { '<Esc>' }, bang = true }
       end)
@@ -3563,21 +3573,21 @@ describe('Morph', function()
       set_cursor { 1, 0 }
       vim.cmd.normal { args = { 'v' }, bang = true }
       local initial_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-      assert.are.same('v', initial_mode)
+      assert.deep_equal(initial_mode, 'v')
 
-      assert.are.same(focus_win, vim.api.nvim_get_current_win())
-      assert.are.same(focus_buf, vim.api.nvim_get_current_buf())
+      assert.deep_equal(vim.api.nvim_get_current_win(), focus_win)
+      assert.deep_equal(vim.api.nvim_get_current_buf(), focus_buf)
 
       r:render { h('text', {}, 'updated morph content') }
 
       local final_mode = vim.api.nvim_get_mode().mode:sub(1, 1)
-      assert.are.same('v', final_mode)
+      assert.deep_equal(final_mode, 'v')
 
-      assert.are.same(focus_win, vim.api.nvim_get_current_win())
-      assert.are.same(focus_buf, vim.api.nvim_get_current_buf())
+      assert.deep_equal(vim.api.nvim_get_current_win(), focus_win)
+      assert.deep_equal(vim.api.nvim_get_current_buf(), focus_buf)
 
       local morph_lines = vim.api.nvim_buf_get_lines(morph_buf, 0, -1, false)
-      assert.are.same({ 'updated morph content' }, morph_lines)
+      assert.deep_equal(morph_lines, { 'updated morph content' })
 
       vim.cmd.normal { args = { '<Esc>' }, bang = true }
       pcall(vim.api.nvim_win_close, focus_win, true)
@@ -3592,26 +3602,26 @@ describe('Morph', function()
 
   describe('Pos00 comparisons', function()
     it('compares with __lt correctly', function()
-      assert.is_true(Pos00.new(0, 0) < Pos00.new(0, 1))
-      assert.is_true(Pos00.new(0, 0) < Pos00.new(1, 0))
-      assert.is_true(Pos00.new(0, 5) < Pos00.new(1, 0))
-      assert.is_false(Pos00.new(1, 0) < Pos00.new(0, 5))
-      assert.is_false(Pos00.new(0, 0) < Pos00.new(0, 0))
+      assert.equal(Pos00.new(0, 0) < Pos00.new(0, 1), true)
+      assert.equal(Pos00.new(0, 0) < Pos00.new(1, 0), true)
+      assert.equal(Pos00.new(0, 5) < Pos00.new(1, 0), true)
+      assert.equal(Pos00.new(1, 0) < Pos00.new(0, 5), false)
+      assert.equal(Pos00.new(0, 0) < Pos00.new(0, 0), false)
     end)
 
     it('compares greater-than correctly (routes through __lt)', function()
-      assert.is_true(Pos00.new(0, 1) > Pos00.new(0, 0))
-      assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 0))
-      assert.is_true(Pos00.new(1, 0) > Pos00.new(0, 5))
-      assert.is_false(Pos00.new(0, 5) > Pos00.new(1, 0))
-      assert.is_false(Pos00.new(0, 0) > Pos00.new(0, 0))
+      assert.equal(Pos00.new(0, 1) > Pos00.new(0, 0), true)
+      assert.equal(Pos00.new(1, 0) > Pos00.new(0, 0), true)
+      assert.equal(Pos00.new(1, 0) > Pos00.new(0, 5), true)
+      assert.equal(Pos00.new(0, 5) > Pos00.new(1, 0), false)
+      assert.equal(Pos00.new(0, 0) > Pos00.new(0, 0), false)
     end)
 
     it('compares with __eq correctly', function()
-      assert.is_true(Pos00.new(0, 0) == Pos00.new(0, 0))
-      assert.is_true(Pos00.new(5, 10) == Pos00.new(5, 10))
-      assert.is_false(Pos00.new(0, 0) == Pos00.new(0, 1))
-      assert.is_false(Pos00.new(0, 0) == Pos00.new(1, 0))
+      assert.equal(Pos00.new(0, 0) == Pos00.new(0, 0), true)
+      assert.equal(Pos00.new(5, 10) == Pos00.new(5, 10), true)
+      assert.equal(Pos00.new(0, 0) == Pos00.new(0, 1), false)
+      assert.equal(Pos00.new(0, 0) == Pos00.new(1, 0), false)
     end)
   end)
 
@@ -3631,7 +3641,7 @@ describe('Morph', function()
 
       -- #sparse_from might return 1 (Lua sees no contiguous sequence beyond index 1)
       -- table.maxn(sparse_from) correctly returns 3
-      assert.are.same(3, table.maxn(sparse_from), 'test setup: maxn should be 3')
+      assert.deep_equal(table.maxn(sparse_from), 3, 'test setup: maxn should be 3')
 
       --- @diagnostic disable-next-line: assign-type-mismatch
       local changes = levenshtein { from = sparse_from, to = sparse_to }
@@ -3641,112 +3651,11 @@ describe('Morph', function()
       local change_changes = vim.tbl_filter(function(c) return c.kind == 'change' end, changes)
 
       -- We expect 2 changes: 'a' -> 'x' at index 1, and 'c' -> 'z' at index 3
-      assert.are.same(
-        2,
+      assert.deep_equal(
         #change_changes,
+        2,
         'should produce changes for both indices 1 and 3, not just index 1'
       )
-    end)
-  end)
-
-  ------------------------------------------------------------------------------
-  -- _TEST.ASSERT.DIFF
-  ------------------------------------------------------------------------------
-
-  describe('morph._test.assert.diff', function()
-    local diff = _assert.diff
-
-    it(
-      'renders identical lists as context only',
-      function()
-        assert.are.same(
-          table.concat({ '--- got', '+++ want', '  a', '  b', '  c' }, '\n'),
-          diff({ 'a', 'b', 'c' }, { 'a', 'b', 'c' })
-        )
-      end
-    )
-
-    it(
-      'renders a substitution as delete then add with context',
-      function()
-        assert.are.same(
-          table.concat({ '--- got', '+++ want', '  a', '- b', '+ x', '  c' }, '\n'),
-          diff({ 'a', 'b', 'c' }, { 'a', 'x', 'c' })
-        )
-      end
-    )
-
-    it(
-      'renders an insertion with context',
-      function()
-        assert.are.same(
-          table.concat({ '--- got', '+++ want', '  a', '+ b', '  c' }, '\n'),
-          diff({ 'a', 'c' }, { 'a', 'b', 'c' })
-        )
-      end
-    )
-
-    it(
-      'renders a deletion with context',
-      function()
-        assert.are.same(
-          table.concat({ '--- got', '+++ want', '  a', '- b', '  c' }, '\n'),
-          diff({ 'a', 'b', 'c' }, { 'a', 'c' })
-        )
-      end
-    )
-
-    it(
-      'renders an empty got list',
-      function()
-        assert.are.same(table.concat({ '--- got', '+++ want', '+ a' }, '\n'), diff({}, { 'a' }))
-      end
-    )
-  end)
-
-  describe('morph._test.assert.assert_deep_equal', function()
-    local assert_deep_equal = _assert.assert_deep_equal
-
-    it('passes for deeply equal scalars', function()
-      assert_deep_equal(42, 42)
-      assert_deep_equal('hello', 'hello')
-      assert_deep_equal(true, true)
-    end)
-
-    it(
-      'passes for deeply equal nested tables',
-      function() assert_deep_equal({ a = 1, b = { c = { 2, 3 } } }, { a = 1, b = { c = { 2, 3 } } }) end
-    )
-
-    it(
-      'passes for maps regardless of key order',
-      function() assert_deep_equal({ a = 1, b = 2 }, { b = 2, a = 1 }) end
-    )
-
-    it('errors on scalar mismatch', function()
-      local ok, err = pcall(assert_deep_equal, 1, 2)
-      assert.is_false(ok)
-      assert.matches('^assert_deep_equal failed', err)
-      assert.matches('%-%-%- got', err)
-      assert.matches('%+%+%+ want', err)
-    end)
-
-    it('errors on nested table mismatch', function()
-      local ok, err = pcall(assert_deep_equal, { a = { b = 1 } }, { a = { b = 2 } })
-      assert.is_false(ok)
-      assert.matches('%+%s+b = 2', err)
-    end)
-
-    it('errors when array lengths differ', function()
-      local ok, err = pcall(assert_deep_equal, { 1, 2 }, { 1, 2, 3 })
-      assert.is_false(ok)
-      assert.matches('%+ { 1, 2, 3 }', err)
-    end)
-
-    it('includes the custom message when provided', function()
-      local ok, err = pcall(assert_deep_equal, { 1 }, { 2 }, 'values should match')
-      assert.is_false(ok)
-      assert.matches('^assert_deep_equal failed: values should match', err)
     end)
   end)
 
@@ -3758,7 +3667,7 @@ describe('Morph', function()
     local is_textlock = Morph._is_textlock
 
     it('returns false when not in textlock', function()
-      with_buf({}, function() assert.is_false(is_textlock()) end)
+      with_buf({}, function() assert.equal(is_textlock(), false) end)
     end)
 
     it('returns true during expression mapping', function()
@@ -3771,7 +3680,7 @@ describe('Morph', function()
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<F12>', true, false, true), 'x', false)
 
       vim.keymap.del('n', '<F12>')
-      assert.is_true(result)
+      assert.equal(result, true)
     end)
 
     it('returns true during foldexpr evaluation', function()
@@ -3791,7 +3700,7 @@ describe('Morph', function()
       _G._test_foldexpr_textlock = nil
       vim.cmd.bdelete { bang = true }
 
-      assert.is_true(result)
+      assert.equal(result, true)
     end)
 
     it('returns true during vim.in_fast_event (luv callback)', function()
@@ -3804,7 +3713,7 @@ describe('Morph', function()
 
       vim.wait(100, function() return result ~= nil end)
 
-      assert.is_true(result)
+      assert.equal(result, true)
     end)
 
     it('preserves window after check', function()
@@ -3812,7 +3721,7 @@ describe('Morph', function()
         local win_before = vim.api.nvim_get_current_win()
         is_textlock()
         local win_after = vim.api.nvim_get_current_win()
-        assert.are.same(win_before, win_after)
+        assert.deep_equal(win_after, win_before)
       end)
     end)
   end)
@@ -3831,7 +3740,7 @@ describe('Morph', function()
 
       -- First render: non-empty content
       r:render { 'First' }
-      assert.are.same({ 'First' }, get_lines())
+      assert.deep_equal(get_lines(), { 'First' })
 
       -- Second render: empty tree (may or may not clear buffer)
       r:render {}
@@ -3840,8 +3749,8 @@ describe('Morph', function()
       -- The key assertion: no blank line should appear after the content
       r:render { 'Second' }
       local lines = get_lines()
-      assert.are.same(1, #lines, 'Buffer should have exactly 1 line, no blank lines')
-      assert.are.same('Second', lines[1])
+      assert.deep_equal(#lines, 1, 'Buffer should have exactly 1 line, no blank lines')
+      assert.deep_equal(lines[1], 'Second')
     end)
   end)
 
@@ -3855,13 +3764,13 @@ describe('Morph', function()
 
   describe('_is_buffer_api_ready', function()
     it('returns true for normal buffers after VimEnter', function()
-      with_buf({ 'content' }, function() assert.is_true(Morph._is_buffer_api_ready(0)) end)
+      with_buf({ 'content' }, function() assert.equal(Morph._is_buffer_api_ready(0), true) end)
     end)
 
     it('returns true for scratch buffers (no filename)', function()
       local buf = vim.api.nvim_create_buf(false, true)
       vim.api.nvim_buf_set_lines(buf, 0, -1, false, { 'scratch' })
-      assert.is_true(Morph._is_buffer_api_ready(buf))
+      assert.equal(Morph._is_buffer_api_ready(buf), true)
       vim.api.nvim_buf_delete(buf, { force = true })
     end)
   end)
@@ -3916,7 +3825,7 @@ end, 100)
       or ''
     vim.fn.delete(tmpdir, 'rf')
 
-    assert.are.same('RENDERED', result)
+    assert.deep_equal(result, 'RENDERED')
   end)
 end)
 
@@ -3928,22 +3837,22 @@ describe('RenderError', function()
   it('produces expected string from tostring with render trace', function()
     local RenderError = Morph.RenderError
     local err = RenderError.new('msg', 'Comp', 'mount', { 'Root', 'Middle' })
-    assert.are.same('Error in Comp@mount: msg\nRender trace: Root > Middle', tostring(err))
+    assert.deep_equal(tostring(err), 'Error in Comp@mount: msg\nRender trace: Root > Middle')
   end)
 
   it('produces expected string without render trace', function()
     local RenderError = Morph.RenderError
     local err = RenderError.new('msg', 'Comp', 'mount', {})
-    assert.are.same('Error in Comp@mount: msg', tostring(err))
+    assert.deep_equal(tostring(err), 'Error in Comp@mount: msg')
   end)
 
   it('exposes component_name and phase fields directly', function()
     local RenderError = Morph.RenderError
     local err = RenderError.new('msg', 'Comp', 'update', { 'Root' })
-    assert.are.same('Comp', err.component_name)
-    assert.are.same('update', err.phase)
-    assert.are.same('msg', err.message)
-    assert.are.same({ 'Root' }, err.render_trace)
+    assert.deep_equal(err.component_name, 'Comp')
+    assert.deep_equal(err.phase, 'update')
+    assert.deep_equal(err.message, 'msg')
+    assert.deep_equal(err.render_trace, { 'Root' })
   end)
 
   it('nested component error has string names in render_trace', function()
@@ -3970,9 +3879,13 @@ describe('RenderError', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount(h(Root)) end)
-      assert.is_false(ok)
-      assert.is_true(getmetatable(err) == RenderError, 'should be a RenderError object')
-      assert.are.same({ 'Root', 'Middle' }, err.render_trace, 'render_trace should be string names')
+      assert.equal(ok, false)
+      assert.equal(getmetatable(err) == RenderError, true, 'should be a RenderError object')
+      assert.deep_equal(
+        err.render_trace,
+        { 'Root', 'Middle' },
+        'render_trace should be string names'
+      )
     end)
   end)
 end)
@@ -3987,8 +3900,8 @@ describe('error messages', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount(h(AnonymousComponent)) end)
-      assert.is_false(ok)
-      assert.is_not_nil(
+      assert.equal(ok, false)
+      assert.ok(
         tostring(err):match 'Error in <anonymous>@mount',
         'expected <anonymous> in error: ' .. tostring(err)
       )
@@ -4015,13 +3928,13 @@ describe('error messages', function()
       r:mount(h(UpdatingComponent))
       -- Trigger update which throws
       local ok, err = pcall(function() captured_ctx:update { count = 1 } end)
-      assert.is_false(ok)
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'UpdatingComponent@update',
+      assert.equal(ok, false)
+      assert.ok(
+        tostring(err):match 'UpdatingComponent@update',
         'expected component name and update phase in error: ' .. vim.inspect(err)
       )
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'update error',
+      assert.ok(
+        tostring(err):match 'update error',
         'expected original error message: ' .. vim.inspect(err)
       )
     end)
@@ -4053,13 +3966,13 @@ describe('error messages', function()
       r:mount(h(App))
       -- Toggle show to false, triggering unmount of UnmountingComponent
       local ok, err = pcall(function() parent_ctx:update { show = false } end)
-      assert.is_false(ok, 'unmount should fail. err=' .. tostring(err))
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'UnmountingComponent@unmount',
+      assert.equal(ok, false, 'unmount should fail. err=' .. tostring(err))
+      assert.ok(
+        tostring(err):match 'UnmountingComponent@unmount',
         'expected component name and unmount phase in error: ' .. vim.inspect(err)
       )
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'unmount error',
+      assert.ok(
+        tostring(err):match 'unmount error',
         'expected original error message: ' .. vim.inspect(err)
       )
     end)
@@ -4087,13 +4000,13 @@ describe('error messages', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount(h(Root)) end)
-      assert.is_false(ok)
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'Error in DeepChild@mount',
+      assert.equal(ok, false)
+      assert.ok(
+        tostring(err):match 'Error in DeepChild@mount',
         'expected error in DeepChild: ' .. vim.inspect(err)
       )
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'Render trace: Root > Middle$',
+      assert.ok(
+        tostring(err):match 'Render trace: Root > Middle$',
         'expected render trace Root > Middle: ' .. vim.inspect(err)
       )
     end)
@@ -4109,9 +4022,9 @@ describe('error messages', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount(h(NamedComponent)) end)
-      assert.is_false(ok)
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'MyCustomName@mount',
+      assert.equal(ok, false)
+      assert.ok(
+        tostring(err):match 'MyCustomName@mount',
         'expected custom name: ' .. vim.inspect(err)
       )
     end)
@@ -4127,13 +4040,13 @@ describe('error messages', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount(h(CrashyComponent)) end)
-      assert.is_false(ok, 'mount should fail. err=' .. tostring(err))
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'CrashyComponent@mount',
+      assert.equal(ok, false, 'mount should fail. err=' .. tostring(err))
+      assert.ok(
+        tostring(err):match 'CrashyComponent@mount',
         'should include component name and mount phase. err=' .. vim.inspect(err)
       )
-      assert.is_not_nil(
-        type(err) == 'string' and err:match 'something went wrong',
+      assert.ok(
+        tostring(err):match 'something went wrong',
         'should include original error message. err=' .. vim.inspect(err)
       )
     end)
@@ -4146,15 +4059,12 @@ describe('raw component function in tree', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:mount { MyComponent } end)
-      assert.is_false(ok)
-      assert.is_not_nil(
+      assert.equal(ok, false)
+      assert.ok(
         tostring(err):match '<anonymous>',
         'expected <anonymous> in error: ' .. tostring(err)
       )
-      assert.is_not_nil(
-        tostring(err):match 'Wrap it',
-        'expected suggestion in error: ' .. tostring(err)
-      )
+      assert.ok(tostring(err):match 'Wrap it', 'expected suggestion in error: ' .. tostring(err))
     end)
   end)
 
@@ -4163,15 +4073,12 @@ describe('raw component function in tree', function()
     with_buf({}, function()
       local r = Morph.new(0)
       local ok, err = pcall(function() r:render { MyComponent } end)
-      assert.is_false(ok)
-      assert.is_not_nil(
+      assert.equal(ok, false)
+      assert.ok(
         tostring(err):match '<anonymous>',
         'expected <anonymous> in error: ' .. tostring(err)
       )
-      assert.is_not_nil(
-        tostring(err):match 'Wrap it',
-        'expected suggestion in error: ' .. tostring(err)
-      )
+      assert.ok(tostring(err):match 'Wrap it', 'expected suggestion in error: ' .. tostring(err))
     end)
   end)
 
@@ -4181,15 +4088,12 @@ describe('raw component function in tree', function()
       local ok, err = pcall(function()
         r:mount { function(_ctx) return '' end }
       end)
-      assert.is_false(ok)
-      assert.is_not_nil(
+      assert.equal(ok, false)
+      assert.ok(
         tostring(err):match '<anonymous>',
         'expected <anonymous> in error: ' .. tostring(err)
       )
-      assert.is_not_nil(
-        tostring(err):match 'Wrap it',
-        'expected suggestion in error: ' .. tostring(err)
-      )
+      assert.ok(tostring(err):match 'Wrap it', 'expected suggestion in error: ' .. tostring(err))
     end)
   end)
 end)
@@ -4215,8 +4119,8 @@ describe('error boundaries', function()
           }
         end
       )
-      assert.is_true(ok, 'mount should not throw: ' .. tostring(err))
-      assert.are.same('Oops', get_text())
+      assert.equal(ok, true, 'mount should not throw: ' .. tostring(err))
+      assert.deep_equal(get_text(), 'Oops')
     end)
   end)
 
@@ -4239,10 +4143,10 @@ describe('error boundaries', function()
       r:mount(h(Morph.ErrorBoundary, { fallback = h('text', {}, 'Fallback') }, {
         h(CrashyComponent),
       }))
-      assert.are.same('normal', get_text())
+      assert.deep_equal(get_text(), 'normal')
 
       child_ctx:update {}
-      assert.are.same('Fallback', get_text())
+      assert.deep_equal(get_text(), 'Fallback')
     end)
   end)
 
@@ -4272,10 +4176,10 @@ describe('error boundaries', function()
     with_buf({}, function()
       local r = Morph.new(0)
       r:mount(h(App))
-      assert.are.same('child', get_text())
+      assert.deep_equal(get_text(), 'child')
 
       parent_ctx:update { show = false }
-      assert.are.same('Fallback', get_text())
+      assert.deep_equal(get_text(), 'Fallback')
     end)
   end)
 
@@ -4289,7 +4193,7 @@ describe('error boundaries', function()
       }, {
         h(CrashyComponent),
       }))
-      assert.are.same('Custom Fallback', get_text())
+      assert.deep_equal(get_text(), 'Custom Fallback')
     end)
   end)
 
@@ -4310,8 +4214,8 @@ describe('error boundaries', function()
       }, {
         h(CrashyComponent),
       }))
-      assert.is_not_nil(captured_error, 'error_info should be passed to fallback')
-      assert.is_not_nil(
+      assert.ok(captured_error, 'error_info should be passed to fallback')
+      assert.ok(
         captured_error.message:match 'boom',
         'fallback should receive error message containing original error'
       )
@@ -4344,13 +4248,13 @@ describe('error boundaries', function()
     with_buf({}, function()
       local r = Morph.new(0)
       r:mount(h(App))
-      assert.is_not_nil(captured_error)
-      assert.are.same('CrashyComponent', captured_error.component_name)
-      assert.are.same('mount', captured_error.phase)
-      assert.is_not_nil(captured_error.message:match 'boom')
-      assert.are.same(
-        { 'App', 'ErrorBoundary' },
+      assert.ok(captured_error)
+      assert.deep_equal(captured_error.component_name, 'CrashyComponent')
+      assert.deep_equal(captured_error.phase, 'mount')
+      assert.ok(captured_error.message:match 'boom')
+      assert.deep_equal(
         captured_error.render_trace,
+        { 'App', 'ErrorBoundary' },
         'render_trace should be string names of ancestors'
       )
     end)
@@ -4366,8 +4270,8 @@ describe('error boundaries', function()
         h(CrashyComponent),
       }))
       local text = get_text()
-      assert.is_not_nil(text:match 'Error', 'should show Error heading')
-      assert.is_not_nil(text:match 'default ui test', 'should show error message')
+      assert.ok(text:match 'Error', 'should show Error heading')
+      assert.ok(text:match 'default ui test', 'should show error message')
     end)
   end)
 
@@ -4383,7 +4287,7 @@ describe('error boundaries', function()
       r:mount(h(Morph.ErrorBoundary, {}, {
         h(StableComponent),
       }))
-      assert.are.same('hello', get_text())
+      assert.deep_equal(get_text(), 'hello')
     end)
   end)
 
@@ -4419,11 +4323,11 @@ describe('error boundaries', function()
     with_buf({}, function()
       local r = Morph.new(0)
       r:mount(h(App))
-      assert.are.same('Fallback', get_text())
+      assert.deep_equal(get_text(), 'Fallback')
 
       -- Retry: child should succeed on second attempt (new ctx, fresh mount)
       boundary_ctx:update {}
-      assert.are.same('attempt 2', get_text())
+      assert.deep_equal(get_text(), 'attempt 2')
     end)
   end)
 
@@ -4443,7 +4347,7 @@ describe('error boundaries', function()
           h(InnerCrashy),
         }),
       }))
-      assert.are.same('Inner Caught', get_text())
+      assert.deep_equal(get_text(), 'Inner Caught')
     end)
   end)
 end)
@@ -4491,7 +4395,7 @@ describe('ctx:update during expr mappings', function()
       -- The handler should have caught any E565 internally and still
       -- completed. If ctx:update threw E565, caught_error is non-nil.
       assert.is_nil(caught_error, 'ctx:update threw: ' .. tostring(caught_error))
-      assert.are.same({ 2 }, navigated, 'handler should have updated state to page 2')
+      assert.deep_equal(navigated, { 2 }, 'handler should have updated state to page 2')
     end)
   end)
 end)
