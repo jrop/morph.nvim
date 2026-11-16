@@ -1576,7 +1576,9 @@ end
 --- @param bufnr integer
 --- @param old_lines string[]?
 --- @param new_lines string[]
-function Morph.patch_lines(bufnr, old_lines, new_lines)
+--- @param opts? { first?: boolean } first: this is the render that replaces the
+---   buffer's initial scaffolding, so the view is restored afterwards.
+function Morph.patch_lines(bufnr, old_lines, new_lines, opts)
   old_lines = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
   local max_lines = math.max(#old_lines, #new_lines)
@@ -1602,6 +1604,25 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
     from = middle_lines(old_lines, prefix, suffix),
     to = middle_lines(new_lines, prefix, suffix),
   }
+
+  -- A write that inserts above the cursor leaves the cursor at the end of the
+  -- inserted block, and nvim scrolls to keep the cursor visible. Between
+  -- renders that is exactly right -- the cursor should stay on the text it was
+  -- on -- but the first render has no such text to stay on: whatever the buffer
+  -- held is scaffolding the render is about to replace, so following it parks
+  -- the cursor (and the viewport) at the bottom of the document just rendered.
+  --
+  -- The guard is deliberately narrow. It applies to the first render only, and
+  -- even then only puts the viewport back when the writes actually pushed the
+  -- cursor out of the range that was on screen. A cursor that merely moved
+  -- within the visible window is left exactly where nvim put it, so short
+  -- documents and ordinary first renders keep their normal cursor placement.
+  local visible_top, visible_bottom = nil, nil
+  if opts and opts.first and vim.fn.bufwinid(bufnr) == vim.api.nvim_get_current_win() then
+    local view = vim.fn.winsaveview()
+    visible_top = view.topline
+    visible_bottom = view.topline + vim.api.nvim_win_get_height(0) - 1
+  end
 
   for _, change in ipairs(line_changes) do
     local line0 = prefix + change.index - 1
@@ -1635,6 +1656,23 @@ function Morph.patch_lines(bufnr, old_lines, new_lines)
           vim.api.nvim_buf_set_text(bufnr, line0, col0, line0, col0 + 1, { char_change.to })
         end
       end
+    end
+  end
+
+  -- Put the scroll back only if the writes pushed the cursor outside the range
+  -- that was visible before them. The cursor is then returned to the line it
+  -- started on, but its column is left alone: only the line was ever at issue,
+  -- and a restore that also rewrote the column would move the cursor on
+  -- documents that never scrolled at all. Restoring the whole saved view is not
+  -- an option -- it would undo a cursor that legitimately moved within the
+  -- window, which is the behaviour ordinary renders depend on.
+  if visible_top and visible_bottom then
+    local row = vim.api.nvim_win_get_cursor(0)[1]
+    if row < visible_top or row > visible_bottom then
+      local col = vim.api.nvim_win_get_cursor(0)[2]
+      vim.api.nvim_win_set_cursor(0, { visible_top, col })
+      local view = vim.fn.winsaveview()
+      vim.fn.winrestview { topline = visible_top, leftcol = view.leftcol }
     end
   end
 end
@@ -1906,6 +1944,10 @@ function Morph:render(tree)
   -- Update buffer text with minimal edits
   self.text_content = { lines = lines, tags_to_extmark_ids = {}, extmark_ids_to_tag = {} }
 
+  -- The first render replaces whatever scaffolding the buffer started with, so
+  -- there is no text for the cursor to legitimately follow; see patch_lines.
+  local first_render = self.changedtick == nil
+
   -- Clear extmarks BEFORE patching to avoid Neovim's auto-deletion overhead
   -- when lines with extmarks are deleted by patch_lines
   vim.api.nvim_buf_clear_namespace(self.bufnr, self.ns, 0, -1)
@@ -1913,7 +1955,7 @@ function Morph:render(tree)
   self.changing = true
   -- A nil base makes patch_lines read the live buffer; a recorded base is the
   -- snapshot the tick proved current, so the fetch is skipped.
-  Morph.patch_lines(self.bufnr, diff_base, lines)
+  Morph.patch_lines(self.bufnr, diff_base, lines, { first = first_render })
   self.changing = false
   self.changedtick = vim.b[self.bufnr].changedtick
 

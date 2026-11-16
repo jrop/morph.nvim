@@ -339,6 +339,41 @@ describe('Morph', function()
       end)
     end)
 
+    it('restores the view on the first render only', function()
+      -- A write that inserts above the cursor leaves the cursor at the end of
+      -- the inserted block, and nvim scrolls to follow it. On the first render
+      -- the buffer holds scaffolding that is about to be replaced wholesale,
+      -- so following it parks the cursor at the bottom of the new document and
+      -- the viewport with it. Later renders must keep nvim's own behaviour: the
+      -- cursor stays on the text it was on, which is what an incremental edit
+      -- wants.
+      with_buf({ '' }, function()
+        local new = {}
+        for i = 1, 60 do
+          new[i] = 'line ' .. i
+        end
+
+        Morph.patch_lines(0, { '' }, new, { first = true })
+        assert.deep_equal(get_lines(), new)
+        assert.deep_equal(vim.api.nvim_win_get_cursor(0)[1], 1, 'the first render must not scroll')
+
+        -- A later render grows the document below the cursor. nvim moves the
+        -- cursor onto the line it was on, and patch_lines must not undo that.
+        set_cursor { 10, 0 }
+        local grown = vim.deepcopy(new)
+        for i = 1, 20 do
+          grown[#grown + 1] = 'appended ' .. i
+        end
+        Morph.patch_lines(0, new, grown)
+        assert.deep_equal(get_lines(), grown)
+        assert.deep_equal(
+          vim.api.nvim_win_get_cursor(0)[1],
+          10,
+          'a later render must not move the cursor'
+        )
+      end)
+    end)
+
     it('uses full buffer replace when line count delta exceeds threshold', function()
       with_buf({}, function()
         local old = {}
