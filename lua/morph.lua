@@ -196,12 +196,35 @@ end
 local h = setmetatable({}, {
   -- h('text', attrs, children) - create a tag directly
   __call = function(_, name, attributes, children)
+    -- Validate at the call site: a nameless tag is otherwise only rejected in
+    -- the reconciler's key builder, whose error names neither h() nor the bad
+    -- argument. The usual cause is a component that resolved to nil (e.g.
+    -- `h(Morph.Img, ...)` when the loaded morph predates Img), which is
+    -- fixable only where the call was written.
+    if type(name) ~= 'string' and not vim.is_callable(name) then
+      local got = name == nil and 'nil (is the component nil?)' or type(name)
+      error('morph.nvim: h(): name must be a string or a component function, got ' .. got, 2)
+    end
+    if attributes ~= nil and type(attributes) ~= 'table' then
+      error('morph.nvim: h(): attributes must be a table, got ' .. type(attributes), 2)
+    end
     return { kind = 'tag', name = name, attributes = attributes or {}, children = children or {} }
   end,
 
   -- h.Comment(attrs, children) - shorthand for h('text', { hl = 'Comment', ...attrs }, children)
   __index = function(self, highlight_group)
     return function(attributes, children)
+      -- Checked before the merge loop, which would otherwise fail with "bad
+      -- argument to 'pairs'" and hide which builder was called.
+      if attributes ~= nil and type(attributes) ~= 'table' then
+        error(
+          'morph.nvim: h.'
+            .. highlight_group
+            .. '(): attributes must be a table, got '
+            .. type(attributes),
+          2
+        )
+      end
       attributes = attributes or {}
       local merged_attrs = { hl = highlight_group }
       for k, v in pairs(attributes) do

@@ -4053,6 +4053,45 @@ describe('error messages', function()
   end)
 end)
 
+describe('h() argument validation', function()
+  it('rejects a nil name at the h() call site', function()
+    local ok, err = pcall(h, nil)
+    assert.equal(ok, false, 'h(nil) should raise instead of returning a nameless tag')
+    assert.ok(tostring(err):match 'h%(%)', 'expected the error to name h(): ' .. tostring(err))
+    assert.ok(
+      tostring(err):match 'nil',
+      'expected the error to report the nil name: ' .. tostring(err)
+    )
+  end)
+
+  it('rejects a name that is neither a string nor a component function', function()
+    local ok, err = pcall(h, {})
+    assert.equal(ok, false, 'h({}) should raise')
+    assert.ok(
+      tostring(err):match 'string or a component function',
+      'expected the error to name the accepted kinds: ' .. tostring(err)
+    )
+  end)
+
+  it('rejects non-table attributes', function()
+    local ok, err = pcall(h, 'text', 'not-a-table')
+    assert.equal(ok, false, 'h(name, "string") should raise')
+    assert.ok(
+      tostring(err):match 'attributes',
+      'expected the error to name attributes: ' .. tostring(err)
+    )
+  end)
+
+  it('names the highlight group when the shorthand gets non-table attributes', function()
+    local ok, err = pcall(h.Comment, 'not-a-table')
+    assert.equal(ok, false, 'h.Comment("string") should raise')
+    assert.ok(
+      tostring(err):match 'h%.Comment%(%)',
+      'expected the error to name the builder that was called: ' .. tostring(err)
+    )
+  end)
+end)
+
 describe('raw component function in tree', function()
   it('reports raw component function in mount tree', function()
     local function MyComponent(_ctx) return 'hello' end
