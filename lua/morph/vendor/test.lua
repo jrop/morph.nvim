@@ -461,8 +461,8 @@ function M.main(argv)
   if parsed['--coverage'] then coverage.start() end
   local report = __mods._test_runner("test.runner").run(paths, { filter = parsed['--filter'], paint = paint })
   if parsed['--coverage'] then
-    coverage.stop()
-    coverage.report(coverage_paths(), paint)
+    local run = coverage.stop()
+    coverage.report(run, coverage_paths(), paint)
   end
   return report.counts.failed > 0 and 1 or 0
 end
@@ -503,32 +503,52 @@ __mods._test_coverage = function(...)
   return __load("test.coverage", function(...)
 ---@type string[]
 local arg = {}
--- `record_lines` and the function `collect` sends also run in the children,
--- which do not load this library, so they cannot reach a module's locals.
--- Their table is the global `__test_coverage_hits`, in the host and in every
--- child alike: `__test_coverage_hits[source][line]` is true once `line` of the
--- chunk named `source` has run.
+-- `record_lines`, `export_hits`, and `write_at_exit` run inside each process
+-- being measured: the host, every child, and every script. Children and
+-- scripts do not load this library, so those functions cannot reach a
+-- module's locals, and a process's hits live in its global
+-- `__test_coverage_hits`: `__test_coverage_hits[source][line]` is true once
+-- `line` of the chunk named `source` has run. Only that process's own hook
+-- writes the table, and only `export_hits` reads it.
 --- @diagnostic disable: global-in-non-module
 
 --- Line coverage without dependencies. A line hook records every line that
 --- runs, in the host and in every child editor, and `jit.util` lists the lines
 --- that hold code, which is the denominator of each file's percentage.
 ---
---- A plugin's code mostly runs in the children, so each child installs the
---- same hook when it starts, and `Nvim:stop()` reads its hits back before
---- stopping it. A child that crashes or is never stopped loses its hits.
+--- A plugin's code mostly runs in other processes: the children and the
+--- scripts. Every such process gets its hits back to the host the same way:
+--- `argv` installs the hook through `--cmd`, and the process writes its hits
+--- into the run's directory as it exits. A process that crashes, or that is
+--- still running when the run stops, loses its hits.
 local M = {}
 
-local recording = false
+--- One process's hits, as `export_hits` lists them: `{ path, lines }` pairs,
+--- with each file's absolute path, a shape that survives JSON.
+--- @alias test.coverage.Export [string, integer[]][]
+
+--- The open run's directory, from `start` to `stop`; nil when not recording.
+--- Each process measured during the run writes one file into it.
+--- @type string?
+local run_dir
+
+--- The line hook that was installed when the open run started, as
+--- `debug.gethook` returns it, so `stop` can put it back. A run nests inside
+--- another when a spec runs the CLI with `--coverage` through `Nvim.script`,
+--- whose `--cmd` has already installed the outer run's hook.
+--- @type [function?, string?, integer?]
+local prior_hook = {}
 
 --- Install the line hook in the running editor. The same function runs in the
---- host and, through `Nvim:run`, in each child, so it has no upvalues.
+--- host and, through `--cmd`, in each other process, so it has no upvalues.
 local function record_lines()
   _G.__test_coverage_hits = _G.__test_coverage_hits or {}
   local hits = _G.__test_coverage_hits
   -- The type stubs declare only the form that takes a thread first.
   --- @diagnostic disable-next-line: param-type-mismatch
   debug.sethook(function(_, line)
+    -- A line hook never fires inside itself.
+    -- luacov: disable
     local info = debug.getinfo(2, 'S')
     if not info then return end
     local lines = hits[info.source]
@@ -537,73 +557,139 @@ local function record_lines()
       hits[info.source] = lines
     end
     lines[line] = true
+    -- luacov: enable
   end, 'l')
 end
 
---- Start recording lines in the host, and in every child started from now on.
+--- Stop recording in the running editor and list its hits per file. It runs
+--- in other processes, so it has no upvalues.
+--- @return test.coverage.Export
+local function export_hits()
+  -- Turning the hook off first keeps it from adding this function's own
+  -- source to the table while the loop below walks it.
+  debug.sethook()
+  -- luacov: disable
+  local out = {}
+  for source, lines in pairs(_G.__test_coverage_hits) do
+    -- A chunk name that starts with `@` names a file, often relative to this
+    -- process's cwd, which another process does not know. So the path is made
+    -- absolute here, where the cwd is right -- unless the process changed
+    -- directory after loading the file. Other chunk names are strings, which
+    -- no report row can match.
+    if source:sub(1, 1) == '@' then
+      local path = vim.fs.normalize(vim.fn.fnamemodify(source:sub(2), ':p'))
+      out[#out + 1] = { path, vim.tbl_keys(lines) }
+    end
+  end
+  return out
+  -- luacov: enable
+end
+
+--- Write the process's hits into `dir` as JSON when it exits, in a file named
+--- after its pid, so processes never share a file. `VimLeavePre` covers a
+--- child that is stopped and a script that returns. `os.exit` -- under normal
+--- circumstances, a script's way to set its exit status -- skips
+--- `VimLeavePre`, so the hits are also written just before the real `os.exit`
+--- runs. It runs in the process, so it has no upvalues; `export` is
+--- `export_hits`, loaded there.
+--- @param dir string
+--- @param export fun(): test.coverage.Export
+local function write_at_exit(dir, export)
+  local function write()
+    local f = io.open(('%s/%d.json'):format(dir, vim.fn.getpid()), 'w')
+    if not f then return end
+    f:write(vim.json.encode(export()))
+    -- `export` has turned the hook off.
+    -- luacov: disable
+    f:close()
+    -- luacov: enable
+  end
+  local exit = os.exit
+  --- @diagnostic disable-next-line: duplicate-set-field
+  os.exit = function(...)
+    write()
+    -- `write` has turned the hook off.
+    -- luacov: disable
+    return exit(...)
+    -- luacov: enable
+  end
+  vim.api.nvim_create_autocmd('VimLeavePre', { callback = write })
+end
+
+--- A Lua expression that loads `f` from its bytecode. Every byte outside
+--- printable ASCII is escaped, so the expression can sit in one argv entry
+--- and on one Ex command line.
+--- @param f function
+--- @return string
+local function loader(f)
+  local escaped = string
+    .dump(f)
+    :gsub('[%z%c"\\\128-\255]', function(c) return ('\\%03d'):format(c:byte()) end)
+  return ('loadstring("%s")'):format(escaped)
+end
+
+--- Start recording lines in the host, and in every process that `argv`
+--- instruments from now on.
 function M.start()
-  recording = true
+  prior_hook = { debug.gethook() }
+  run_dir = vim.fn.tempname()
+  vim.fn.mkdir(run_dir, 'p')
   record_lines()
 end
 
---- Stop recording.
+--- The Neovim arguments that record a new process's lines into the open run,
+--- or none when not recording. They go before any other argument: `--cmd`
+--- runs before the user's config and before a `-l` script's first line, so
+--- the hook is in place before any of a plugin's code can load.
+--- @return string[]
+function M.argv()
+  if not run_dir then return {} end
+  local chunk = ('lua %s(); %s(%q, %s)'):format(
+    loader(record_lines),
+    loader(write_at_exit),
+    run_dir,
+    loader(export_hits)
+  )
+  return { '--cmd', chunk }
+end
+
+--- Stop recording, delete the run's directory, and return every process's
+--- hits, the host's included. The hook that was installed before `start`
+--- comes back, so an outer run keeps recording, e.g. through this run's report.
+--- @return test.coverage.Export[]
 function M.stop()
-  debug.sethook()
-  recording = false
-end
-
---- Record lines in a newly started child, when recording. `Nvim.start` calls
---- this before it adds the plugin to the child's runtimepath, so the hook is
---- in place before any of the plugin's code can load.
---- @param nv test.Nvim
-function M.start_in(nv)
-  if recording then nv:run(record_lines) end
-end
-
---- Read a child's hits back and merge them. Does nothing when not recording,
---- or when the child no longer answers.
---- @param nv test.Nvim
-function M.collect(nv)
-  if not recording then return end
-  local ok, sources = pcall(nv.run, nv, function()
-    -- Turning the hook off first keeps it from adding this function's own
-    -- source to the table while the loop below walks it.
-    debug.sethook()
-    local out = {}
-    for source, lines in pairs(_G.__test_coverage_hits) do
-      out[#out + 1] = { source, vim.tbl_keys(lines) }
-    end
-    return out
-  end)
-  if not ok or type(sources) ~= 'table' then return end
-  for _, entry in ipairs(sources) do
-    local lines = _G.__test_coverage_hits[entry[1]] or {}
-    _G.__test_coverage_hits[entry[1]] = lines
-    for _, line in ipairs(entry[2]) do
-      lines[line] = true
-    end
+  local dir = assert(run_dir, 'coverage.stop: not recording')
+  run_dir = nil
+  local run = { export_hits() }
+  -- `export_hits` has turned the hook off, and this line turns it back on.
+  -- The type stubs declare only the form that takes a thread first.
+  -- luacov: disable
+  --- @diagnostic disable-next-line: param-type-mismatch
+  debug.sethook(unpack(prior_hook))
+  -- luacov: enable
+  for _, path in ipairs(vim.fn.glob(dir .. '/*.json', true, true)) do
+    -- A process killed partway through its write leaves a truncated file,
+    -- which does not decode. Losing that one process's hits is better than
+    -- failing the whole report.
+    local ok, export = pcall(vim.json.decode, table.concat(vim.fn.readfile(path), '\n'))
+    if ok and type(export) == 'table' then run[#run + 1] = export end
   end
+  vim.fn.delete(dir, 'rf')
+  return run
 end
 
 --------------------------------------------------------------------------------
 -- The report
 --------------------------------------------------------------------------------
 
---- @param ins integer  a bytecode instruction, as `jit.util.funcbc` returns it
---- @return string
-local function opcode_name(ins)
-  local op = bit.band(ins, 0xff)
-  return (require('jit.vmdef').bcnames:sub(op * 6 + 1, op * 6 + 6):gsub('%s+$', ''))
-end
-
 --- The lines of a file that hold code: every line that some bytecode
 --- instruction belongs to, in the main chunk and every function nested in it.
 --- Returns nil, and the load error, for a file that does not load.
 ---
---- A function's closing `end` line is left out when its only instruction is
---- the implicit `RET0`. After a final `error(...)`, that instruction can never
---- run, so the line would always show as missed; after a fall-through, the
---- line before `end` already shows whether the function got that far.
+--- A function that ends in `error(...)` never runs the return on its closing
+--- `end`, yet the line needs no special case: LuaJIT puts the enclosing
+--- function's `FNEW`, which creates the function, on that same line, so the
+--- line runs whenever the definition does.
 --- @param path string
 --- @return table<integer, true>?, string?
 local function executable_lines(path)
@@ -613,23 +699,11 @@ local function executable_lines(path)
   local lines = {}
   --- @param fn function
   local function walk(fn)
-    local info = util.funcinfo(fn)
-    local ops_by_line = {} --- @type table<integer, string[]>
     local pc = 1
     while util.funcbc(fn, pc) do
       local line = util.funcinfo(fn, pc).currentline
-      if line then
-        ops_by_line[line] = ops_by_line[line] or {}
-        table.insert(ops_by_line[line], opcode_name(util.funcbc(fn, pc)))
-      end
+      if line then lines[line] = true end
       pc = pc + 1
-    end
-    for line, ops in pairs(ops_by_line) do
-      local implicit_end = line == info.lastlinedefined
-        and line > info.linedefined
-        and #ops == 1
-        and ops[1] == 'RET0'
-      if not implicit_end then lines[line] = true end
     end
     -- Negative constant indices hold a function's nested prototypes.
     local i = -1
@@ -644,17 +718,40 @@ local function executable_lines(path)
   return lines
 end
 
---- Merge the hits of every chunk named after `path`, however the chunk name
---- spelled it (relative to the cwd, or absolute).
+--- The lines between a `-- luacov: disable` line and the next
+--- `-- luacov: enable` line, or the end of the file. These are luacov's
+--- markers, so code already marked for luacov needs no change. A marker is a
+--- whole line, as in luacov, so prose that mentions one, such as this comment,
+--- does not count as one.
+--- @param path string
+--- @return table<integer, true>
+local function disabled_lines(path)
+  local disabled, off = {}, false
+  for i, text in ipairs(vim.fn.readfile(path)) do
+    local marker = text:match '^%s*%-%-%s*luacov:%s*(%a+)%s*$'
+    if marker == 'disable' then
+      off = true
+    elseif marker == 'enable' then
+      off = false
+    elseif off then
+      disabled[i] = true
+    end
+  end
+  return disabled
+end
+
+--- Union every process's hits per file. One file can run in several
+--- processes, and under several chunk names in one process (relative, or
+--- absolute), so this is the one place hits are combined.
+--- @param run test.coverage.Export[]
 --- @return table<string, table<integer, true>>
-local function hits_by_path()
+local function hits_by_path(run)
   local by_path = {}
-  for source, lines in pairs(_G.__test_coverage_hits or {}) do
-    if source:sub(1, 1) == '@' then
-      local path = vim.fs.normalize(vim.fn.fnamemodify(source:sub(2), ':p'))
-      local merged = by_path[path] or {}
-      by_path[path] = merged
-      for line in pairs(lines) do
+  for _, export in ipairs(run) do
+    for _, entry in ipairs(export) do
+      local merged = by_path[entry[1]] or {}
+      by_path[entry[1]] = merged
+      for _, line in ipairs(entry[2]) do
         merged[line] = true
       end
     end
@@ -685,15 +782,17 @@ local function ranges(lines)
   return table.concat(out, ', ')
 end
 
---- Print one row per file: its covered share of executable lines, and the
+--- Print one row per file: its covered share of executable lines, except the
+--- disabled ones, and the
 --- lines that never ran, or why the file could not be measured. Then print
 --- the total. A fully covered share prints green and a partial one yellow;
 --- text is padded before it is painted, so escape codes do not break the
 --- columns.
+--- @param run test.coverage.Export[]  every process's hits, as `stop` returns them
 --- @param paths string[]  the files to report, relative to the cwd
 --- @param paint test.color.Paint
-function M.report(paths, paint)
-  local by_path = hits_by_path()
+function M.report(run, paths, paint)
+  local by_path = hits_by_path(run)
   --- @type { name: string, hit: integer, count: integer, note: string, loaded: boolean }[]
   local rows = {}
   local total_hit, total_lines = 0, 0
@@ -708,6 +807,9 @@ function M.report(paths, paint)
         loaded = false,
       }
     else
+      for line in pairs(disabled_lines(path)) do
+        executable[line] = nil
+      end
       local hits = by_path[vim.fs.normalize(vim.fn.fnamemodify(path, ':p'))] or {}
       local missed, hit, count = {}, 0, 0
       for line in pairs(executable) do
@@ -848,7 +950,8 @@ function Nvim.start(opts)
   --- @cast opts test.NvimStartOpts
 
   --- @type string[]
-  local argv = { vim.v.argv[1], '--headless', '--embed', '-n', '-u', 'NORC' }
+  local argv = { vim.v.progpath, unpack(coverage.argv()) }
+  vim.list_extend(argv, { '--headless', '--embed', '-n', '-u', 'NORC' })
   if opts.columns then
     vim.list_extend(argv, { '--cmd', ('set columns=%d'):format(opts.columns) })
   end
@@ -861,13 +964,27 @@ function Nvim.start(opts)
   -- No readiness wait is needed: a request sent before the child is ready waits
   -- in the pipe until the child reads it. 100 starts, each followed at once by
   -- a request, all succeeded.
-  coverage.start_in(self)
 
   -- Add repo to child rtp.
   local rtp = opts.rtp or vim.fn.getcwd()
   self:request('nvim_command', 'set rtp+=' .. vim.fn.escape(rtp, ' '))
 
   return self
+end
+
+--- Run `nvim -l <path> <args...>` under the suite's own Neovim, and wait for it
+--- to exit. A script that owns its process (its stdout, its exit status) cannot
+--- run in an `--embed` child, because the child's stdio is the RPC channel.
+--- `-l` already skips the user's config, plugins, and shada, so the command
+--- needs no isolating flags.
+--- @param path string
+--- @param args? string[]  the script's `arg[1]`, `arg[2]`, ...
+--- @param opts? vim.SystemOpts  passed to `vim.system`; `text` defaults to true
+--- @return vim.SystemCompleted
+function Nvim.script(path, args, opts)
+  local cmd = { vim.v.progpath, unpack(coverage.argv()) }
+  vim.list_extend(cmd, { '-l', path, unpack(args or {}) })
+  return vim.system(cmd, vim.tbl_extend('keep', opts or {}, { text = true })):wait()
 end
 
 --- @param method string
@@ -1054,11 +1171,17 @@ function Nvim:wait_until(pred, timeout_ms, msg)
   error(msg or ('wait_until: the predicate did not hold within %d ms'):format(timeout_ms), 2)
 end
 
---- Stop the child. Safe to call more than once. During a coverage run, the
---- child's recorded lines are read back first.
+--- Stop the child, and wait for it to exit. Safe to call more than once.
 function Nvim:stop()
-  coverage.collect(self)
-  vim.fn.jobstop(self.chan)
+  -- A child that already exited, e.g. on a second stop, has nothing to close.
+  if vim.fn.jobwait({ self.chan }, 0)[1] ~= -1 then return end
+  -- Closing the channel makes the child exit normally, which fires its
+  -- `VimLeavePre`, where a coverage run writes the child's hits; waiting
+  -- for the exit makes those hits complete before the run reads them. A child
+  -- stuck in a busy loop never reads the close, so after the same 2000 ms that
+  -- `wait_until` allows by default, it is killed without its hits.
+  vim.fn.chanclose(self.chan)
+  if vim.fn.jobwait({ self.chan }, 2000)[1] == -1 then vim.fn.jobstop(self.chan) end
 end
 
 return Nvim
@@ -1227,6 +1350,10 @@ end
 --- @field name string
 --- @field message string  the error, with the traceback frames in the spec file
 
+--- A case that takes longer than this prints its time beside its name, so the
+--- slow cases stand out. 75 ms is mocha's default for a slow test.
+local SLOW_MS = 75
+
 --- The run's counts and its output: each outcome is counted and printed in
 --- one step, so the two cannot disagree.
 --- @class test.runner.Report
@@ -1248,18 +1375,33 @@ end
 --- @param path string
 function Report:file(path) io.stdout:write(self.paint('bold', path), '\n') end
 
+--- The text after a case's name: its time, dim, when it ran longer than
+--- `SLOW_MS`, and nothing otherwise.
+--- @param ms number?  nil for a case that never ran, e.g. under a failed before_all
+--- @return string
+function Report:duration(ms)
+  if not ms then return '' end
+  -- Comparing the rounded time keeps the rule and the printed number in
+  -- agreement: 75.4 ms would otherwise print as a slow `(75ms)`.
+  local shown = math.floor(ms + 0.5)
+  if shown <= SLOW_MS then return '' end
+  return ' ' .. self.paint('dim', ('(%dms)'):format(shown))
+end
+
 --- @param name string
-function Report:pass(name)
+--- @param ms number  the case's time, with its before_each and after_each hooks
+function Report:pass(name, ms)
   self.counts.passed = self.counts.passed + 1
-  io.stdout:write('  ', self.paint('green', '✓'), ' ', name, '\n')
+  io.stdout:write('  ', self.paint('green', '✓'), ' ', name, self:duration(ms), '\n')
 end
 
 --- @param name string
 --- @param message string
-function Report:fail(name, message)
+--- @param ms? number  the case's time, with its hooks; nil when it never ran
+function Report:fail(name, message, ms)
   self.counts.failed = self.counts.failed + 1
   table.insert(self.failures, { name = name, message = message })
-  io.stdout:write('  ', self.paint('red', '✗'), ' ', name, '\n')
+  io.stdout:write('  ', self.paint('red', '✗'), ' ', name, self:duration(ms), '\n')
 end
 
 --- A spec file that failed to load or to collect: one failure, named after
@@ -1355,6 +1497,7 @@ local function run_case(case, path, report)
   local name = full_name(case)
   if not case.fn then return report:pending(name) end
 
+  local started = vim.uv.hrtime()
   local errors = {}
   --- @param fn fun()
   --- @return boolean
@@ -1378,8 +1521,9 @@ local function run_case(case, path, report)
     end
   end
 
-  if #errors == 0 then return report:pass(name) end
-  report:fail(name, table.concat(errors, '\n\n'))
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  if #errors == 0 then return report:pass(name, ms) end
+  report:fail(name, table.concat(errors, '\n\n'), ms)
 end
 
 --- Whether `filter`, a plain substring of the full case name, selects `case`.

@@ -11,7 +11,7 @@ emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
 [tools]
 "aqua:neovim/neovim" = "0.12.6"
 stylua = "2.6.0"
-"github:jrop/nvim-bundle" = "0.4.1"
+"github:jrop/nvim-bundle" = "0.5.1"
 
 [tools.emmylua_check]
 version = "0.25.1"
