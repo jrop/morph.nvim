@@ -314,6 +314,12 @@ Options:
   --filter <text>    Run only cases whose full name contains <text>
   --coverage         Report line coverage of lua/**/*.lua, vendor/ excluded,
                      counting lines run in the host and in every child
+  --isolate <unit>   Run each spec file (<unit> = file) or each case
+                     (<unit> = case) in its own process, in parallel
+  -j, --jobs <n>     Run at most <n> processes at once (default: the number
+                     of CPUs); implies --isolate file
+  --timeout <ms>     Kill an isolated process that reports nothing for <ms>,
+                     and fail the case it was running (needs --isolate or -j)
   --color            Color the output even when stdout is not a terminal
   -h, --help         Show this help
 
@@ -321,6 +327,7 @@ Examples:
   nvim -l lua/myplugin/vendor/test.lua
   nvim -l lua/myplugin/vendor/test.lua spec/ui --filter 'renders'
   nvim -l lua/myplugin/vendor/test.lua 'spec/**/*_spec.lua' --exclude 'spec/slow/**'
+  nvim -l lua/myplugin/vendor/test.lua --isolate case --timeout 5000
 ]]
 
 --- @type table<string, any>
@@ -328,7 +335,13 @@ local ARGS_SPEC = {
   ['--exclude'] = { 'string' },
   ['--filter'] = 'string',
   ['--coverage'] = 'boolean',
+  ['--isolate'] = 'string',
+  ['--jobs'] = 'number',
+  ['-j'] = '--jobs',
+  ['--timeout'] = 'number',
   ['--color'] = 'boolean',
+  -- Internal, so not in the usage: an isolated run starts each worker with it.
+  ['--worker'] = 'string',
   ['--help'] = 'boolean',
   ['-h'] = '--help',
 }
@@ -409,37 +422,85 @@ local function find_specs(includes, excludes)
   return paths
 end
 
+--- Whether `path` is a type stub: a file that opens with `---@meta`, which
+--- the language server reads and nothing ever runs.
+--- @param path string
+--- @return boolean
+local function is_meta(path)
+  local first = vim.fn.readfile(path, '', 1)[1] or ''
+  return first:match '^%-%-%-%s*@meta' ~= nil
+end
+
 --- The plugin's own sources: every Lua file under `lua/`, except vendored
---- files, which belong to another project.
+--- files, which belong to another project, and type stubs, which hold no code.
 --- @return string[]
 local function coverage_paths()
   if vim.fn.isdirectory 'lua' == 0 then return {} end
   local paths = vim.tbl_filter(
-    function(path) return path:match '%.lua$' and not path:find('/vendor/', 1, true) end,
+    function(path)
+      return path:match '%.lua$' and not path:find('/vendor/', 1, true) and not is_meta(path)
+    end,
     vim.tbl_map(vim.fs.normalize, files_under 'lua')
   )
   table.sort(paths)
   return paths
 end
 
---- Run the command line `argv` and return the process's exit status.
+--- How the run is spread over processes, or nil for a run in this one.
+--- `--isolate` or `--jobs` asks for processes, and the other takes a default.
+--- @param parsed table<string, any>
+--- @param entry string  the running `test.lua`, which each worker runs again
+--- @return test.executor.Options?
+local function isolation(parsed, entry)
+  local unit, jobs, timeout = parsed['--isolate'], parsed['--jobs'], parsed['--timeout']
+  if unit and unit ~= 'file' and unit ~= 'case' then
+    error(('--isolate takes file or case, not %q'):format(unit), 0)
+  end
+  if jobs and (jobs < 1 or jobs % 1 ~= 0) then
+    error(('--jobs takes a whole number above 0, not %s'):format(jobs), 0)
+  end
+  if timeout and (timeout <= 0 or timeout % 1 ~= 0) then
+    error(('--timeout takes a whole number of ms above 0, not %s'):format(timeout), 0)
+  end
+  if not unit and not jobs then
+    -- Lua cannot stop a running function, so only a parent process can stop
+    -- a case that hangs.
+    if timeout then error('--timeout needs --isolate or --jobs', 0) end
+    return nil
+  end
+  return {
+    per_case = unit == 'case',
+    jobs = jobs or vim.uv.available_parallelism(),
+    timeout_ms = timeout,
+    entry = vim.fs.normalize(vim.fn.fnamemodify(entry, ':p')),
+  }
+end
+
+--- Run the command line `argv` and return the process's exit status. `argv[0]`
+--- is the running `test.lua`, which an isolated run starts again in each worker.
 --- @param argv string[]
 --- @return integer
 function M.main(argv)
   running = true
-  local ok, parsed = pcall(args.parse, ARGS_SPEC, argv)
-  if not ok then
-    io.stderr:write('test: ', tostring(parsed), '\n\n', USAGE)
+  -- Specs require the plugin's own modules, which live under `lua/` in the
+  -- directory the run starts from.
+  package.path = 'lua/?.lua;lua/?/init.lua;' .. package.path
+
+  --- @param err any
+  --- @return integer
+  local function usage_error(err)
+    io.stderr:write('test: ', tostring(err), '\n\n', USAGE)
     return 2
   end
+  local ok, parsed = pcall(args.parse, ARGS_SPEC, argv)
+  if not ok then return usage_error(parsed) end
+  if parsed['--worker'] then return __mods._test_executor("test.executor").work(parsed['--worker']) end
+  local isolate_ok, isolated = pcall(isolation, parsed, assert(argv[0]))
+  if not isolate_ok then return usage_error(isolated) end
   if parsed['--help'] then
     io.stdout:write(USAGE)
     return 0
   end
-
-  -- Specs require the plugin's own modules, which live under `lua/` in the
-  -- directory the run starts from.
-  package.path = 'lua/?.lua;lua/?/init.lua;' .. package.path
 
   local includes = #parsed._ > 0 and parsed._ or { 'spec' }
   local found_ok, paths = pcall(
@@ -459,11 +520,18 @@ function M.main(argv)
   local paint = __mods._test_color("test.color")(parsed['--color'] or vim.uv.guess_handle(1) == 'tty')
 
   if parsed['--coverage'] then coverage.start() end
-  local report = __mods._test_runner("test.runner").run(paths, { filter = parsed['--filter'], paint = paint })
-  if parsed['--coverage'] then
-    local run = coverage.stop()
-    coverage.report(run, coverage_paths(), paint)
+  local suite = __mods._test_suite("test.suite")
+  local executor = __mods._test_executor("test.executor")
+  local run = suite.Suite.collect(paths)
+  local filter = parsed['--filter']
+  if filter then
+    run = run:select(function(case) return suite.full_name(case):find(filter, 1, true) ~= nil end)
   end
+  local execute = isolated and executor.spawner(isolated) or executor.in_process
+  local report = __mods._test_report("test.report").new(paint)
+  execute(run, function(event) report:event(event) end)
+  report:summary()
+  if parsed['--coverage'] then coverage.report(coverage.stop(), coverage_paths(), paint) end
   return report.counts.failed > 0 and 1 or 0
 end
 
@@ -641,13 +709,20 @@ end
 --- or none when not recording. They go before any other argument: `--cmd`
 --- runs before the user's config and before a `-l` script's first line, so
 --- the hook is in place before any of a plugin's code can load.
+---
+--- The open run is this process's own, or else the run that instrumented
+--- this process, whose directory the `--cmd` left in the global
+--- `__test_coverage_dir`. So a process a run measures also measures the
+--- processes it starts, such as an isolated worker's child editors.
 --- @return string[]
 function M.argv()
-  if not run_dir then return {} end
-  local chunk = ('lua %s(); %s(%q, %s)'):format(
+  local dir = run_dir or _G.__test_coverage_dir
+  if not dir then return {} end
+  local chunk = ('lua __test_coverage_dir = %q; %s(); %s(%q, %s)'):format(
+    dir,
     loader(record_lines),
     loader(write_at_exit),
-    run_dir,
+    dir,
     loader(export_hits)
   )
   return { '--cmd', chunk }
@@ -857,6 +932,557 @@ return M
   end, ...)
 end
 
+__mods._test_dto = function(...)
+  return __load("test.dto", function(...)
+---@type string[]
+local arg = {}
+--- The shapes of the data a run produces and passes between processes: the
+--- events every executor emits, the job a worker reads, and the lines it
+--- writes back. Each schema both validates at runtime and, through guard's
+--- generator, produces the LuaCATS class of the same name in `dto.types.lua`,
+--- so the checks and the types cannot drift apart. Requires nothing but guard,
+--- because the generator loads this file on its own.
+local guard = __mods._test_vendor_guard("test.vendor.guard")
+
+local M = {}
+
+--- @param kind string
+--- @param fields table<string, Guard>
+--- @return Guard
+local function event(kind, fields)
+  return guard.object(
+    vim.tbl_extend('error', fields, { kind = guard.literal(kind) }),
+    { strict = true }
+  )
+end
+
+--- A spec file's events start; every event after it, up to the next, is that
+--- file's.
+M.FileEvent = event('file', { path = guard.string() })
+--- The file failed to load or to collect, so none of its cases ran.
+M.LoadErrorEvent = event('load_error', { path = guard.string(), message = guard.string() })
+--- A case is about to run, with its `before_each` hooks.
+M.StartEvent = event('start', { id = guard.integer(), name = guard.string() })
+M.PassEvent = event('pass', { id = guard.integer(), name = guard.string(), ms = guard.number() })
+--- A case failed, or something that is not a case did, such as an
+--- `after_all`, which has no `id`. `ms` is nil for a case that never ran.
+--- `output` is what the case printed, when it ran in a worker.
+M.FailEvent = event('fail', {
+  id = guard.integer():optional(),
+  name = guard.string(),
+  message = guard.string(),
+  ms = guard.number():optional(),
+  output = guard.string():optional(),
+})
+M.PendingEvent = event('pending', { id = guard.integer(), name = guard.string() })
+
+M.Event = guard.one_of(
+  M.FileEvent,
+  M.LoadErrorEvent,
+  M.StartEvent,
+  M.PassEvent,
+  M.FailEvent,
+  M.PendingEvent
+)
+
+--- One worker's assignment: which cases of which file to run, by id. The
+--- worker writes its lines beside the job file.
+M.Job = guard.object({ path = guard.string(), ids = guard.integer():array() }, { strict = true })
+
+--- One line a worker writes: an event, and the worker's output-file position
+--- when it happened, so the bytes between two lines' offsets are what was
+--- printed between them.
+M.WorkerLine = guard.object({ offset = guard.integer(), event = M.Event }, { strict = true })
+
+return M
+
+  end, ...)
+end
+
+__mods._test_executor = function(...)
+  return __load("test.executor", function(...)
+---@type string[]
+local arg = {}
+--- The executors: the two ways to run a suite, which emit the same events in
+--- the same order, so one report consumes either.
+---
+--- 1. `in_process` runs the cases here. It is the only code that runs cases.
+--- 2. `spawner` (`--isolate`) splits the suite into jobs, one per file or one
+---    per case, and runs each job in a worker: `nvim -l <test.lua> --worker
+---    <dir>`, started with the parent's own flags. A worker runs its job with
+---    `in_process` and writes each event as a line.
+---
+--- A worker reports through two files, so a worker that crashes loses nothing
+--- it already wrote:
+---
+--- 1. `lines`, one flushed JSON line per event.
+--- 2. `output`, its stdout and stderr at once, so `print` (stderr, under
+---    `nvim -l`) and `io.write` (stdout) keep the order they ran in. Each line
+---    records this file's offset, so the parent knows which case printed what.
+---
+--- A worker that dies early is diagnosed from the same files: the case it
+--- started without finishing fails with the reason, and every case it never
+--- reported fails with "did not run".
+local coverage = __mods._test_coverage("test.coverage")
+local dto = __mods._test_dto("test.dto")
+local guard = __mods._test_vendor_guard("test.vendor.guard")
+local suite = __mods._test_suite("test.suite")
+
+local M = {}
+
+--------------------------------------------------------------------------------
+-- In process
+--------------------------------------------------------------------------------
+
+--- Where a run's events go: the report, or a worker's line writer.
+--- @alias test.executor.Emit fun(event: test.dto.Event)
+
+--- The scopes from the file's root down to the case's own scope.
+--- @param case test.suite.Case
+--- @return test.suite.Scope[]
+local function scopes_of(case)
+  local scopes = {}
+  local scope = case.parent --- @type test.suite.Scope?
+  while scope do
+    table.insert(scopes, 1, scope)
+    scope = scope.parent
+  end
+  return scopes
+end
+
+--- Run one case with its `before_each` and `after_each` hooks, and emit its
+--- outcome. Before-hooks run from the outermost scope inward, and a failing
+--- one skips the rest and the case; after-hooks run from the innermost scope
+--- outward, always.
+--- @param case test.suite.Case
+--- @param path string
+--- @param emit test.executor.Emit
+local function run_case(case, path, emit)
+  local name = suite.full_name(case)
+  if not case.fn then return emit { kind = 'pending', id = case.id, name = name } end
+
+  emit { kind = 'start', id = case.id, name = name }
+  local started = vim.uv.hrtime()
+  local errors = {}
+  --- @param fn fun()
+  --- @return boolean
+  local function attempt(fn)
+    local ok, err = suite.protect(fn, path)
+    if not ok then errors[#errors + 1] = err end
+    return ok
+  end
+
+  local scopes = scopes_of(case)
+  local ready = true
+  for _, scope in ipairs(scopes) do
+    for _, hook in ipairs(scope.before_each) do
+      ready = ready and attempt(hook)
+    end
+  end
+  if ready then attempt(case.fn) end
+  for i = #scopes, 1, -1 do
+    for _, hook in ipairs(scopes[i].after_each) do
+      attempt(hook)
+    end
+  end
+
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  if #errors == 0 then return emit { kind = 'pass', id = case.id, name = name, ms = ms } end
+  emit { kind = 'fail', id = case.id, name = name, message = table.concat(errors, '\n\n'), ms = ms }
+end
+
+--- The cases under `scope`, nested scopes included, whose ids `ids` holds.
+--- @param scope test.suite.Scope
+--- @param ids table<integer, true>
+--- @param out? test.suite.Case[]
+--- @return test.suite.Case[]
+local function selected_cases(scope, ids, out)
+  out = out or {}
+  for _, child in ipairs(scope.children) do
+    if child.children then
+      selected_cases(child --[[@as test.suite.Scope]], ids, out)
+    elseif ids[child.id] then
+      out[#out + 1] = child --[[@as test.suite.Case]]
+    end
+  end
+  return out
+end
+
+--- Run a scope's selected cases between its `before_all` and `after_all`
+--- hooks. A scope with nothing selected runs neither hook. A failing
+--- `before_all` skips the rest of the scope and fails each selected case with
+--- its error; `after_all` still runs, so it can undo a partial setup.
+--- @param scope test.suite.Scope
+--- @param path string
+--- @param ids table<integer, true>
+--- @param emit test.executor.Emit
+local function run_scope(scope, path, ids, emit)
+  local cases = selected_cases(scope, ids)
+  if #cases == 0 then return end
+  -- A hook failure is reported under the scope's name, or the file's for the
+  -- root scope.
+  local scope_name = scope.parent and suite.full_name(scope) or path
+
+  local setup_err --- @type string?
+  for _, hook in ipairs(scope.before_all) do
+    local ok, err = suite.protect(hook, path)
+    if not ok then
+      setup_err = ('before_all in %s failed:\n%s'):format(scope_name, err)
+      break
+    end
+  end
+
+  if setup_err then
+    for _, case in ipairs(cases) do
+      local name = suite.full_name(case)
+      if case.fn then
+        emit { kind = 'fail', id = case.id, name = name, message = setup_err }
+      else
+        emit { kind = 'pending', id = case.id, name = name }
+      end
+    end
+  else
+    for _, child in ipairs(scope.children) do
+      if child.children then
+        run_scope(child --[[@as test.suite.Scope]], path, ids, emit)
+      elseif ids[child.id] then
+        run_case(child --[[@as test.suite.Case]], path, emit)
+      end
+    end
+  end
+
+  for _, hook in ipairs(scope.after_all) do
+    local ok, err = suite.protect(hook, path)
+    if not ok then
+      emit {
+        kind = 'fail',
+        name = scope_name .. ' (after_all)',
+        message = err --[[@as string]],
+      }
+    end
+  end
+end
+
+--- The executor that runs a suite in this process: each file in order, with
+--- its own modules loaded, emitting each event as it happens.
+--- @param run test.Suite
+--- @param emit test.executor.Emit
+function M.in_process(run, emit)
+  for _, file in ipairs(run.files) do
+    emit { kind = 'file', path = file.path }
+    local root = file.root
+    if not root then
+      emit { kind = 'load_error', path = file.path, message = assert(file.load_error) }
+    else
+      local ids = {}
+      for _, id in ipairs(file.ids) do
+        ids[id] = true
+      end
+      suite.with_modules(file, function() run_scope(root, file.path, ids, emit) end)
+    end
+  end
+end
+
+--------------------------------------------------------------------------------
+-- The worker
+--------------------------------------------------------------------------------
+
+--- @param path string
+--- @return string?
+local function read_file(path)
+  local f = io.open(path, 'rb')
+  if not f then return nil end
+  local text = f:read '*a'
+  f:close()
+  return text
+end
+
+--- Run the job in `dir`, and return the worker's exit status. A file that
+--- fails to load raises, so the parent reports it like any worker that died
+--- outside a case, with the error in its output.
+--- @param dir string
+--- @return integer
+function M.work(dir)
+  local job = guard.from_json(dto.Job):parse(assert(read_file(dir .. '/job.json'))) --[[@as test.dto.Job]]
+  local collected = suite.Suite.collect { job.path }
+  local file = assert(collected.files[1])
+  if not file.root then error(file.load_error, 0) end
+
+  local lines = assert(io.open(dir .. '/lines', 'a'))
+  local chosen = collected:select(function(case) return vim.tbl_contains(job.ids, case.id) end)
+  M.in_process(chosen, function(event)
+    -- The parent emits each file's event itself, once per file.
+    if event.kind == 'file' then return end
+    io.stdout:flush()
+    lines:write(vim.json.encode { offset = io.stdout:seek 'cur' or 0, event = event }, '\n')
+    lines:flush()
+  end)
+  return 0
+end
+
+--------------------------------------------------------------------------------
+-- The spawner
+--------------------------------------------------------------------------------
+
+--- @class test.executor.Options
+--- @field per_case boolean  one worker per case, rather than per file
+--- @field jobs integer  workers running at once
+--- @field timeout_ms? integer  how long a worker may go without writing a line
+--- @field entry string  the absolute path of the running `test.lua`
+
+--- Some of one file's cases, and the worker running them.
+--- @class test.executor.Job
+--- @field file test.SuiteFile
+--- @field ids integer[]
+--- @field dir string  where the worker's `job.json`, `lines`, and `output` go
+--- @field events? test.dto.Event[]  set once the job has finished
+--- @field pid? integer
+--- @field timer? uv.uv_timer_t
+--- @field exit? { code: integer, signal: integer }
+--- @field kill_reason? string  why the parent killed the worker, when it did
+
+--- The run's jobs, in file order. A file with nothing to run, e.g. one
+--- that failed to load, still gets one job, already finished, so that it
+--- keeps its place in the order.
+--- @param run test.Suite
+--- @param per_case boolean
+--- @return test.executor.Job[]
+local function jobs_of(run, per_case)
+  local jobs = {}
+  for _, file in ipairs(run.files) do
+    local groups = per_case
+        and #file.ids > 0
+        and vim.tbl_map(function(id) return { id } end, file.ids)
+      or { file.ids }
+    for _, ids in ipairs(groups) do
+      local events = not file.root
+          and { { kind = 'load_error', path = file.path, message = assert(file.load_error) } }
+        or #ids == 0 and {}
+        or nil
+      jobs[#jobs + 1] = { file = file, ids = ids, dir = vim.fn.tempname(), events = events }
+    end
+  end
+  return jobs
+end
+
+--- Kill the worker and everything it started. The worker leads its own
+--- process group, so this reaches a spec's grandchildren too.
+--- @param job test.executor.Job
+local function kill(job) vim.uv.kill(-assert(job.pid), 'sigkill') end
+
+--- The wall clock, in the unit and epoch of a file's modification time.
+--- @return number
+local function wall_ms()
+  local seconds, microseconds = assert(vim.uv.gettimeofday())
+  return seconds * 1000 + microseconds / 1000
+end
+
+--- Kill the worker once it has gone `timeout_ms` without writing a line. The
+--- timer wakes only when that could have happened, so it never polls. It
+--- runs in a libuv callback, where `vim.fn` is unavailable.
+--- @param job test.executor.Job
+--- @param timeout_ms integer
+local function watch(job, timeout_ms)
+  local started, timer = wall_ms(), assert(vim.uv.new_timer())
+  job.timer = timer
+  local function check()
+    if job.exit then return end
+    local stat = vim.uv.fs_stat(job.dir .. '/lines')
+    local written = stat and stat.mtime.sec * 1000 + stat.mtime.nsec / 1e6 or 0
+    local left = math.max(started, written) + timeout_ms - wall_ms()
+    if left > 0 then return timer:start(math.ceil(left), 0, check) end
+    job.kill_reason = ('timed out: the worker wrote nothing for %d ms'):format(timeout_ms)
+    kill(job)
+  end
+  timer:start(timeout_ms, 0, check)
+end
+
+--- The flags the parent started with, before `-l`, e.g. `-u NONE`.
+--- @return string[]
+local function own_flags()
+  local flags = {}
+  for i = 2, #vim.v.argv do
+    if vim.v.argv[i] == '-l' then break end
+    flags[#flags + 1] = vim.v.argv[i]
+  end
+  return flags
+end
+
+--- Start the job's worker, the same way the parent was started.
+--- @param job test.executor.Job
+--- @param opts test.executor.Options
+--- @return test.executor.Job
+local function start(job, opts)
+  vim.fn.mkdir(job.dir, 'p')
+  vim.fn.writefile(
+    { vim.json.encode { path = job.file.path, ids = job.ids } },
+    job.dir .. '/job.json'
+  )
+  local output = assert(vim.uv.fs_open(job.dir .. '/output', 'w', 420)) -- 0644
+  local process, pid --- @type uv.uv_process_t?, integer|string
+  process, pid = vim.uv.spawn(vim.v.progpath, {
+    -- This run's `--cmd` goes last, after any outer coverage run's in the
+    -- parent's flags, so that the worker's own children record into it.
+    args = vim.list_extend(
+      vim.list_extend(own_flags(), coverage.argv()),
+      { '-l', opts.entry, '--worker', job.dir }
+    ),
+    stdio = { nil, output, output },
+    detached = true, -- its own process group, for `kill`
+  }, function(code, signal)
+    job.exit = { code = code, signal = signal }
+    assert(process):close()
+  end)
+  vim.uv.fs_close(output)
+  if not process then error(('test: could not start a worker: %s'):format(pid), 0) end
+  job.pid = pid --[[@as integer]]
+  if opts.timeout_ms then watch(job, opts.timeout_ms) end
+  return job
+end
+
+--- @param text string
+--- @return string?
+local function nonempty(text) return text ~= '' and text or nil end
+
+--- A finished job's events: the worker's, with each failure's output, and,
+--- when the worker died early, a failure for the case it was running and for
+--- every case it never reported.
+--- @param job test.executor.Job
+--- @return test.dto.Event[]
+local function events_of(job)
+  local output = read_file(job.dir .. '/output') or ''
+  -- Only complete lines count: a killed worker can leave its last one short.
+  -- Only this library writes them, so one that does not parse is a bug.
+  local lines = {} --- @type test.dto.WorkerLine[]
+  for text in (read_file(job.dir .. '/lines') or ''):gmatch '([^\n]*)\n' do
+    lines[#lines + 1] = guard.from_json(dto.WorkerLine):parse(text)
+  end
+
+  local events, reported = {}, {} --- @type test.dto.Event[], table<integer, true>
+  for i, line in ipairs(lines) do
+    local event, previous = line.event, lines[i - 1]
+    -- emmylua does not narrow on `kind` through the `test.dto.Event` alias.
+    if event.kind == 'fail' then
+      local from = previous and previous.offset or 0
+      (event --[[@as test.dto.FailEvent]]).output = nonempty(output:sub(from + 1, line.offset))
+    end
+    if event.kind ~= 'start' and event.id then reported[event.id] = true end
+    events[#events + 1] = event
+  end
+
+  local exit = assert(job.exit)
+  local missing = vim.tbl_filter(function(id) return not reported[id] end, job.ids)
+  if not job.kill_reason and exit.code == 0 and exit.signal == 0 and #missing == 0 then
+    return events
+  end
+
+  -- Exit code 0 lands here too, e.g. from a spec that calls `os.exit(0)`.
+  local reason = job.kill_reason
+    or exit.signal ~= 0 and ('the worker was killed by signal %d'):format(exit.signal)
+    or ('the worker exited with code %d'):format(exit.code)
+  -- A worker writes a case's start before running it, so a worker that died
+  -- in a case wrote that start last. Without one, e.g. in a `before_all`,
+  -- the file takes the failure.
+  local last = lines[#lines]
+  local running = last and last.event.kind == 'start' and last.event --[[@as test.dto.StartEvent]]
+    or nil
+  events[#events + 1] = {
+    kind = 'fail',
+    id = running and running.id or nil,
+    name = running and running.name or job.file.path,
+    message = reason,
+    output = nonempty(output:sub((last and last.offset or 0) + 1)),
+  }
+  for _, id in ipairs(missing) do
+    if not running or id ~= running.id then
+      local name = suite.full_name(job.file.cases[id])
+      events[#events + 1] =
+        { kind = 'fail', id = id, name = name, message = 'did not run: ' .. reason }
+    end
+  end
+  return events
+end
+
+--- Release an exited worker: stop its timer, kill what it left running,
+--- read its events, and delete its files.
+--- @param job test.executor.Job
+local function finish(job)
+  if job.timer then job.timer:close() end
+  kill(job)
+  job.events = events_of(job)
+  vim.fn.delete(job.dir, 'rf')
+end
+
+--- The spawner executor: `M.spawner(opts)(run, emit)` runs a suite's jobs,
+--- `opts.jobs` at a time, and emits their events in file order, the same
+--- order as the in-process executor.
+--- @param opts test.executor.Options
+--- @return fun(run: test.Suite, emit: test.executor.Emit)
+function M.spawner(opts)
+  return function(run, emit)
+    local jobs = jobs_of(run, opts.per_case)
+    local queue = vim.tbl_filter(function(job) return not job.events end, jobs)
+    local running = {} --- @type table<test.executor.Job, true>
+
+    -- Jobs finish in any order, so a job's events wait for every job before
+    -- it to finish too.
+    local emitted = 0
+    local function emit_finished()
+      while true do
+        local job, previous = jobs[emitted + 1], jobs[emitted]
+        if not job or not job.events then return end
+        emitted = emitted + 1
+        if not previous or previous.file ~= job.file then
+          emit { kind = 'file', path = job.file.path }
+        end
+        for _, event in ipairs(job.events) do
+          emit(event)
+        end
+      end
+    end
+
+    -- Workers run in their own process groups, which a terminal's Ctrl-C does
+    -- not reach, so the parent kills them when it dies. `nvim -l` runs
+    -- VimLeavePre on every deadly signal, including SIGINT.
+    local cleanup = vim.api.nvim_create_autocmd('VimLeavePre', {
+      callback = function()
+        -- A coverage run's own VimLeavePre has turned the line hook off.
+        -- luacov: disable
+        for job in pairs(running) do
+          kill(job)
+        end
+        -- luacov: enable
+      end,
+    })
+
+    emit_finished()
+    while #queue > 0 or next(running) do
+      while vim.tbl_count(running) < opts.jobs and #queue > 0 do
+        running[start(table.remove(queue, 1), opts)] = true
+      end
+      vim.wait(2 ^ 31 - 1, function()
+        for job in pairs(running) do
+          if job.exit then return true end
+        end
+        return false
+      end)
+      for job in pairs(running) do
+        if job.exit then
+          running[job] = nil
+          finish(job)
+        end
+      end
+      emit_finished()
+    end
+    vim.api.nvim_del_autocmd(cleanup)
+  end
+end
+
+return M
+
+  end, ...)
+end
+
 ---@param arg string[]
 local function __entry(arg, ...)
 --- The library's one public surface, and its command line. A bundle built with
@@ -893,19 +1519,19 @@ if is_script() then
   if not cli.running() then os.exit(cli.main(arg)) end
 end
 
-local runner = __mods._test_runner("test.runner")
+local suite = __mods._test_suite("test.suite")
 
 --- @class test
 return {
   Nvim = __mods._test_nvim("test.nvim"),
   assert = __mods._test_assert("test.assert"),
-  describe = runner.describe,
-  it = runner.it,
-  pending = runner.pending,
-  before_all = runner.before_all,
-  after_all = runner.after_all,
-  before_each = runner.before_each,
-  after_each = runner.after_each,
+  describe = suite.describe,
+  it = suite.it,
+  pending = suite.pending,
+  before_all = suite.before_all,
+  after_all = suite.after_all,
+  before_each = suite.before_each,
+  after_each = suite.after_each,
 }
 
 end
@@ -1189,42 +1815,192 @@ return Nvim
   end, ...)
 end
 
-__mods._test_runner = function(...)
-  return __load("test.runner", function(...)
+__mods._test_report = function(...)
+  return __load("test.report", function(...)
 ---@type string[]
 local arg = {}
---- Spec collection and running. Loading a spec file runs its `describe`
---- bodies immediately, which builds a tree of scopes; each `it` only records
---- its function. Running then walks the tree in order: each scope runs its
---- `before_all` hooks before its first case and its `after_all` hooks after its
---- last, and each case runs inside its scopes' `before_each` and `after_each`
---- hooks.
+--- The report: it consumes a run's events and prints them, and it counts each
+--- outcome in the same step that prints it, so the two cannot disagree.
+
+--- @class test.report.Failure
+--- @field name string
+--- @field message string  the error, with the traceback frames in the spec file
+--- @field output? string  what the case printed, when it ran in a worker
+
+--- A case that takes longer than this prints its time beside its name, so the
+--- slow cases stand out. 75 ms is mocha's default for a slow test.
+local SLOW_MS = 75
+
+--- @class test.Report
+--- @field counts { passed: integer, failed: integer, pending: integer }
+--- @field failures test.report.Failure[]
+--- @field paint test.color.Paint
+--- @field started integer  `vim.uv.hrtime()` when the run began, for the summary's time
+local Report = {}
+Report.__index = Report
+
+--- @param paint test.color.Paint
+--- @return test.Report
+function Report.new(paint)
+  return setmetatable({
+    counts = { passed = 0, failed = 0, pending = 0 },
+    failures = {},
+    paint = paint,
+    started = vim.uv.hrtime(),
+  }, Report)
+end
+
+--- The text after a case's name: its time, dim, when it ran longer than
+--- `SLOW_MS`, and nothing otherwise.
+--- @param ms number?  nil for a case that never ran, e.g. under a failed before_all
+--- @return string
+function Report:duration(ms)
+  if not ms then return '' end
+  -- Comparing the rounded time keeps the rule and the printed number in
+  -- agreement: 75.4 ms would otherwise print as a slow `(75ms)`.
+  local shown = math.floor(ms + 0.5)
+  if shown <= SLOW_MS then return '' end
+  return ' ' .. self.paint('dim', ('(%dms)'):format(shown))
+end
+
+--- Count a failure, keep it for the summary, and print its line.
+--- @param failure test.report.Failure
+--- @param line string  the text after the mark
+function Report:failed(failure, line)
+  self.counts.failed = self.counts.failed + 1
+  table.insert(self.failures, failure)
+  io.stdout:write('  ', self.paint('red', '✗'), ' ', line, '\n')
+end
+
+--- Print one event. A case starting prints nothing; only its outcome does.
+-- The union is spelled out because emmylua narrows a parameter on `kind` only
+-- when its type is written inline, not through the `test.dto.Event` alias.
+--- @param event test.dto.FileEvent|test.dto.LoadErrorEvent|test.dto.StartEvent|test.dto.PassEvent|test.dto.FailEvent|test.dto.PendingEvent
+function Report:event(event)
+  if event.kind == 'file' then
+    io.stdout:write(self.paint('bold', event.path), '\n')
+  elseif event.kind == 'load_error' then
+    self:failed({ name = event.path, message = event.message }, '(the file did not load)')
+  elseif event.kind == 'pass' then
+    self.counts.passed = self.counts.passed + 1
+    io.stdout:write(
+      '  ',
+      self.paint('green', '✓'),
+      ' ',
+      event.name,
+      self:duration(event.ms),
+      '\n'
+    )
+  elseif event.kind == 'fail' then
+    self:failed(
+      { name = event.name, message = event.message, output = event.output },
+      event.name .. self:duration(event.ms)
+    )
+  elseif event.kind == 'pending' then
+    self.counts.pending = self.counts.pending + 1
+    io.stdout:write('  ', self.paint('yellow', '- ' .. event.name .. ' (pending)'), '\n')
+  end
+end
+
+--- Color a failure message's diff: `-` lines red, `+` lines green, and the
+--- `--- got` and `+++ want` headers dim.
+--- @param message string
+--- @return string
+function Report:diff_colors(message)
+  local lines = {}
+  for line in (message .. '\n'):gmatch '(.-)\n' do
+    if line == '--- got' or line == '+++ want' then
+      line = self.paint('dim', line)
+    elseif line:sub(1, 2) == '- ' then
+      line = self.paint('red', line)
+    elseif line:sub(1, 2) == '+ ' then
+      line = self.paint('green', line)
+    end
+    lines[#lines + 1] = line
+  end
+  return table.concat(lines, '\n')
+end
+
+--- Print every failure in full, then the counts and the run's time.
+function Report:summary()
+  local seconds = (vim.uv.hrtime() - self.started) / 1e9
+  for _, failure in ipairs(self.failures) do
+    io.stdout:write(
+      '\n',
+      self.paint('red', self.paint('bold', '✗ ' .. failure.name)),
+      '\n',
+      self:diff_colors(failure.message),
+      '\n'
+    )
+    if failure.output then
+      io.stdout:write(self.paint('dim', 'output:'), '\n', failure.output, '\n')
+    end
+  end
+  --- @param count integer
+  --- @param word string
+  --- @param style test.color.Style
+  local function count_of(count, word, style)
+    local text = ('%d %s'):format(count, word)
+    return count > 0 and self.paint(style, text) or text
+  end
+  io.stdout:write(
+    '\n',
+    count_of(self.counts.passed, 'passed', 'green'),
+    ', ',
+    count_of(self.counts.failed, 'failed', 'red'),
+    ', ',
+    count_of(self.counts.pending, 'pending', 'yellow'),
+    ('%s\n'):format(self.paint('dim', (' in %.2fs'):format(seconds)))
+  )
+end
+
+return Report
+
+  end, ...)
+end
+
+__mods._test_suite = function(...)
+  return __load("test.suite", function(...)
+---@type string[]
+local arg = {}
+--- The suite: spec files and the cases they declare. Loading a spec file runs
+--- its `describe` bodies immediately, which builds a tree of scopes; each `it`
+--- only records its function. A suite is every file's tree, with the cases
+--- chosen from it. The executors in `test.executor` run a suite.
+---
+--- Every case gets an id: its place in the file's collection order. A run in
+--- other processes (`--isolate`) collects each file once in the parent and
+--- again in each worker, and the id is how the parent names a case to a
+--- worker, so collection must build the same tree every time it runs.
 local M = {}
 
 --------------------------------------------------------------------------------
 -- The tree
 --------------------------------------------------------------------------------
 
---- @class test.runner.Scope
+--- @class test.suite.Scope
 --- @field name string
---- @field parent test.runner.Scope?
+--- @field parent test.suite.Scope?
 --- @field before_all fun()[]
 --- @field after_all fun()[]
 --- @field before_each fun()[]
 --- @field after_each fun()[]
---- @field children (test.runner.Scope|test.runner.Case)[]
+--- @field children (test.suite.Scope|test.suite.Case)[]
 
---- @class test.runner.Case
+--- @class test.suite.Case
+--- @field id integer  the case's place in its file's collection order
 --- @field name string
---- @field parent test.runner.Scope
+--- @field parent test.suite.Scope
 --- @field fn fun()?  nil for a pending case
 
--- The scope `describe`, `it`, and the hooks add to, while a spec file loads.
-local collecting --- @type test.runner.Scope?
+-- The scope `describe`, `it`, and the hooks add to, while a spec file loads,
+-- and the file's cases so far, whose count gives the next case its id.
+local collecting --- @type test.suite.Scope?
+local collected = {} --- @type test.suite.Case[]
 
 --- @param name string
---- @param parent test.runner.Scope?
---- @return test.runner.Scope
+--- @param parent test.suite.Scope?
+--- @return test.suite.Scope
 local function new_scope(name, parent)
   return {
     name = name,
@@ -1238,7 +2014,7 @@ local function new_scope(name, parent)
 end
 
 --- @param fn_name string
---- @return test.runner.Scope
+--- @return test.suite.Scope
 local function current_scope(fn_name)
   if collecting then return collecting end
   error(fn_name .. ': no spec run is active; run spec files with `nvim -l <test.lua>`', 3)
@@ -1268,14 +2044,18 @@ function M.it(name, fn)
   if type(fn) ~= 'function' then
     error(('it: %q needs a function; use pending for a case without one'):format(name), 2)
   end
-  table.insert(scope.children, { name = name, parent = scope, fn = fn })
+  local case = { id = #collected + 1, name = name, parent = scope, fn = fn }
+  collected[case.id] = case
+  table.insert(scope.children, case)
 end
 
 --- Declare a case that is reported as pending instead of run.
 --- @param name string
 function M.pending(name)
   local scope = current_scope 'pending'
-  table.insert(scope.children, { name = name, parent = scope })
+  local case = { id = #collected + 1, name = name, parent = scope }
+  collected[case.id] = case
+  table.insert(scope.children, case)
 end
 
 --- Run `fn` once, before the first case in the current scope runs, nested
@@ -1304,11 +2084,11 @@ function M.after_each(fn) table.insert(current_scope('after_each').after_each, f
 --- The names of a node's enclosing scopes and its own, joined by spaces. The
 --- file's root scope has no name of its own, so its cases start at their
 --- first `describe`.
---- @param node test.runner.Scope|test.runner.Case
+--- @param node test.suite.Scope|test.suite.Case
 --- @return string
-local function full_name(node)
+function M.full_name(node)
   local names = {}
-  local current = node --- @type (test.runner.Scope|test.runner.Case)?
+  local current = node --- @type (test.suite.Scope|test.suite.Case)?
   while current and current.parent do
     table.insert(names, 1, current.name)
     current = current.parent
@@ -1333,329 +2113,119 @@ local function describe_error(err, trace, path)
   return message .. '\n' .. table.concat(frames, '\n')
 end
 
---- Call `fn`, and return whether it succeeded and, when it did not, the
---- formatted error.
+--- Call spec code `fn`, and return whether it succeeded and, when it did not,
+--- the formatted error.
 --- @param fn function
 --- @param path string
 --- @return boolean ok, string? err
-local function protect(fn, path)
+function M.protect(fn, path)
   return xpcall(fn, function(e) return describe_error(e, debug.traceback('', 2), path) end)
 end
 
---------------------------------------------------------------------------------
--- The report
---------------------------------------------------------------------------------
-
---- @class test.runner.Failure
---- @field name string
---- @field message string  the error, with the traceback frames in the spec file
-
---- A case that takes longer than this prints its time beside its name, so the
---- slow cases stand out. 75 ms is mocha's default for a slow test.
-local SLOW_MS = 75
-
---- The run's counts and its output: each outcome is counted and printed in
---- one step, so the two cannot disagree.
---- @class test.runner.Report
---- @field counts { passed: integer, failed: integer, pending: integer }
---- @field failures test.runner.Failure[]
---- @field paint test.color.Paint
-local Report = {}
-Report.__index = Report
-
---- @param paint test.color.Paint
---- @return test.runner.Report
-function Report.new(paint)
-  return setmetatable(
-    { counts = { passed = 0, failed = 0, pending = 0 }, failures = {}, paint = paint },
-    Report
-  )
-end
-
+--- Load one spec file and collect its tree: its root scope, and its cases by
+--- id. A file that fails to load or to collect has no root and no cases, and
+--- the error instead.
 --- @param path string
-function Report:file(path) io.stdout:write(self.paint('bold', path), '\n') end
-
---- The text after a case's name: its time, dim, when it ran longer than
---- `SLOW_MS`, and nothing otherwise.
---- @param ms number?  nil for a case that never ran, e.g. under a failed before_all
---- @return string
-function Report:duration(ms)
-  if not ms then return '' end
-  -- Comparing the rounded time keeps the rule and the printed number in
-  -- agreement: 75.4 ms would otherwise print as a slow `(75ms)`.
-  local shown = math.floor(ms + 0.5)
-  if shown <= SLOW_MS then return '' end
-  return ' ' .. self.paint('dim', ('(%dms)'):format(shown))
-end
-
---- @param name string
---- @param ms number  the case's time, with its before_each and after_each hooks
-function Report:pass(name, ms)
-  self.counts.passed = self.counts.passed + 1
-  io.stdout:write('  ', self.paint('green', '✓'), ' ', name, self:duration(ms), '\n')
-end
-
---- @param name string
---- @param message string
---- @param ms? number  the case's time, with its hooks; nil when it never ran
-function Report:fail(name, message, ms)
-  self.counts.failed = self.counts.failed + 1
-  table.insert(self.failures, { name = name, message = message })
-  io.stdout:write('  ', self.paint('red', '✗'), ' ', name, self:duration(ms), '\n')
-end
-
---- A spec file that failed to load or to collect: one failure, named after
---- the file.
---- @param path string
---- @param message string
-function Report:load_error(path, message)
-  self.counts.failed = self.counts.failed + 1
-  table.insert(self.failures, { name = path, message = message })
-  io.stdout:write('  ', self.paint('red', '✗'), ' (the file did not load)\n')
-end
-
---- @param name string
-function Report:pending(name)
-  self.counts.pending = self.counts.pending + 1
-  io.stdout:write('  ', self.paint('yellow', '- ' .. name .. ' (pending)'), '\n')
-end
-
---- Color a failure message's diff: `-` lines red, `+` lines green, and the
---- `--- got` and `+++ want` headers dim.
---- @param message string
---- @return string
-function Report:diff_colors(message)
-  local lines = {}
-  for line in (message .. '\n'):gmatch '(.-)\n' do
-    if line == '--- got' or line == '+++ want' then
-      line = self.paint('dim', line)
-    elseif line:sub(1, 2) == '- ' then
-      line = self.paint('red', line)
-    elseif line:sub(1, 2) == '+ ' then
-      line = self.paint('green', line)
-    end
-    lines[#lines + 1] = line
-  end
-  return table.concat(lines, '\n')
-end
-
---- Print every failure in full, then the counts.
---- @param seconds number
-function Report:summary(seconds)
-  for _, failure in ipairs(self.failures) do
-    io.stdout:write(
-      '\n',
-      self.paint('red', self.paint('bold', '✗ ' .. failure.name)),
-      '\n',
-      self:diff_colors(failure.message),
-      '\n'
-    )
-  end
-  --- @param count integer
-  --- @param word string
-  --- @param style test.color.Style
-  local function count_of(count, word, style)
-    local text = ('%d %s'):format(count, word)
-    return count > 0 and self.paint(style, text) or text
-  end
-  io.stdout:write(
-    '\n',
-    count_of(self.counts.passed, 'passed', 'green'),
-    ', ',
-    count_of(self.counts.failed, 'failed', 'red'),
-    ', ',
-    count_of(self.counts.pending, 'pending', 'yellow'),
-    ('%s\n'):format(self.paint('dim', (' in %.2fs'):format(seconds)))
-  )
-end
-
---------------------------------------------------------------------------------
--- Running
---------------------------------------------------------------------------------
-
---- The scopes from the file's root down to the case's own scope.
---- @param case test.runner.Case
---- @return test.runner.Scope[]
-local function scopes_of(case)
-  local scopes = {}
-  local scope = case.parent --- @type test.runner.Scope?
-  while scope do
-    table.insert(scopes, 1, scope)
-    scope = scope.parent
-  end
-  return scopes
-end
-
---- Run one case with its `before_each` and `after_each` hooks, and record its
---- outcome. Before-hooks run from the outermost scope inward, and a failing
---- one skips the rest and the case; after-hooks run from the innermost scope
---- outward, always.
---- @param case test.runner.Case
---- @param path string
---- @param report test.runner.Report
-local function run_case(case, path, report)
-  local name = full_name(case)
-  if not case.fn then return report:pending(name) end
-
-  local started = vim.uv.hrtime()
-  local errors = {}
-  --- @param fn fun()
-  --- @return boolean
-  local function attempt(fn)
-    local ok, err = protect(fn, path)
-    if not ok then errors[#errors + 1] = err end
-    return ok
-  end
-
-  local scopes = scopes_of(case)
-  local ready = true
-  for _, scope in ipairs(scopes) do
-    for _, hook in ipairs(scope.before_each) do
-      ready = ready and attempt(hook)
-    end
-  end
-  if ready then attempt(case.fn) end
-  for i = #scopes, 1, -1 do
-    for _, hook in ipairs(scopes[i].after_each) do
-      attempt(hook)
-    end
-  end
-
-  local ms = (vim.uv.hrtime() - started) / 1e6
-  if #errors == 0 then return report:pass(name, ms) end
-  report:fail(name, table.concat(errors, '\n\n'), ms)
-end
-
---- Whether `filter`, a plain substring of the full case name, selects `case`.
---- @param case test.runner.Case
---- @param filter string?
---- @return boolean
-local function selected(case, filter)
-  return not filter or full_name(case):find(filter, 1, true) ~= nil
-end
-
---- The cases under `scope`, nested scopes included, that `filter` selects.
---- @param scope test.runner.Scope
---- @param filter string?
---- @param out? test.runner.Case[]
---- @return test.runner.Case[]
-local function selected_cases(scope, filter, out)
-  out = out or {}
-  for _, child in ipairs(scope.children) do
-    if child.children then
-      selected_cases(child --[[@as test.runner.Scope]], filter, out)
-    elseif
-      selected(child --[[@as test.runner.Case]], filter)
-    then
-      out[#out + 1] = child --[[@as test.runner.Case]]
-    end
-  end
-  return out
-end
-
---- Run a scope's selected cases between its `before_all` and `after_all`
---- hooks. A scope with nothing selected runs neither hook. A failing
---- `before_all` skips the rest of the scope and fails each selected case with
---- its error; `after_all` still runs, so it can undo a partial setup.
---- @param scope test.runner.Scope
---- @param path string
---- @param filter string?
---- @param report test.runner.Report
-local function run_scope(scope, path, filter, report)
-  local cases = selected_cases(scope, filter)
-  if #cases == 0 then return end
-  -- A hook failure is reported under the scope's name, or the file's for the
-  -- root scope.
-  local scope_name = scope.parent and full_name(scope) or path
-
-  local setup_err --- @type string?
-  for _, hook in ipairs(scope.before_all) do
-    local ok, err = protect(hook, path)
-    if not ok then
-      setup_err = ('before_all in %s failed:\n%s'):format(scope_name, err)
-      break
-    end
-  end
-
-  if setup_err then
-    for _, case in ipairs(cases) do
-      if case.fn then
-        report:fail(full_name(case), setup_err)
-      else
-        report:pending(full_name(case))
-      end
-    end
-  else
-    for _, child in ipairs(scope.children) do
-      if child.children then
-        run_scope(child --[[@as test.runner.Scope]], path, filter, report)
-      elseif
-        selected(child --[[@as test.runner.Case]], filter)
-      then
-        run_case(child --[[@as test.runner.Case]], path, report)
-      end
-    end
-  end
-
-  for _, hook in ipairs(scope.after_all) do
-    local ok, err = protect(hook, path)
-    if not ok then
-      report:fail(scope_name .. ' (after_all)', err --[[@as string]])
-    end
-  end
-end
-
---- Load one spec file and collect its tree. A file that fails to load or to
---- collect is reported as one failure, and its cases do not run.
---- @param path string
---- @return test.runner.Scope?, string?
+--- @return test.suite.Scope? root, table<integer, test.suite.Case> cases, string? err
 local function collect(path)
   local root = new_scope(path)
   local chunk, load_err = loadfile(path)
-  if not chunk then return nil, load_err end
-  collecting = root
-  local ok, err = protect(chunk, path)
-  collecting = nil
-  if not ok then return nil, err end
-  return root
+  if not chunk then return nil, {}, load_err end
+  local cases = {}
+  collecting, collected = root, cases
+  local ok, err = M.protect(chunk, path)
+  collecting, collected = nil, {}
+  if not ok then return nil, {}, err end
+  return root, cases, nil
 end
 
---- @param path string
---- @param filter string?  a plain substring of the full case name
---- @param report test.runner.Report
-local function run_file(path, filter, report)
-  -- Modules a file loads are dropped after it, so one file's module state
-  -- (a cache, a counter, a patched function) cannot leak into the next.
-  local loaded_before = {}
-  for name in pairs(package.loaded) do
-    loaded_before[name] = true
-  end
+--------------------------------------------------------------------------------
+-- The suite
+--------------------------------------------------------------------------------
 
-  report:file(path)
-  local root, err = collect(path)
-  if root then
-    run_scope(root, path, filter, report)
-  else
-    report:load_error(path, err --[[@as string]])
-  end
+--- One spec file of a suite: its collected tree and the cases chosen from it,
+--- or why it failed to load.
+---
+--- A file keeps the modules its collection loaded, and puts exactly those
+--- back when it runs. So a spec's top-level `local m = require 'm'` and its
+--- cases' `require 'm'` share one instance, while no file's modules are
+--- loaded during another file's collection or run.
+--- @class test.SuiteFile
+--- @field path string
+--- @field root? test.suite.Scope  nil when the file failed to load
+--- @field cases table<integer, test.suite.Case>  by id, from 1; none when it failed
+--- @field load_error? string
+--- @field modules table<string, any>  what collecting it added to `package.loaded`
+--- @field ids integer[]  the chosen cases, in collection order
 
+--- Spec files and the cases chosen from them. Every file stays in a suite,
+--- even with no case chosen, so the report still lists it and still reports
+--- a file that failed to load.
+--- @class test.Suite
+--- @field files test.SuiteFile[]
+local Suite = {}
+Suite.__index = Suite
+M.Suite = Suite
+
+--- Call `fn`, then remove every module it loaded from `package.loaded`, and
+--- return them.
+--- @param fn fun()
+--- @return table<string, any>
+local function taking_modules(fn)
+  local before = {}
   for name in pairs(package.loaded) do
-    if not loaded_before[name] then package.loaded[name] = nil end
+    before[name] = true
   end
+  fn()
+  local taken = {}
+  for name, value in pairs(package.loaded) do
+    if not before[name] then
+      taken[name], package.loaded[name] = value, nil
+    end
+  end
+  return taken
 end
 
---- Run every file in order, print a report, and return it.
+--- Collect every file, in order, with all of its cases chosen.
 --- @param paths string[]
---- @param opts { filter?: string, paint: test.color.Paint }
---- @return test.runner.Report
-function M.run(paths, opts)
-  local report = Report.new(opts.paint)
-  local started = vim.uv.hrtime()
+--- @return test.Suite
+function Suite.collect(paths)
+  local files = {}
   for _, path in ipairs(paths) do
-    run_file(path, opts.filter, report)
+    local root, cases, err --- @type test.suite.Scope?, table<integer, test.suite.Case>, string?
+    local modules = taking_modules(function()
+      root, cases, err = collect(path)
+    end)
+    local ids = vim.tbl_map(function(case) return case.id end, cases)
+    files[#files + 1] =
+      { path = path, root = root, cases = cases, load_error = err, modules = modules, ids = ids }
   end
-  report:summary((vim.uv.hrtime() - started) / 1e9)
-  return report
+  return setmetatable({ files = files }, Suite)
+end
+
+--- The same suite with only the chosen cases that `keep` accepts.
+--- @param keep fun(case: test.suite.Case): boolean
+--- @return test.Suite
+function Suite:select(keep)
+  local files = vim.tbl_map(function(file)
+    local ids = vim.tbl_filter(function(id) return keep(file.cases[id]) end, file.ids)
+    return vim.tbl_extend('force', file, { ids = ids })
+  end, self.files)
+  return setmetatable({ files = files }, Suite)
+end
+
+--- Call `fn` with `file`'s modules loaded, and unload them afterward, together
+--- with any module `fn` loads, so one file's module state (a cache, a
+--- counter, a patched function) cannot leak into the next.
+--- @param file test.SuiteFile
+--- @param fn fun()
+function M.with_modules(file, fn)
+  taking_modules(function()
+    for name, value in pairs(file.modules) do
+      package.loaded[name] = value
+    end
+    fn()
+  end)
 end
 
 return M
@@ -1942,6 +2512,1490 @@ return M
 end
 
 return __mods._args("args")
+
+  end, ...)
+end
+
+__mods._test_vendor_guard = function(...)
+  return __load("test.vendor.guard", function(...)
+---@type string[]
+local arg = {}
+---@diagnostic disable
+-- Generated by nvim-bundle; do not edit.
+-- returns: guard
+local __mods = {}
+---@return { loaded: table<string, any>, LOADING: table }
+local function __cache()
+  local private = { loaded = {}, LOADING = {} }
+  local nvim, info = rawget(_G, 'vim'), debug.getinfo(1, 'Sl')
+  if not nvim or not info or info.source:sub(1, 1) ~= '@' then return private end
+  local path = nvim.uv.fs_realpath(info.source:sub(2))
+  if not path then return private end
+  local key = ('nvim-bundle:%s:%d'):format(path, info.currentline)
+  package.loaded[key] = package.loaded[key] or private
+  return package.loaded[key]
+end
+local __cached = __cache()
+local __loaded, __LOADING = __cached.loaded, __cached.LOADING
+---@generic T
+---@param id string
+---@param load fun(...): T
+---@return T
+local function __load(id, load, ...)
+  local cached = __loaded[id]
+  if cached == __LOADING then
+    error("loop or previous error loading module '" .. id .. "'", 2)
+  end
+  if cached ~= nil then return cached end
+  __loaded[id] = __LOADING
+  local value = load(...)
+  if value == nil then value = true end
+  __loaded[id] = value
+  return value
+end
+
+---@param arg string[]
+local function __entry(arg, ...)
+-- vim: set ft=lua:
+-- guard: schema validation plus a LuaCATS type generator.
+--
+-- The module is unified: requiring it gives you the library, while running it
+-- as the main `-l` script runs the generator. The vendored argument parser is
+-- loaded only on the CLI path, so a library consumer needs no other files.
+
+--- @return boolean
+local function is_main()
+  local info = debug.getinfo(1, 'S')
+  local argv0 = arg and arg[0]
+  if not info or not argv0 or info.source:sub(1, 1) ~= '@' then return false end
+  local this = vim.fs.normalize(vim.fn.fnamemodify(info.source:sub(2), ':p'))
+  return this == vim.fs.normalize(vim.fn.fnamemodify(argv0, ':p'))
+end
+
+-- A checkout runs this file directly, so `lua/` is not on `package.path`. The
+-- published bundle links its requires statically and needs no bootstrap. The
+-- vendor-file check keeps a bundled copy from touching the host's path.
+local running_as_main = is_main()
+if running_as_main and arg and arg[0] then
+  local script_dir = vim.fs.dirname(vim.fn.fnamemodify(arg[0], ':p'))
+  if vim.uv.fs_stat(script_dir .. '/guard/vendor/args.lua') then
+    package.path = script_dir .. '/?.lua;' .. script_dir .. '/?/init.lua;' .. package.path
+  end
+end
+
+local M = {}
+
+-- The version a checkout reports. The release task stamps the tag into the
+-- published `guard.lua`, so the artifact always names the release it came from.
+local VERSION = '0.0.0'
+
+--- @alias guard.ParseResult<T> guard.ParseOk<T>|guard.ParseError
+--- @alias guard.ParseOk<T> { ok: true, value: T }
+
+---@class guard.ParseProblem
+---@field path string[] Path to the problematic value
+---@field message string Description of what went wrong
+---@field actual any? The actual value that failed (for verbose mode)
+
+---@class guard.ParseError
+---@field ok false
+---@field problems guard.ParseProblem[]
+---@field actual any The root value that was being parsed
+local ParseError = {}
+ParseError.__index = ParseError
+
+function ParseError.new(actual, problems)
+  return setmetatable({
+    ok = false,
+    actual = actual,
+    problems = problems,
+  }, ParseError)
+end
+
+--- Helper to create a successful result
+---@param value any
+---@return guard.ParseResult<any>
+local function ok(value) return { ok = true, value = value } end
+
+--- Helper to create a failed result
+---@param actual any
+---@param problems guard.ParseProblem[]
+---@return guard.ParseResult<any>
+local function err(actual, problems) return ParseError.new(actual, problems) end
+
+--- Format the error for display
+---@param verbose boolean? Show actual values in error
+---@return string
+function ParseError:format(verbose)
+  local lines = {}
+  local n = #self.problems
+  table.insert(lines, string.format('Validation failed (%d problem%s):', n, n > 1 and 's' or ''))
+
+  for i, p in ipairs(self.problems) do
+    local path_str = #p.path > 0 and table.concat(p.path, '') or '(root)'
+    local line = string.format('  %d. `%s`: %s', i, path_str, p.message)
+    if verbose and p.actual ~= nil then
+      local ok, encoded = pcall(vim.json.encode, p.actual)
+      if ok then
+        line = line .. string.format(' (got: %s)', encoded)
+      else
+        line = line .. string.format(' (got: %s)', tostring(p.actual))
+      end
+    end
+    table.insert(lines, line)
+  end
+
+  return table.concat(lines, '\n')
+end
+
+function ParseError:__tostring() return self:format(false) end
+
+M.ParseError = ParseError
+
+--------------------------------------------------------------------------------
+-- Schema
+--------------------------------------------------------------------------------
+
+-- Schema metadata for type generation
+-- These mirror the guard structure for introspection
+
+---@alias SchemaType
+---| 'any'
+---| 'nil'
+---| 'string'
+---| 'number'
+---| 'integer'
+---| 'boolean'
+---| 'table'
+---| 'function'
+---| 'userdata'
+---| 'thread'
+---| 'literal'
+---| 'pattern'
+---| 'object'
+---| 'record'
+---| 'array'
+---| 'tuple'
+---| 'one_of'
+---| 'all_of'
+---| 'optional'
+---| 'default'
+---| 'map'
+---| 'custom'
+
+---@class Schema
+---@field type SchemaType
+---@field values? any[] For literal
+---@field pattern? string For pattern
+---@field fields? table<string, Guard> For object
+---@field key_guard? Guard For record
+---@field value_guard? Guard For record
+---@field item_guard? Guard For array
+---@field guards? Guard[] For tuple, one_of, all_of
+---@field inner? Guard For optional, default, map
+---@field opts? table Additional options
+
+---@class Guard
+---@field _parse fun(x: unknown): guard.ParseResult<any>
+---@field _schema Schema? Schema metadata for type generation
+local Guard = {}
+Guard.__index = Guard
+
+--- Create a new Guard
+---@param schema Schema? Optional schema metadata
+---@param parse fun(x: unknown): guard.ParseResult<any> Returns parse result
+---@return Guard
+function Guard.new(schema, parse) return setmetatable({ _parse = parse, _schema = schema }, Guard) end
+
+--- Helper to create a single problem
+---@param msg string
+---@param actual any?
+---@return guard.ParseProblem[]
+local function problem(msg, actual) return { { path = {}, message = msg, actual = actual } } end
+
+--- Prepend a path segment to all problems
+---@param segment string
+---@param problems guard.ParseProblem[]
+---@return guard.ParseProblem[]
+local function prepend_path(segment, problems)
+  local result = {}
+  for _, p in ipairs(problems) do
+    table.insert(result, {
+      path = vim.list_extend({ segment }, p.path),
+      message = p.message,
+      actual = p.actual,
+    })
+  end
+  return result
+end
+
+--- A failed result as a ParseError with at least one problem. A custom guard
+--- may fail without listing any, and a reader should never see an empty list.
+---@param result guard.ParseResult<any> a failed one
+---@return guard.ParseError
+local function failure(result)
+  -- emmylua does not narrow the result union on `ok`.
+  --- @cast result guard.ParseError
+  return ParseError.new(
+    result.actual,
+    result.problems or problem('Validation failed', result.actual)
+  )
+end
+
+--- Parse a value, raising the formatted error on failure. Invalid input is the
+--- caller's bug here, so the message names the caller's line.
+---@param x unknown
+---@return any
+function Guard:parse(x)
+  local result = self._parse(x)
+  if not result.ok then error(failure(result):format(false), 2) end
+  return result.value
+end
+
+--- Parse a value that may be invalid, such as a file or a user's input, and
+--- return the failure for the caller to report. A valid value can be nil, so a
+--- caller tests `err`, not `value`.
+---@param x unknown
+---@return any value nil on failure
+---@return guard.ParseError? err nil on success
+function Guard:try_parse(x)
+  local result = self._parse(x)
+  if not result.ok then return nil, failure(result) end
+  return result.value, nil
+end
+
+--- Check if a value matches this guard (no coercion)
+---@param x unknown
+---@return boolean
+function Guard:is(x)
+  local result = self._parse(x)
+  return result.ok and rawequal(x, result.value) or false
+end
+
+--- Check if a value can be parsed by this guard (allows coercion)
+---@param x unknown
+---@return boolean
+function Guard:matches(x)
+  local result = self._parse(x)
+  return result.ok or false
+end
+
+--- Make this guard optional (allows nil)
+---@return Guard
+function Guard:optional()
+  local inner = self._parse
+  return Guard.new({ type = 'optional', inner = self }, function(x)
+    if x == nil then return ok(nil) end
+    return inner(x)
+  end)
+end
+
+--- Decode nil as `make()`, and parse any other value with this guard. Unlike
+--- `optional`, the generated type is the inner type, not nil-able, so readers
+--- need not handle a nil that parsing already ruled out. `make` returns the
+--- parsed value itself, and it runs on every parse, so a table default is never
+--- shared between results.
+---@param make fun(): any
+---@return Guard
+function Guard:default(make)
+  local inner = self._parse
+  return Guard.new({ type = 'default', inner = self }, function(x)
+    if x == nil then return ok(make()) end
+    return inner(x)
+  end)
+end
+
+--- Transform to array guard
+---@param opts? { from_nil: boolean }
+---@return Guard
+function Guard:array(opts)
+  local inner = self._parse
+  return Guard.new({ type = 'array', item_guard = self, opts = opts }, function(x)
+    if opts and opts.from_nil and x == nil then return ok {} end
+    if type(x) ~= 'table' then return err(x, problem('Expected array', x)) end
+
+    local result = {}
+    local all_problems = {}
+
+    for i, v in ipairs(x) do
+      local res = inner(v)
+      if not res.ok then
+        vim.list_extend(
+          all_problems,
+          prepend_path(string.format('[%d]', i), res.problems or problem('Invalid', v))
+        )
+      else
+        result[i] = res.value
+      end
+    end
+
+    if #all_problems > 0 then return err(x, all_problems) end
+    return ok(result)
+  end)
+end
+
+--- Transform to non-empty array guard
+---@return Guard
+function Guard:array_nonempty()
+  local arr_guard = self:array()
+  local g = arr_guard:map(function(x)
+    if #x == 0 then return err(x, problem('Expected non-empty array', x)) end
+    return ok(x)
+  end)
+  -- Preserve array schema but mark as non-empty
+  g._schema = { type = 'array', item_guard = self, opts = { nonempty = true } }
+  return g
+end
+
+--- Map/transform the parsed value
+---@param fn fun(x: any): guard.ParseResult<any>
+---@return Guard
+function Guard:map(fn)
+  local inner = self._parse
+  return Guard.new({ type = 'map', inner = self }, function(x)
+    local res = inner(x)
+    if not res.ok then return res end
+    return fn(res.value)
+  end)
+end
+
+--- Add an invariant (predicate that must be true)
+---@param pred fun(x: any): boolean
+---@param msg string
+---@return Guard
+function Guard:invariant(pred, msg)
+  local g = self:map(function(x)
+    if not pred(x) then return err(x, problem(msg, x)) end
+    return ok(x)
+  end)
+  -- Invariants don't change the type, preserve inner schema
+  g._schema = self._schema
+  return g
+end
+
+--- Combine with another guard (must match both)
+---@param other Guard
+---@return Guard
+function Guard:and_(other) return M.all_of(self, other) end
+
+--- Alternative guard (must match either)
+---@param other Guard
+---@return Guard
+function Guard:or_(other) return M.one_of(self, other) end
+
+-- Primitives --
+
+--- Match any value
+---@return Guard
+function M.any()
+  return Guard.new({ type = 'any' }, function(x) return ok(x) end)
+end
+
+--- Match nil
+---@return Guard
+function M.nil_()
+  return Guard.new({ type = 'nil' }, function(x)
+    if x == nil then return ok(nil) end
+    return err(x, problem('Expected nil', x))
+  end)
+end
+
+--- Match string
+---@return Guard
+function M.string()
+  return Guard.new({ type = 'string' }, function(x)
+    if type(x) == 'string' then return ok(x) end
+    return err(x, problem('Expected string', x))
+  end)
+end
+
+--- Match number
+---@return Guard
+function M.number()
+  return Guard.new({ type = 'number' }, function(x)
+    if type(x) == 'number' then return ok(x) end
+    return err(x, problem('Expected number', x))
+  end)
+end
+
+--- Match integer
+---@return Guard
+function M.integer()
+  return Guard.new({ type = 'integer' }, function(x)
+    if type(x) == 'number' and x == math.floor(x) then return ok(x) end
+    return err(x, problem('Expected integer', x))
+  end)
+end
+
+--- Match boolean
+---@return Guard
+function M.boolean()
+  return Guard.new({ type = 'boolean' }, function(x)
+    if type(x) == 'boolean' then return ok(x) end
+    return err(x, problem('Expected boolean', x))
+  end)
+end
+
+--- Match table (any table)
+---@return Guard
+function M.table()
+  return Guard.new({ type = 'table' }, function(x)
+    if type(x) == 'table' then return ok(x) end
+    return err(x, problem('Expected table', x))
+  end)
+end
+
+--- Match function
+---@return Guard
+function M.func()
+  return Guard.new({ type = 'function' }, function(x)
+    if type(x) == 'function' then return ok(x) end
+    return err(x, problem('Expected function', x))
+  end)
+end
+
+--- Match userdata
+---@return Guard
+function M.userdata()
+  return Guard.new({ type = 'userdata' }, function(x)
+    if type(x) == 'userdata' then return ok(x) end
+    return err(x, problem('Expected userdata', x))
+  end)
+end
+
+--- Match thread (coroutine)
+---@return Guard
+function M.thread()
+  return Guard.new({ type = 'thread' }, function(x)
+    if type(x) == 'thread' then return ok(x) end
+    return err(x, problem('Expected thread', x))
+  end)
+end
+
+-- Literals and patterns --
+
+--- Match exact literal value(s)
+---@param ... any Values to match
+---@return Guard
+function M.literal(...)
+  local values = { ... }
+  local set = {}
+  for _, v in ipairs(values) do
+    set[v] = true
+  end
+  local expected = table.concat(
+    vim.tbl_map(function(v)
+      if type(v) == 'string' then return string.format('%q', v) end
+      return tostring(v)
+    end, values),
+    ', '
+  )
+  return Guard.new({ type = 'literal', values = values }, function(x)
+    if set[x] then return ok(x) end
+    return err(x, problem('Expected one of: ' .. expected, x))
+  end)
+end
+
+--- Match string against pattern
+---@param pat string Lua pattern
+---@return Guard
+function M.pattern(pat)
+  return Guard.new({ type = 'pattern', pattern = pat }, function(x)
+    if type(x) ~= 'string' then return err(x, problem('Expected string', x)) end
+    if x:match(pat) then return ok(x) end
+    return err(x, problem(string.format('String does not match pattern: %s', pat), x))
+  end)
+end
+
+-- Composite types --
+
+--- Match object with specific shape
+---@param spec table<string, Guard>
+---@param opts? { strict: boolean }
+---@return Guard
+function M.object(spec, opts)
+  local options = opts or {}
+  return Guard.new({ type = 'object', fields = spec, opts = options }, function(x)
+    if type(x) ~= 'table' then return err(x, problem('Expected table', x)) end
+
+    local result = {}
+    local all_problems = {}
+
+    -- Check specified fields
+    for k, guard in pairs(spec) do
+      local res = guard._parse(x[k])
+      if not res.ok then
+        vim.list_extend(
+          all_problems,
+          prepend_path('.' .. k, res.problems or problem('Invalid', x[k]))
+        )
+      else
+        result[k] = res.value
+      end
+    end
+
+    -- Handle extra keys
+    for k, v in pairs(x) do
+      if spec[k] == nil and options.strict then
+        table.insert(all_problems, { path = { '.' .. k }, message = 'Unexpected key', actual = v })
+      elseif spec[k] == nil then
+        result[k] = v -- passthrough
+      end
+    end
+
+    if #all_problems > 0 then return err(x, all_problems) end
+    return ok(result)
+  end)
+end
+
+--- Match record (dictionary with uniform key/value types)
+---@param key_guard Guard
+---@param value_guard Guard
+---@return Guard
+function M.record(key_guard, value_guard)
+  return Guard.new(
+    { type = 'record', key_guard = key_guard, value_guard = value_guard },
+    function(x)
+      if type(x) ~= 'table' then return err(x, problem('Expected table', x)) end
+
+      local result = {}
+      local all_problems = {}
+
+      for k, v in pairs(x) do
+        local k_res = key_guard._parse(k)
+        local v_res = value_guard._parse(v)
+
+        if not k_res.ok then
+          vim.list_extend(
+            all_problems,
+            prepend_path(
+              string.format('[key %q]', tostring(k)),
+              k_res.problems or problem('Invalid key', k)
+            )
+          )
+        end
+        if not v_res.ok then
+          vim.list_extend(
+            all_problems,
+            prepend_path(
+              string.format('[%q]', tostring(k)),
+              v_res.problems or problem('Invalid value', v)
+            )
+          )
+        end
+        if k_res.ok and v_res.ok then result[k_res.value] = v_res.value end
+      end
+
+      if #all_problems > 0 then return err(x, all_problems) end
+      return ok(result)
+    end
+  )
+end
+
+--- Match array with specific item type
+---@param guard Guard
+---@return Guard
+function M.array(guard) return guard:array() end
+
+--- Match tuple with specific types at each position
+---@param ... Guard Guards for each position
+---@return Guard
+function M.tuple(...)
+  local guards = { ... }
+  local n = #guards
+  return Guard.new({ type = 'tuple', guards = guards }, function(x)
+    if type(x) ~= 'table' then return err(x, problem('Expected tuple (table)', x)) end
+    if #x ~= n then
+      return err(x, problem(string.format('Expected tuple of length %d, got %d', n, #x), x))
+    end
+
+    local result = {}
+    local all_problems = {}
+
+    for i, guard in ipairs(guards) do
+      local res = guard._parse(x[i])
+      if not res.ok then
+        vim.list_extend(
+          all_problems,
+          prepend_path(string.format('[%d]', i), res.problems or problem('Invalid', x[i]))
+        )
+      else
+        result[i] = res.value
+      end
+    end
+
+    if #all_problems > 0 then return err(x, all_problems) end
+    return ok(result)
+  end)
+end
+
+-- Combinators --
+
+--- The names `type()` can return, so a misspelled `by_type` key fails when the
+--- guard is built rather than silently never matching.
+local LUA_TYPES = {
+  ['nil'] = true,
+  boolean = true,
+  number = true,
+  string = true,
+  table = true,
+  ['function'] = true,
+  userdata = true,
+  thread = true,
+}
+
+--- Choose one guard by the input's Lua type, so a failure reports only the
+--- problems of the shape the input was written in. `one_of` instead reports
+--- every alternative: an object with one bad field is also told that it is not
+--- a string. The schema is still a `one_of`, so the generated type is the same
+--- union.
+---@param alternatives table<type, Guard>
+---@return Guard
+function M.by_type(alternatives)
+  local kinds = vim.tbl_keys(alternatives)
+  -- Sorted, so the generated union reads the same on every run.
+  table.sort(kinds)
+  for _, kind in ipairs(kinds) do
+    if not LUA_TYPES[kind] then error('by_type: not a Lua type: ' .. kind, 2) end
+  end
+  local guards = vim.tbl_map(function(kind) return alternatives[kind] end, kinds)
+  local expected = 'Expected ' .. table.concat(kinds, ' or ')
+
+  return Guard.new({ type = 'one_of', guards = guards }, function(x)
+    local chosen = alternatives[type(x)]
+    if not chosen then return err(x, problem(expected, x)) end
+    return chosen._parse(x)
+  end)
+end
+
+--- Match if any guard matches
+---@param ... Guard
+---@return Guard
+function M.one_of(...)
+  local guards = { ... }
+  return Guard.new({ type = 'one_of', guards = guards }, function(x)
+    local all_problems = {}
+    for i, guard in ipairs(guards) do
+      local res = guard._parse(x)
+      if res.ok then return ok(res.value) end
+      -- Collect problems from each failed alternative
+      vim.list_extend(
+        all_problems,
+        prepend_path(string.format('(alt %d)', i), res.problems or problem('Did not match', x))
+      )
+    end
+    -- Return a summary problem + all the alternatives
+    local summary =
+      { { path = {}, message = 'Expected one of the alternatives to match', actual = x } }
+    vim.list_extend(summary, all_problems)
+    return err(x, summary)
+  end)
+end
+
+--- Match if all guards match (intersection)
+---@param ... Guard
+---@return Guard
+function M.all_of(...)
+  local guards = { ... }
+  return Guard.new({ type = 'all_of', guards = guards }, function(x)
+    local curr = x
+    for _, guard in ipairs(guards) do
+      local res = guard._parse(curr)
+      if not res.ok then return res end
+      curr = res.value
+    end
+    return ok(curr)
+  end)
+end
+
+-- Converters ("into" functions) --
+
+--- Coerce to number
+---@return Guard
+function M.into_number()
+  return Guard.new({ type = 'number' }, function(x)
+    if type(x) == 'number' then return ok(x) end
+    if type(x) == 'string' then
+      local n = tonumber(x)
+      if n then return ok(n) end
+      return err(x, problem('Cannot parse string as number', x))
+    end
+    return err(x, problem('Expected number or numeric string', x))
+  end)
+end
+
+--- Coerce to string
+---@return Guard
+function M.into_string()
+  return Guard.new({ type = 'string' }, function(x)
+    if type(x) == 'string' then return ok(x) end
+    if type(x) == 'number' or type(x) == 'boolean' then return ok(tostring(x)) end
+    return err(x, problem('Cannot convert to string', x))
+  end)
+end
+
+--- Coerce to boolean
+---@return Guard
+function M.into_boolean()
+  return Guard.new({ type = 'boolean' }, function(x)
+    if type(x) == 'boolean' then return ok(x) end
+    if type(x) == 'string' then
+      local lower = x:lower()
+      if lower == 'true' or lower == '1' or lower == 'yes' then return ok(true) end
+      if lower == 'false' or lower == '0' or lower == 'no' or lower == '' then return ok(false) end
+      return err(x, problem('Cannot parse string as boolean (expected true/false/yes/no/1/0)', x))
+    end
+    if type(x) == 'number' then return ok(x ~= 0) end
+    return err(x, problem('Cannot convert to boolean', x))
+  end)
+end
+
+--- Parse JSON string
+---@param guard Guard Guard to apply to parsed value
+---@return Guard
+function M.from_json(guard)
+  return Guard.new(guard._schema, function(x)
+    if type(x) ~= 'string' then return err(x, problem('Expected JSON string', x)) end
+    local ok_decode, parsed = pcall(
+      function() return vim.json.decode(x, { luanil = { object = true, array = true } }) end
+    )
+    if not ok_decode then return err(x, problem('Invalid JSON: ' .. tostring(parsed), x)) end
+    local g_res = guard._parse(parsed)
+    if not g_res.ok then
+      return err(x, prepend_path('(json)', g_res.problems or problem('Invalid', parsed)))
+    end
+    return g_res
+  end)
+end
+
+--- Serialize to JSON
+---@return Guard
+function M.into_json()
+  return Guard.new({ type = 'string' }, function(x)
+    local ok_encode, json = pcall(vim.json.encode, x)
+    if not ok_encode then
+      return err(x, problem('Cannot serialize to JSON: ' .. tostring(json), x))
+    end
+    return ok(json)
+  end)
+end
+
+--- Match instance of class (checks metatable)
+---@param mt table The metatable to check against
+---@param name string? Optional name for error messages
+---@return Guard
+function M.instance_of(mt, name)
+  local type_name = name or 'specific metatable'
+  return Guard.new({ type = 'custom', opts = { name = type_name } }, function(x)
+    if type(x) == 'table' and getmetatable(x) == mt then return ok(x) end
+    return err(x, problem('Expected instance of ' .. type_name, x))
+  end)
+end
+
+--------------------------------------------------------------------------------
+-- LuaCATS
+--------------------------------------------------------------------------------
+
+-- LuaCATS type generation from schema metadata
+
+--- Infer the LuaCATS type string for this guard
+---@param name string? Name for complex types (classes)
+---@param visited table<Guard, string>? Track visited guards to avoid cycles
+---@param named table<Guard, string>? Guards registered under a qualified name
+---@return string type_str The LuaCATS type string
+---@return string[]? class_defs Additional class definitions needed
+function Guard:infer_type(name, visited, named)
+  visited = visited or {}
+
+  -- Cycle detection
+  if visited[self] then return visited[self], nil end
+
+  local schema = self._schema
+  if not schema then return 'any', nil end
+
+  -- A schema registered in the namespace keeps that name wherever it is
+  -- referenced. Regenerating it under the positional name would produce a
+  -- structurally identical but distinct type, which no call site can satisfy.
+  local registered = named and named[self]
+  if registered and registered ~= name then return registered, nil end
+
+  local t = schema.type
+  local class_defs = {}
+
+  -- Primitives
+  if t == 'any' then return 'any', nil end
+  if t == 'nil' then return 'nil', nil end
+  if t == 'string' then return 'string', nil end
+  if t == 'number' then return 'number', nil end
+  if t == 'integer' then return 'integer', nil end
+  if t == 'boolean' then return 'boolean', nil end
+  if t == 'table' then return 'table', nil end
+  if t == 'function' then return 'function', nil end
+  if t == 'userdata' then return 'userdata', nil end
+  if t == 'thread' then return 'thread', nil end
+
+  -- Literal (union of literal types)
+  if t == 'literal' then
+    local parts = {}
+    for _, v in ipairs(schema.values or {}) do
+      if type(v) == 'string' then
+        table.insert(parts, string.format("'%s'", v:gsub("'", "\\'")))
+      elseif type(v) == 'boolean' or type(v) == 'number' then
+        table.insert(parts, tostring(v))
+      else
+        table.insert(parts, 'any')
+      end
+    end
+    return table.concat(parts, '|'), nil
+  end
+
+  -- Pattern (just string)
+  if t == 'pattern' then return 'string', nil end
+
+  -- Optional
+  if t == 'optional' then
+    local inner = schema.inner
+    if inner then
+      local inner_type, inner_defs = inner:infer_type(name, visited, named)
+      if inner_defs then vim.list_extend(class_defs, inner_defs) end
+      return inner_type .. '?', #class_defs > 0 and class_defs or nil
+    end
+    return 'any?', nil
+  end
+
+  -- Array
+  if t == 'array' then
+    local item = schema.item_guard
+    if item then
+      local item_type, item_defs = item:infer_type(name and (name .. '_item'), visited, named)
+      if item_defs then vim.list_extend(class_defs, item_defs) end
+      return item_type .. '[]', #class_defs > 0 and class_defs or nil
+    end
+    return 'any[]', nil
+  end
+
+  -- Tuple
+  if t == 'tuple' then
+    local parts = {}
+    for i, guard in ipairs(schema.guards or {}) do
+      local part_type, part_defs = guard:infer_type(name and (name .. '_' .. i), visited, named)
+      if part_defs then vim.list_extend(class_defs, part_defs) end
+      table.insert(parts, part_type)
+    end
+    return '[' .. table.concat(parts, ', ') .. ']', #class_defs > 0 and class_defs or nil
+  end
+
+  -- Record
+  if t == 'record' then
+    local key_type = 'string'
+    local val_type = 'any'
+    if schema.key_guard then key_type = schema.key_guard:infer_type(nil, visited, named) end
+    if schema.value_guard then
+      local vt, vd = schema.value_guard:infer_type(name and (name .. '_value'), visited, named)
+      val_type = vt
+      if vd then vim.list_extend(class_defs, vd) end
+    end
+    return string.format('table<%s, %s>', key_type, val_type), #class_defs > 0 and class_defs or nil
+  end
+
+  -- Anonymous object: nothing to hang a class off, so inline it as a table.
+  if t == 'object' and not name then return 'table', nil end
+
+  -- Object (generates a class)
+  if t == 'object' then
+    local class_name = name --[[@as string]]
+    visited[self] = class_name
+
+    local lines = { '---@class ' .. class_name }
+    for k, guard in pairs(schema.fields or {}) do
+      local field_name = class_name .. '_' .. k
+      local is_optional = guard._schema and guard._schema.type == 'optional'
+
+      -- For optional fields, get the inner type to avoid double '?'
+      local type_guard = (is_optional and guard._schema) and guard._schema.inner or guard
+      local field_type, field_defs = type_guard:infer_type(field_name, visited, named)
+      if field_defs then vim.list_extend(class_defs, field_defs) end
+
+      local field_annotation = is_optional and (k .. '?') or k
+      table.insert(lines, string.format('---@field %s %s', field_annotation, field_type))
+    end
+
+    table.insert(class_defs, 1, table.concat(lines, '\n'))
+    return class_name, class_defs
+  end
+
+  -- Union (one_of)
+  if t == 'one_of' then
+    local parts = {}
+    for i, guard in ipairs(schema.guards or {}) do
+      local part_type, part_defs = guard:infer_type(name and (name .. '_alt' .. i), visited, named)
+      if part_defs then vim.list_extend(class_defs, part_defs) end
+      table.insert(parts, part_type)
+    end
+    return table.concat(parts, '|'), #class_defs > 0 and class_defs or nil
+  end
+
+  -- Intersection (all_of)
+  if t == 'all_of' then
+    -- LuaCATS doesn't have true intersection, use first type or merge
+    local first = (schema.guards or {})[1]
+    if first then return first:infer_type(name, visited, named) end
+    return 'any', nil
+  end
+
+  -- Default and map both produce the inner type.
+  if t == 'default' or t == 'map' then
+    local inner = schema.inner
+    if inner then return inner:infer_type(name, visited, named) end
+    return 'any', nil
+  end
+
+  -- Custom
+  if t == 'custom' then
+    local custom_name = schema.opts and schema.opts.name
+    return custom_name or 'any', nil
+  end
+
+  return 'any', nil
+end
+
+--- Generate LuaCATS annotations for this guard
+---@param name string The type name
+---@return string annotations The full LuaCATS annotation block
+function Guard:to_luacats(name, named)
+  local type_str, class_defs = self:infer_type(name, {}, named)
+
+  if not class_defs or #class_defs == 0 then
+    -- Simple type, just alias
+    return string.format('---@alias %s %s', name, type_str)
+  end
+
+  -- Return all class definitions
+  return table.concat(class_defs, '\n\n')
+end
+
+-- Export Guard class for extension
+M.Guard = Guard
+
+--- Helper to create a successful result (exported for external use in :map())
+M.ok = ok
+
+--- Helper to create a failed result (exported for external use in :map())
+M.err = err
+
+--- Helper to create a single problem (exported for external use in :map())
+M.problem = problem
+
+--------------------------------------------------------------------------------
+-- CLI
+--------------------------------------------------------------------------------
+
+local USAGE = [[
+Usage: guard [options] <file.lua|glob> [...]
+
+Writes a .types.lua file next to each target file. The target file must export
+a table containing guard schemas; every guard found in that table becomes a
+---@class or ---@alias annotation.
+
+The generated type-name prefix comes from the target path: everything through
+the last `lua/` is stripped, `.lua` is dropped, and `/` becomes `.`. So
+`lua/foo/bar.lua` and `/repo/lua/foo/bar.lua` both emit types named
+`foo.bar.*`.
+
+Options:
+  --module <name>   Module name target files require guard as (repeatable;
+                    default: guard)
+  -h, --help        Show this help
+  -V, --version     Print the guard and Neovim versions
+
+Examples:
+  guard lua/foo/schemas.lua
+  guard 'lua/foo/*.lua'
+  guard --module myplugin.guard lua/myplugin/schemas.lua
+]]
+
+--- @type table<string, any>
+local ARGS_SPEC = {
+  ['--module'] = { 'string' },
+  ['--help'] = 'boolean',
+  ['-h'] = '--help',
+  ['--version'] = 'boolean',
+  ['-V'] = '--version',
+}
+
+--- Report a CLI failure and stop. The CLI is the process boundary, so every
+--- fatal path ends here instead of raising through the library.
+--- @param msg string
+local function fail(msg)
+  io.stderr:write('guard: ' .. tostring(msg) .. '\n')
+  os.exit(1)
+end
+
+--- Derive a dotted module name from a file path: `lua/a/b.lua` -> `a.b`.
+--- Stripping through the last `lua/` segment keeps an absolute target path
+--- under a project's `lua/` directory equivalent to a relative one.
+--- @param p string
+--- @return string
+local function module_path_of(p)
+  local path = p:gsub('^%.?/', ''):gsub('^.*/lua/', ''):gsub('^lua/', '')
+  return (path:gsub('%.lua$', ''):gsub('/', '.'))
+end
+
+--- Every guard in the namespace, mapped to the qualified name it is registered
+--- under. Collected before generating so that a schema reused in several places
+--- is emitted once and referenced by name everywhere.
+--- @param tbl table
+--- @param pfx string
+--- @param named table<table, string>
+--- @param seen table<table, boolean>
+local function collect_names(tbl, pfx, named, seen)
+  for name, value in pairs(tbl) do
+    local full_name = pfx .. name
+    if type(value) == 'table' and getmetatable(value) == Guard then
+      named[value] = full_name
+    elseif type(value) == 'table' and not seen[value] then
+      seen[value] = true
+      collect_names(value, full_name .. '.', named, seen)
+    end
+  end
+end
+
+--- @param tbl table
+--- @param pfx string
+--- @param lines string[]
+--- @param visited table<table, boolean>
+--- @param named table<table, string>
+local function process_table(tbl, pfx, lines, visited, named)
+  visited[tbl] = true
+  for name, value in pairs(tbl) do
+    local full_name = pfx .. name
+    if type(value) == 'table' and getmetatable(value) == Guard then
+      table.insert(lines, '')
+      table.insert(lines, value:to_luacats(full_name, named))
+    elseif type(value) == 'table' and not visited[value] then
+      process_table(value, full_name .. '.', lines, visited, named)
+    end
+  end
+end
+
+--- @param src string
+--- @param modules string[]
+--- @return boolean ok
+local function process_file(src, modules)
+  local module_path = module_path_of(src)
+  local output_file = src:gsub('%.lua$', '.types.lua')
+
+  local chunk, load_err = loadfile(src)
+  if not chunk then
+    io.stderr:write(('guard: error loading %s: %s'):format(src, tostring(load_err)) .. '\n')
+    return false
+  end
+  local ran, module = pcall(chunk)
+  if not ran then
+    io.stderr:write(('guard: error running %s: %s'):format(src, tostring(module)) .. '\n')
+    return false
+  end
+  if type(module) ~= 'table' then
+    io.stdout:write('Skipping (no table exported): ' .. src .. '\n')
+    return true
+  end
+
+  local command = { 'nvim', '-l', arg[0] }
+  for _, module in ipairs(modules) do
+    if module ~= 'guard' then
+      command[#command + 1] = '--module'
+      command[#command + 1] = module
+    end
+  end
+  command[#command + 1] = src
+
+  local lines = {
+    '---@meta',
+    '-- AUTO-GENERATED FILE - DO NOT EDIT',
+    '-- Generated from: ' .. src,
+    '-- Module prefix: ' .. module_path,
+    '-- Generated at: ' .. os.date '%Y-%m-%d %H:%M:%S',
+    '',
+    '-- To regenerate, run: ' .. table.concat(command, ' '),
+    '',
+  }
+
+  local named = {}
+  collect_names(module, module_path .. '.', named, {})
+  process_table(module, module_path .. '.', lines, {}, named)
+
+  local f, open_err = io.open(output_file, 'w')
+  if not f then fail(('cannot write %s: %s'):format(output_file, tostring(open_err))) end
+  --- @cast f file
+  f:write(table.concat(lines, '\n'))
+  f:write '\n'
+  f:close()
+
+  local type_count = 0
+  for _, line in ipairs(lines) do
+    if line:match '^%-%-%-@class' or line:match '^%-%-%-@alias' then type_count = type_count + 1 end
+  end
+
+  io.stdout:write(('Generated: %s (%d types)\n'):format(output_file, type_count))
+  return true
+end
+
+--- Process boundary: parse argv, expand globs, generate each source file, and
+--- turn failures into an exit status. `package.loaded` is shared by every
+--- target file.
+--- @param argv string[]
+local function main(argv)
+  -- A checkout resolves the vendored parser through package.path, while the
+  -- released guard.lua has it inlined. If neither exists, this copy was moved
+  -- without its parser, so name the artifact that does support the CLI.
+  local args_ok, args = pcall(function(...) return __mods._guard_vendor_args(...) end, 'guard.vendor.args')
+  if not args_ok then fail 'args.nvim is not available; use the released guard.lua' end
+
+  local parsed_ok, parsed = pcall(args.parse, ARGS_SPEC, argv)
+  if not parsed_ok then fail(parsed) end
+  --- @cast parsed table
+
+  if parsed['--version'] then
+    -- The type stubs model `vim.version` as a table, but Neovim exposes it as
+    -- a callable table.
+    --- @diagnostic disable-next-line: call-non-callable
+    local v = vim.version()
+    local neovim = ('%d.%d.%d'):format(v.major, v.minor, v.patch)
+    if v.prerelease then neovim = neovim .. '-' .. v.prerelease end
+    io.stdout:write(('guard %s (Neovim %s)\n'):format(VERSION, neovim))
+    return
+  end
+  if parsed['--help'] then
+    io.stdout:write(USAGE)
+    return
+  end
+
+  local files = parsed._
+  if #files == 0 then fail 'missing schema file (for example: lua/foo/schemas.lua)' end
+
+  local modules = parsed['--module']
+  if not modules or #modules == 0 then modules = { 'guard' } end
+  for _, module in ipairs(modules) do
+    package.loaded[module] = M
+  end
+
+  local all_ok = true
+  for _, pattern in ipairs(files) do
+    local hits = vim.fn.glob(pattern, false, true)
+    if #hits == 0 then hits = { pattern } end
+    for _, src in ipairs(hits) do
+      if src:match '%.lua$' and not src:match '%.types%.lua$' then
+        if not process_file(src, modules) then all_ok = false end
+      end
+    end
+  end
+  if not all_ok then os.exit(1) end
+end
+
+if running_as_main then main(arg) end
+
+return M
+
+end
+__mods._guard = function(...) return __load("guard", __entry, arg, ...) end
+
+__mods._guard_vendor_args = function(...)
+  return __load("guard.vendor.args", function(...)
+---@type string[]
+local arg = {}
+---@diagnostic disable
+-- Generated by nvim-bundle; do not edit.
+-- returns: args
+local __mods = {}
+---@return { loaded: table<string, any>, LOADING: table }
+local function __cache()
+  local private = { loaded = {}, LOADING = {} }
+  local nvim, info = rawget(_G, 'vim'), debug.getinfo(1, 'Sl')
+  if not nvim or not info or info.source:sub(1, 1) ~= '@' then return private end
+  local path = nvim.uv.fs_realpath(info.source:sub(2))
+  if not path then return private end
+  local key = ('nvim-bundle:%s:%d'):format(path, info.currentline)
+  package.loaded[key] = package.loaded[key] or private
+  return package.loaded[key]
+end
+local __cached = __cache()
+local __loaded, __LOADING = __cached.loaded, __cached.LOADING
+---@generic T
+---@param id string
+---@param load fun(...): T
+---@return T
+local function __load(id, load, ...)
+  local cached = __loaded[id]
+  if cached == __LOADING then
+    error("loop or previous error loading module '" .. id .. "'", 2)
+  end
+  if cached ~= nil then return cached end
+  __loaded[id] = __LOADING
+  local value = load(...)
+  if value == nil then value = true end
+  __loaded[id] = value
+  return value
+end
+
+---@param arg string[]
+local function __entry(arg, ...)
+local M = {}
+
+-- The spec is validated before parsing, so the lookups below cannot miss.
+--- @diagnostic disable: need-check-nil
+--- @diagnostic disable: param-type-mismatch
+
+local types = { boolean = true, string = true, number = true }
+
+--- @param message string
+--- @return never
+local function fail(message) error(message, 0) end
+
+--- @param aliases table<string, string>
+--- @param name string
+--- @return string
+local function resolve(aliases, name)
+  local seen = {}
+  while aliases[name] do
+    if seen[name] then fail(('alias cycle at %s'):format(name)) end
+    seen[name] = true
+    name = aliases[name]
+  end
+  return name
+end
+
+--- @param name string
+--- @param definition any
+local function handler(name, definition)
+  local multiple = false
+  if type(definition) == 'table' then
+    if #definition ~= 1 then fail(('array type for %s must have one element'):format(name)) end
+    definition, multiple = definition[1], true
+  end
+  if not types[definition] then
+    fail(('invalid type for %s: %s'):format(name, tostring(definition)))
+  end
+  return { name = name, type = definition, flag = definition == 'boolean', multiple = multiple }
+end
+
+--- @param spec table
+--- @return table
+local function build(spec)
+  local compiled = { aliases = {}, handlers = {}, commands = {} }
+
+  for name, definition in pairs(spec) do
+    if type(name) ~= 'string' or name == '' then
+      fail(('invalid spec key: %s'):format(tostring(name)))
+    end
+
+    if name:sub(1, 1) ~= '-' then
+      if name == '_' then fail 'command name must not be _' end
+      if type(definition) ~= 'table' then fail(('spec for %s must be a table'):format(name)) end
+      compiled.commands[name] = build(definition)
+    else
+      if name == '-' or name == '--' then fail(('invalid option name: %s'):format(name)) end
+      if name:find('=', 1, true) then fail(('option name must not contain =: %s'):format(name)) end
+      if name:sub(1, 2) ~= '--' and #name ~= 2 then
+        fail(('short option must have one character: %s'):format(name))
+      end
+
+      if type(definition) == 'string' and definition:sub(1, 1) == '-' then
+        compiled.aliases[name] = definition
+      else
+        compiled.handlers[name] = handler(name, definition)
+      end
+    end
+  end
+
+  for alias in pairs(compiled.aliases) do
+    if not compiled.handlers[resolve(compiled.aliases, alias)] then
+      fail(('alias %s does not resolve to a declared option'):format(alias))
+    end
+  end
+
+  return compiled
+end
+
+--- @param value string
+--- @param handler table
+--- @return boolean
+local function option_like(value, handler)
+  if #value < 2 or value:sub(1, 1) ~= '-' then return false end
+  return not (handler.type == 'number' and tonumber(value) ~= nil)
+end
+
+--- Take the next argument as an option value, guarding against option-like
+--- words. Number options accept a numeric word such as `-5`.
+--- @param argv string[]
+--- @param index integer
+--- @param handler table
+--- @param spelling string
+--- @return string, integer
+local function take_value(argv, index, handler, spelling)
+  local value = argv[index + 1]
+  if value == nil or option_like(value, handler) then
+    fail(('option requires argument: %s'):format(spelling))
+  end
+  return value, index + 1
+end
+
+--- Parse `argv` from `start` with one compiled spec level, returning that
+--- level's result. A command word selects a child spec and nests its result.
+--- @param compiled table
+--- @param argv string[]
+--- @param start integer
+--- @return table
+local function parse_level(compiled, argv, start)
+  local aliases, handlers = compiled.aliases, compiled.handlers
+  local result = { _ = {} }
+  local positionals = result._
+  local index = start
+
+  -- A bare number option counts its occurrences, so `nil` means "increment".
+  local function apply(key, value)
+    local handler = handlers[key]
+    if handler.type == 'number' then
+      if value == nil then
+        value = (result[handler.name] or 0) + 1
+      else
+        value = tonumber(value)
+        if value == nil then fail(('expected a number for %s'):format(handler.name)) end
+      end
+    end
+    if handler.multiple then
+      local list = result[handler.name]
+      if list == nil then
+        list = {}
+        result[handler.name] = list
+      end
+      list[#list + 1] = value
+    else
+      result[handler.name] = value
+    end
+  end
+
+  -- Resolve a spelling to its canonical handler before reading a value, so an
+  -- alias needs no storage or type rules of its own.
+  local function lookup(spelling)
+    local key = resolve(aliases, spelling)
+    local handler = handlers[key]
+    if not handler then fail(('unknown or unexpected option: %s'):format(spelling)) end
+    return key, handler
+  end
+
+  local function long_option(word)
+    local name, value = word:match '^%-%-([^=]+)=(.*)$'
+    local spelling = name and ('--' .. name) or word
+    local key, handler = lookup(spelling)
+
+    if handler.flag then
+      if value ~= nil then fail(('option does not take a value: %s'):format(spelling)) end
+      apply(key, true)
+    else
+      if value == nil then
+        value, index = take_value(argv, index, handler, spelling)
+      end
+      apply(key, value)
+    end
+  end
+
+  local function short_option(word)
+    local i = 2
+    while i <= #word do
+      local spelling = '-' .. word:sub(i, i)
+      local key, handler = lookup(spelling)
+      local tail = word:sub(i)
+      local counting = #tail > 1
+        and handler.type == 'number'
+        and not handler.multiple
+        and tail == tail:sub(1, 1):rep(#tail)
+
+      if handler.flag then
+        apply(key, true)
+      elseif counting then
+        for _ = 1, #tail do
+          apply(key, nil)
+        end
+        return
+      elseif i < #word then
+        fail(
+          ('option requires argument (but was followed by another short argument): %s'):format(
+            spelling
+          )
+        )
+      else
+        local value
+        value, index = take_value(argv, index, handler, spelling)
+        apply(key, value)
+      end
+      i = i + 1
+    end
+  end
+
+  while index <= #argv do
+    local word = argv[index]
+
+    if word == '--' then
+      for i = index + 1, #argv do
+        positionals[#positionals + 1] = argv[i]
+      end
+      break
+    end
+
+    if #word > 1 and word:sub(1, 1) == '-' then
+      if word:sub(1, 2) == '--' then
+        long_option(word)
+      else
+        short_option(word)
+      end
+    else
+      local command = compiled.commands[word]
+      if command then
+        result[word] = parse_level(command, argv, index + 1)
+        return result
+      end
+      if next(compiled.commands) then fail(('unknown command: %s'):format(word)) end
+      positionals[#positionals + 1] = word
+    end
+
+    index = index + 1
+  end
+
+  return result
+end
+
+--- Parse an argument vector with an `arg`-style specification.
+---
+--- The spec maps a spelling (`--name`, `-n`) to `boolean`, `string`, `number`,
+--- an array wrapping one of those for repeated values, or another spelling for
+--- an alias. A key that does not begin with `-` is a command with its own spec.
+--- Positionals are returned in `_`, and each command nests its result.
+--- @param spec table
+--- @param argv string[]
+--- @return table
+function M.parse(spec, argv)
+  if type(spec) ~= 'table' then fail 'spec must be a table' end
+  if type(argv) ~= 'table' then fail 'argv must be a list of strings' end
+  for i, word in ipairs(argv) do
+    if type(word) ~= 'string' then fail(('argument %d must be a string'):format(i)) end
+  end
+
+  return parse_level(build(spec), argv, 1)
+end
+
+return M
+
+end
+__mods._args = function(...) return __load("args", __entry, arg, ...) end
+
+if __loaded["args"] ~= nil then return __entry({}, ...) end
+return __mods._args("args")
+
+  end, ...)
+end
+
+if __loaded["guard"] ~= nil then return __entry({}, ...) end
+return __mods._guard("guard")
 
   end, ...)
 end

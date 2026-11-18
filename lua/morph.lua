@@ -90,6 +90,7 @@
 ---   [string]?: unknown,
 ---   on_change?: (fun(e: { text: string,  bubble_up: boolean }): unknown),
 ---   readonly?: boolean,
+---   id?: string,
 ---   key?: string|integer,
 ---   imap?: table<string, morph.TagEventHandler>,
 ---   nmap?: table<string, morph.TagEventHandler>,

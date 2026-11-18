@@ -2,11 +2,11 @@
   "dependencies": {
     "test": {
       "built_with": "0.5.1",
-      "commit": "8dcd5173ddb484e83d04c802c0820c1ed4e9aa14",
+      "commit": "f9a9a26c52019a86603972d252d3a5b37ed1f68b",
       "entry": "test",
       "kind": "tag",
-      "ref": "v0.3.1",
-      "sha256": "b7633d6c9a8c846c56e4e8b49c2a5e1219b7b22fd4ace9958d1bc776346f4a4f",
+      "ref": "v0.4.2",
+      "sha256": "a4a0218cc0710422e2ece172ab2530d8a4243dcfb5645cfbaac06f46d8c420b5",
       "source": "https://github.com/jrop/test.nvim"
     }
   },

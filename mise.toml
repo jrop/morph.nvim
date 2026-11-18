@@ -11,7 +11,7 @@ emmylua_ls = "github:EmmyLuaLs/emmylua-analyzer-rust"
 [tools]
 "aqua:neovim/neovim" = "0.12.6"
 stylua = "2.6.0"
-"github:jrop/nvim-bundle" = "0.5.1"
+"github:jrop/nvim-bundle" = "0.5.2"
 
 [tools.emmylua_check]
 version = "0.25.1"
@@ -45,8 +45,10 @@ VIMRUNTIME = { value = "{{ exec(command='nvim --clean --headless +\"lua io.stdou
 fmt = "stylua ."
 "fmt:check" = "stylua --check ."
 
+# The type-test fixtures carry deliberate errors, and spec/types_spec.lua checks
+# them as their own workspace.
 [tasks.lint]
-run = "emmylua_check --warnings-as-errors ."
+run = "emmylua_check --warnings-as-errors --ignore 'spec/types/**' ."
 
 [tasks."test:version"]
 usage = '''
@@ -63,7 +65,7 @@ mise install "$tool"
 # The nightly tag moves, so refresh it when its checksum changed.
 [ "$usage_version" = nightly ] && { mise upgrade "$tool" >/dev/null 2>&1 || true; }
 echo "--- Neovim $usage_version ---"
-mise exec "$tool" -- nvim --clean -l lua/morph/vendor/test.lua ${usage_coverage:+--coverage}
+mise exec "$tool" -- nvim --clean -l lua/morph/vendor/test.lua ${usage_coverage:+--coverage} --isolate=case
 '''
 
 [tasks.test]
