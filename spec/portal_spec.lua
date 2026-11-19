@@ -21,6 +21,31 @@ local function cleanup_buffers(buffers)
 end
 
 describe('Portal', function()
+  it('moves to a new buffer when the bufnr prop changes', function()
+    local source_buf = create_test_buffer()
+    local first, second = create_test_buffer(), create_test_buffer()
+    local created = {}
+    --- @type morph.Ctx<any, any>
+    local app
+    local function App(ctx)
+      if ctx.phase == 'mount' then ctx.state = { bufnr = first } end
+      app = ctx
+      return h(Portal, {
+        bufnr = ctx.state.bufnr,
+        on_buf_create = function(bufnr) created[#created + 1] = bufnr end,
+      }, h('text', {}, { 'Hello' }))
+    end
+    Morph.new(source_buf):mount(h(App), { debounce_ms = 0 })
+
+    app:update { bufnr = second }
+    assert.deep_equal(created, { first, second })
+    assert.deep_equal(vim.api.nvim_buf_get_lines(second, 0, -1, false), { 'Hello' })
+    -- The old buffer is released, so another document may mount into it.
+    assert.ok(not vim.b[first]._morph_mounted)
+
+    cleanup_buffers { source_buf, first, second }
+  end)
+
   it('should render children to a different buffer', function()
     local source_buf = create_test_buffer()
     local portal_buf = create_test_buffer()

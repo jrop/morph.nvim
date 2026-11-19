@@ -5,15 +5,15 @@
 --- prints ms/op; read the numbers as trends, not absolutes -- compare only
 --- runs from the same machine and nvim version.
 ---
---- Why these exist: the band design was born from a measured cliff. A
---- full-document extmark sweep cost ~170ms per burst at big_data scale,
---- while deriving the dirty region from a content diff keeps per-burst work
+--- Why these exist: re-reading only the changed rows was born from a
+--- measured cliff. A full-document extmark sweep cost ~170ms per burst at
+--- big_data scale, while finding the changed rows keeps per-burst work
 --- proportional to the burst itself. These benches keep that cliff -- and
 --- the neighbors that could grow their own cliffs -- visible over time.
 ---
---- Groups: diff_to_band (the guard's sensor), drain (what one user burst
+--- Groups: changed_rows (the guard's sensor), drain (what one user burst
 --- pays end to end), patch_lines (the render-path write twin), sweep (the
---- full-vs-band extmark query contrast).
+--- full-vs-changed-rows extmark query contrast).
 
 --- Make `require 'morph'` resolve no matter the cwd: this file lives in
 --- <root>/benches, so the runtime root is one level up. The first chunk's
@@ -65,13 +65,12 @@ end
 --- @type table<string, fun()>
 local groups = {}
 
--- The guard's sensor: content diff of the render snapshot vs the live
--- lines. The trim must stay O(n) in the document, the DP bounded by the
--- burst, and the degenerate guard must keep huge rewrites off the DP.
-groups.diff_to_band = function()
+-- The guard's sensor: the rows that differ between the render snapshot and
+-- the live lines. It must stay O(n) in the document.
+groups.changed_rows = function()
   for _, n in ipairs { 1000, 50000 } do
     local base = build_lines(n)
-    bench(('identical (%d lines)'):format(n), 50, function() Morph.diff_to_band(base, base) end)
+    bench(('identical (%d lines)'):format(n), 50, function() Morph.changed_rows(base, base) end)
 
     -- Edit depth must not matter: the trim walks both ends, the DP sees one
     -- line either way.
@@ -81,30 +80,19 @@ groups.diff_to_band = function()
       bench(
         ('1-line edit at row %d (%d lines)'):format(pos, n),
         50,
-        function() Morph.diff_to_band(base, edited) end
+        function() Morph.changed_rows(base, edited) end
       )
     end
 
-    -- Just under the degenerate threshold: the DP works, and its cost is
-    -- the worst case a legitimate rewrite burst may pay.
+    -- A large rewrite: finding its rows is the same trim as a one-line edit.
     local rewrite = copy_lines(base)
     for i = 1001, 1300 do
       rewrite[i] = ('rewritten %d'):format(i)
     end
     bench(
-      ('300-line rewrite, DP path (%d lines)'):format(n),
+      ('300-line rewrite (%d lines)'):format(n),
       20,
-      function() Morph.diff_to_band(base, rewrite) end
-    )
-
-    -- Past the threshold: the DP must be skipped entirely.
-    for i = 1001, 1400 do
-      rewrite[i] = ('rewritten %d'):format(i)
-    end
-    bench(
-      ('400-line rewrite, degenerate (%d lines)'):format(n),
-      20,
-      function() Morph.diff_to_band(base, rewrite) end
+      function() Morph.changed_rows(base, rewrite) end
     )
   end
 end
@@ -124,7 +112,7 @@ groups.drain = function()
 
   bench(('get_lines + diff (%d lines)'):format(n), 20, function()
     local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-    Morph.diff_to_band(base, lines)
+    Morph.changed_rows(base, lines)
   end)
   vim.api.nvim_buf_delete(buf, { force = true })
 end
@@ -181,7 +169,7 @@ groups.sweep = function()
     function() vim.api.nvim_buf_get_extmarks(buf, ns, { 0, 0 }, { -1, -1 }, {}) end
   )
   bench(
-    'band-scoped extmark query (3 rows)',
+    'changed-rows extmark query (3 rows)',
     200,
     function() vim.api.nvim_buf_get_extmarks(buf, ns, { 24999, 0 }, { 25001, 50 }, {}) end
   )

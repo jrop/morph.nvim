@@ -7,14 +7,12 @@
 --- @diagnostic disable: param-type-mismatch
 --- @diagnostic disable: undefined-field
 
---- Band-probe tests.
+--- Changed-rows tests under real input.
 ---
---- The guard derives the region to police from two probe extmarks that nvim
---- adjusts through every edit of a burst; at drain their positions ARE the
---- dirty band in final coordinates. These specs pin the band's shape per
---- burst class (typing, word delete, newline, line delete, append past the
---- tree) and its superset property: every tag whose content genuinely
---- changed must intersect the band. Runs in a child nvim so real keystrokes
+--- After a burst, the guard re-reads only the tags on the rows that changed
+--- (see changed_rows). These specs pin those rows per kind of burst (typing,
+--- word delete, newline, line delete, append past the tree), and check that
+--- every tag whose content changed lies on them. Runs in a child nvim so real keystrokes
 --- and real autocmds drive the bursts (see AGENTS.md's host/child split).
 local Test = require 'morph.vendor.test'
 local describe, it = Test.describe, Test.it
@@ -23,7 +21,7 @@ local assert = Test.assert
 --- @type spec.util
 local util = dofile 'spec/util.lua'
 
-describe('band probes', function()
+describe('changed rows', function()
   --- @type test.Nvim
   local nv
 
@@ -86,7 +84,7 @@ describe('band probes', function()
       util.drain(200)
       local after = util.tag_snapshot(_G.m)
       return {
-        band = _G.m._last_band,
+        band = _G.m._last_changed_rows,
         changed = util.changed_tag_ids(_G.before, after),
         after = after,
         text = util.text(0),
@@ -241,7 +239,7 @@ describe('band probes', function()
 
     -- The band covers every appended row plus the junction one past the
     -- end (the content diff of the render snapshot vs the live lines --
-    -- see diff_to_band). Nothing there is a tag, so the locked app reverts
+    -- see changed_rows). Nothing there is a tag, so the locked app reverts
     -- the outside-tree edit.
     assert.deep_equal(result.band, { 7, 9 })
     assert_band_covers_changes(result)

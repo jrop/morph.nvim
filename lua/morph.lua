@@ -1285,16 +1285,15 @@ function Morph.markup_to_lines(opts)
     local node_type = tree_kind(node)
 
     if node_type == 'string' then
-      -- A string with no enclosing tag (top-level in the render tree, or
-      -- directly inside a component's output) would otherwise produce no
-      -- extmark and be invisible to the readonly sweep. Wrap it in an
-      -- implicit text tag so locked defaults cover ALL content. The wrap also
-      -- applies under a READONLY parent, where the guard must see the region's
-      -- OWN text change even when an editable hole inside it also changed (a
-      -- write spanning the hole's edge). Under an editable parent the literal
-      -- belongs to the surrounding region and needs no tag of its own --
-      -- wrapping there would mint spurious editable regions.
-      local wrap = #text_accumulators == 0 or parent_readonly
+      -- Readonly text needs extmarks of its own, or the guard could not see an
+      -- edit to it. So a readonly string gets an implicit text tag, both at the
+      -- top level of a locked render and under a readonly parent, where the
+      -- guard must see the parent's OWN text change even when an editable tag
+      -- inside it also changed (a write spanning that tag's edge). An editable
+      -- string gets no tag: its text belongs to whatever surrounds it, and a
+      -- tag of its own would sit next to the editable tags beside it, so an
+      -- edit at that edge would have two tags competing for it.
+      local wrap = parent_readonly
       local enclosing = tag_stack[#tag_stack]
       if wrap and not (enclosing and enclosing.literal) then
         local lit = h('text', {}, node)
@@ -1390,14 +1389,13 @@ function Morph.markup_to_string(opts) return table.concat(Morph.markup_to_lines(
 --------------------------------------------------------------------------------
 -- Reading the Difference / Writing the Difference
 --------------------------------------------------------------------------------
--- Two line-array diffs on the same engine (the Interlude's levenshtein).
--- diff_to_band reads where the buffer changed: the guard's dirty band is the
--- content diff of the render's snapshot against the live lines. patch_lines
--- writes a computed difference with minimal buffer edits.
+-- changed_rows finds which lines differ between the render's snapshot and the
+-- live buffer, so the guard re-reads only the tags there. patch_lines writes a
+-- computed difference with minimal buffer edits.
 
 --- Trim the common prefix/suffix lines from two line arrays: the changed
---- region both diff consumers work on. patch_lines writes that region;
---- diff_to_band reads it. The region is old[prefix+1..#old_lines-suffix]
+--- region both consumers work on. patch_lines writes that region;
+--- changed_rows reads it. The region is old[prefix+1..#old_lines-suffix]
 --- rewritten as new[prefix+1..#new_lines-suffix] (1-based, inclusive).
 --- @param old_lines string[]
 --- @param new_lines string[]
@@ -1434,138 +1432,31 @@ local function middle_lines(lines, prefix, suffix)
   return out
 end
 
---- Diff two line arrays into the guard's dirty band. Both sides are settled
---- content (the render's snapshot vs the live lines), so the rows are final
---- coordinates and no frame compensation applies. The engine is the house
---- levenshtein on the trimmed middle -- the same alignment patch_lines writes.
+--- The rows whose tags the guard must re-read after an edit: the lines that
+--- differ between the render's snapshot and the live buffer, widened at both
+--- ends to reach every extmark the edit could have moved. Re-reading every tag
+--- instead costs too much on large documents (see benches/change_pipeline.lua).
 ---
---- The edges are extmark semantics, not diff logic. The top tightens up over
---- the region's net removed lines, so a tag that started above the junction
---- and owns a deleted tail is still reached (nvim_buf_get_extmarks matches by
---- start position). The bottom is the junction where a removed range's marks
---- park; it is deliberately not clamped to the buffer, because appends park
---- marks one row past the last line.
----
---- Windows: one per maximal run of the script's line ops, columns trimmed from
---- the run's first and last line pair. A run with no new rows (a pure delete)
---- gets none; its witness correctly reads empty at the junction.
---- @param old_lines string[] The diff base (the render's line snapshot)
+--- The widening follows extmark behaviour. A delete moves the marks of removed
+--- lines up to the row below the deletion, and a tag that started above it may
+--- have owned those lines, so the top moves up by the net removed lines (the
+--- extmark query matches by start position). The bottom is not clamped to the
+--- buffer, because an append moves marks one row past the last line.
+--- @param old_lines string[] The render's line snapshot
 --- @param new_lines string[] The live buffer lines
 --- @return integer? top0 nil when the arrays are identical
 --- @return integer? bottom0
---- @return morph.ChangeWindow[]? windows
-function Morph.diff_to_band(old_lines, new_lines)
+function Morph.changed_rows(old_lines, new_lines)
   local n, m = #old_lines, #new_lines
   local prefix, suffix = trim_common_edges(old_lines, new_lines)
   local region_old, region_new = n - suffix - prefix, m - suffix - prefix
-  if region_old == 0 and region_new == 0 then return nil, nil, nil end
+  if region_old == 0 and region_new == 0 then return nil, nil end
 
   local removed = math.max(0, region_old - region_new)
   local top0 = math.max(0, prefix - removed)
   local bottom0 = m - suffix
   if region_old == region_new and suffix > 0 then bottom0 = bottom0 - 1 end
-
-  local windows = {} --- @type morph.ChangeWindow[]
-  -- Past this size the DP costs milliseconds per burst. The band stays
-  -- exact -- its edges are region arithmetic and need no DP -- and only the
-  -- windows coarsen to one per region: the witness tolerates a wider read
-  -- (apps re-render on change), so correctness never depends on window
-  -- tightness.
-  if math.max(region_old, region_new) > 300 then
-    if region_new > 0 then
-      windows[1] = {
-        row0 = prefix,
-        col0 = 0,
-        end_row = m - suffix - 1,
-        end_col = #new_lines[m - suffix],
-      }
-    end
-    return top0, bottom0, windows
-  end
-
-  local trimmed_old = middle_lines(old_lines, prefix, suffix)
-  local trimmed_new = middle_lines(new_lines, prefix, suffix)
-  local line_changes = levenshtein { from = trimmed_old, to = trimmed_new }
-
-  -- Walk the script in document order (the backtrack emits it end-first),
-  -- grouping ops into runs. Each op records its FROM anchor (its `index`), so
-  -- the aligned-equal pairs it skipped appear as a gap between the anchor and
-  -- the replay position; that gap breaks runs.
-  local from_pos, to_pos = 1, 1
-  -- The run's consumed ranges, 1-based into the trimmed arrays: FROM = old rows
-  -- rewritten, TO = new rows produced (nil until the run consumes that side).
-  --- @type { from_first: integer?, from_last: integer?, to_first: integer?, to_last: integer? }?
-  local run = nil
-  local function flush_run()
-    local r = run
-    if not r then return end
-    run = nil
-    if not r.to_first then return end -- a pure delete run: the witness reads empty
-    -- to_first/to_last are set together, so the to_first guard also covers
-    -- to_last; the checker cannot see that.
-    local to_first, to_last =
-      r.to_first, --[[@as integer]]
-      r.to_last --[[@as integer]]
-    local first_old = r.from_first and trimmed_old[r.from_first] or nil
-    local last_old = r.from_last and trimmed_old[r.from_last] or nil
-    -- The run's TO rows are within the region, so these lookups cannot miss.
-    local first_new = trimmed_new[to_first] --[[@as string]]
-    local last_new = trimmed_new[to_last] --[[@as string]]
-    local col0 = 0
-    if first_old then
-      local min_len = math.min(#first_old, #first_new)
-      while col0 < min_len and first_old:byte(col0 + 1) == first_new:byte(col0 + 1) do
-        col0 = col0 + 1
-      end
-    end
-    local end_col = #last_new
-    if last_old then
-      local min_len = math.min(#last_old, #last_new)
-      local trim = 0
-      while
-        trim < min_len - col0
-        and last_old:byte(#last_old - trim) == last_new:byte(#last_new - trim)
-      do
-        trim = trim + 1
-      end
-      end_col = end_col - trim
-    end
-    if end_col < col0 then end_col = col0 end
-    windows[#windows + 1] = {
-      row0 = prefix + to_first - 1,
-      col0 = col0,
-      end_row = prefix + to_last - 1,
-      end_col = end_col,
-    }
-  end
-
-  for i = #line_changes, 1, -1 do
-    local change = line_changes[i] --[[@as morph.LevenshteinChange<string>]]
-    local keeps = change.index - from_pos
-    if keeps > 0 or not run then flush_run() end
-    run = run or {}
-    if keeps > 0 then
-      -- Silent keeps: aligned-equal pairs advancing both sides.
-      from_pos, to_pos = from_pos + keeps, to_pos + keeps
-    end
-    if change.kind == 'delete' then
-      run.from_first = run.from_first or from_pos
-      run.from_last = from_pos
-      from_pos = from_pos + 1
-    elseif change.kind == 'add' then
-      run.to_first = run.to_first or to_pos
-      run.to_last = to_pos
-      to_pos = to_pos + 1
-    else
-      run.from_first = run.from_first or from_pos
-      run.from_last = from_pos
-      run.to_first = run.to_first or to_pos
-      run.to_last = to_pos
-      from_pos, to_pos = from_pos + 1, to_pos + 1
-    end
-  end
-  flush_run()
-  return top0, bottom0, windows
+  return top0, bottom0
 end
 
 --- Apply minimal edits to transform buffer content from old_lines to new_lines.
@@ -1580,6 +1471,9 @@ end
 --- @param opts? { first?: boolean } first: this is the render that replaces the
 ---   buffer's initial scaffolding, so the view is restored afterwards.
 function Morph.patch_lines(bufnr, old_lines, new_lines, opts)
+  -- bufwinid() does not read 0 as the current buffer, so an unresolved 0
+  -- would silently switch off the first-render view guard below.
+  if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end
   old_lines = old_lines or vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
   local max_lines = math.max(#old_lines, #new_lines)
@@ -1764,10 +1658,8 @@ function Morph.new(bufnr, opts)
     changedtick = nil,
     changing = false,
     textlock = false,
-    -- The row range the last judged burst swept (test/debug introspection).
-    -- The band itself is the watcher's content diff (see diff_to_band); the
-    -- drain receives it ready-made.
-    _last_band = nil,
+    -- The rows the last judged burst re-read (test/debug introspection).
+    _last_changed_rows = nil,
     probe = nil,
     _probe_cmdline_autocmd = nil,
     original_keymaps = {},
@@ -2201,15 +2093,8 @@ end
 -- The watcher counts user edits as they stream through nvim_buf_attach's
 -- on_bytes (excluding morph's own render writes) and reports the burst once
 -- TextChanged says the buffer is stable. Detection only: it reads no event
--- coordinates and carries no geometry; the consumer derives the dirty band by
--- diffing its own line snapshot against the live lines (see diff_to_band).
-
---- @class morph.ChangeWindow One splice's replacement region: where the
----   change's new text lives.
---- @field row0 integer
---- @field col0 integer
---- @field end_row integer
---- @field end_col integer
+-- coordinates; the guard finds the changed rows by comparing its own line
+-- snapshot with the live lines (see changed_rows).
 
 --- @class morph.BufWatcher
 --- @field pending_edits integer User on_bytes events captured while morph was
@@ -2317,7 +2202,7 @@ function Morph:_ensure_buf_watcher()
     self.bufnr,
     function() return self.changing end,
     -- Called once per closed burst; the guard then reads the live lines and
-    -- judges the diff band (see diff_to_band).
+    -- judges the tags on the changed rows (see changed_rows).
     function() self:_on_bytes_burst() end
   )
   table.insert(self.cleanup_hooks, self.buf_watcher.cleanup)
@@ -2329,15 +2214,12 @@ end
 -- Polices text changes: reverts edits that touched locked text or landed
 -- outside the tree (flash + full-tree restore), attributes accepted edits to
 -- the editable tags that own them, and fires their on_change handlers.
--- The frames it decides with:
---   tag.curr_text  the accepted content per tag -- the only frame the guard
---                   decides with; live extmark positions locate the text but
---                   never decide.
---   diff base        the render's line snapshot (text_content.lines); the
---                   burst's dirty region is the content diff against it
---                   (see diff_to_band).
---   watcher.cursor_sample/pending_edits  the pre-edit cursor snapshot and the
---                   pending user edit; render-owned writes open no window.
+-- Each tag's text is whatever sits between its two extmarks. A tag whose text
+-- differs from tag.curr_text (what was last rendered or accepted) changed: a
+-- changed readonly tag means revert, and a changed editable tag gets on_change.
+-- text_content.lines (the render's line snapshot) only narrows which rows to
+-- re-read (see changed_rows), and watcher.cursor_sample is the pre-edit
+-- cursor a revert restores.
 
 --- @private
 --- Revert an edit that violated the tree: flash the touched regions, then let
@@ -2452,11 +2334,10 @@ end
 --- @private
 --- Judge one TextChanged burst -- the unit of user action, since fast typing
 --- batches several edits into one window and all are already applied when it
---- fires. The dirty band is the content diff of the render's snapshot against
---- the live lines (see diff_to_band), so the guard sweeps final coordinates
---- once: collect changed tags, decide (a readonly change no editable
---- descendant explains reverts the whole tree), accept (advance expectations
---- and the diff base), then dispatch the owned edits to on_change.
+--- fires. The guard re-reads the tags on the changed rows once: collect the
+--- changed tags, decide (a readonly change that no editable descendant
+--- explains reverts the whole tree), accept (advance each tag's curr_text and
+--- the line snapshot), then dispatch the edits to on_change.
 function Morph:_on_bytes_burst()
   -- The watcher already drops morph's own writes at capture; this also
   -- deflects a re-entrant call during a render. Deferring is sound: the diff
@@ -2464,21 +2345,17 @@ function Morph:_on_bytes_burst()
   if self.changing then return end
 
   local lines = vim.api.nvim_buf_get_lines(self.bufnr, 0, -1, false)
-  local top0, bottom0, windows = Morph.diff_to_band(self.text_content.lines, lines)
-  -- A nil band means content identical to the baseline: type-and-delete
+  local top0, bottom0 = Morph.changed_rows(self.text_content.lines, lines)
+  -- No changed rows means content identical to the snapshot: type-and-delete
   -- bursts land here and correctly police nothing.
   if not top0 then return end
 
-  -- The band that judged this burst, for tests and debugging.
-  self._last_band = { top0, bottom0 }
+  -- The rows that judged this burst, for tests and debugging.
+  self._last_changed_rows = { top0, bottom0 }
 
-  -- A non-nil top0 guarantees all three diff returns are real; the checker
-  -- cannot narrow multi-returns, so assert it.
-  local editable, locked = self:_collect_changed_band(
-    top0,
-    bottom0 --[[@as integer]],
-    windows --[[@as morph.ChangeWindow[] ]]
-  )
+  -- A non-nil top0 guarantees a real bottom0; the checker cannot narrow
+  -- multi-returns, so cast it.
+  local editable, locked = self:_collect_changed_tags(top0, bottom0 --[[@as integer]])
 
   -- A changed readonly tag with no changed editable descendant is a
   -- violation (the edit touched locked text that no hole's edit explains).
@@ -2542,24 +2419,22 @@ function Morph:_on_bytes_burst()
 end
 
 --- @private
---- Collect the tags whose live content differs from the tree's expectation,
---- sweeping the dirty band. Every changed tag's span intersects the band, so
---- an inclusive band query returns every candidate plus harmless neighbors;
---- comparing live text against `curr_text` is the whole change test.
+--- Collect the tags whose text between their extmarks differs from what was
+--- last rendered or accepted. Every changed tag overlaps the changed rows, so
+--- querying those rows returns every candidate plus harmless neighbours;
+--- comparing the live text against `curr_text` is the whole change test.
 --- @param top0 integer
 --- @param bottom0 integer
---- @param windows morph.ChangeWindow[] the burst's change windows
 --- @return morph.TagChange[] editable
 --- @return morph.TagChange[] locked
-function Morph:_collect_changed_band(top0, bottom0, windows)
+function Morph:_collect_changed_tags(top0, bottom0)
   local editable = {} --- @type morph.TagChange[]
   local locked = {} --- @type morph.TagChange[]
   local last_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
   if top0 > last_row then return editable, locked end
-  -- The band's bottom may sit past the buffer end (a delete parks it there so
-  -- the sweep reaches the overshooting marks), but the line read must stay in
-  -- bounds.
-  local band_bottom_line = vim.api.nvim_buf_get_lines(
+  -- The bottom row may sit past the buffer end (a delete moves marks there),
+  -- but the line read must stay in bounds.
+  local bottom_line = vim.api.nvim_buf_get_lines(
     self.bufnr,
     math.min(bottom0, last_row),
     math.min(bottom0 + 1, last_row + 1),
@@ -2570,109 +2445,17 @@ function Morph:_collect_changed_band(top0, bottom0, windows)
     self.bufnr,
     self.ns,
     { top0, 0 },
-    { bottom0, #band_bottom_line },
+    { bottom0, #bottom_line },
     { details = true, overlap = true }
   )
-  -- Sorted by position: the degenerate-span witness below matches the
-  -- collapsed point against its nearest change window.
-  --- @type { id: integer, tag: morph.Tag, row0: integer, col0: integer, details: vim.api.keyset.extmark_details }[]
-  local marks = {}
   for _, ext in ipairs(raw) do
     local tag = self.text_content.extmark_ids_to_tag[ext[1]]
     if tag then
-      table.insert(
-        marks,
-        { id = ext[1], tag = tag, row0 = ext[2], col0 = ext[3], details = ext[4] }
-      )
-    end
-  end
-  table.sort(marks, function(x, y)
-    if x.row0 ~= y.row0 then return x.row0 < y.row0 end
-    return x.col0 < y.col0
-  end)
-
-  for _i, m in ipairs(marks) do
-    local end_row = (m.details and m.details.end_row) or m.row0
-    local end_col = (m.details and m.details.end_col) or m.col0
-
-    -- Read the tag's content over its LIVE marks, which are the truth under
-    -- morph's gravity scheme for every shape but one: a splice that consumes a
-    -- span's whole range (a same-length replace, a paste over the tail, typing
-    -- into an empty hole) parks BOTH marks PAST the replacement, so the
-    -- between-marks read collapses to '' while the real content sits just
-    -- outside. Mount 'Search: [x]' and replace the hole's 'x' with 'y':
-    --
-    --   Search: [y]
-    --   00000000001
-    --   01234567890
-    --
-    -- Both hole marks land at (0,10), after the 'y'; the span reads '' though
-    -- its content became 'y' at [9,10). Typing 'filter' into 'Search: []' is
-    -- the same shape with more bytes (marks park at (0,15)):
-    --
-    --   Search: [filter]
-    --   0000000000111111
-    --   0123456789012345
-    --
-    -- Only the burst's change windows (see diff_to_band) still bracket the
-    -- replacement, so the window at the collapse point is the sole witness of
-    -- what the span became. A pure delete collapses the span too and its
-    -- window reads '' -- correct for a fully deleted span. Widening the read
-    -- for any other shape would re-import positional attribution: a typed char
-    -- at a hole's tail made the shifted ']' tag report "f]".
-    local collapsed = m.row0 == end_row and m.col0 == end_col
-    local extmark = Extmark._from_raw(self.bufnr, m.id, m.row0, m.col0, m.details)
-    local new_text
-    if collapsed then
-      -- Nearest window by rows first, then columns: the change that made
-      -- the span degenerate is the one whose window touches its collapse
-      -- point (distance zero on both axes).
-      --- @type morph.ChangeWindow?, integer?, integer?
-      local best, best_row_delta, best_col_delta
-      for _, w in ipairs(windows) do
-        local row_delta = 0
-        if m.row0 < w.row0 then
-          row_delta = w.row0 - m.row0
-        elseif m.row0 > w.end_row then
-          row_delta = m.row0 - w.end_row
-        end
-        local col_delta = 0
-        if row_delta == 0 then
-          if m.col0 < w.col0 then
-            col_delta = w.col0 - m.col0
-          elseif m.col0 > w.end_col then
-            col_delta = m.col0 - w.end_col
-          end
-        end
-        if
-          not best
-          or row_delta < best_row_delta
-          or (row_delta == best_row_delta and col_delta < best_col_delta)
-        then
-          best, best_row_delta, best_col_delta = w, row_delta, col_delta
-        end
-      end
-      if best then
-        -- Read the replacement through the window touching the collapse: the
-        -- span's own marks parked past the text, so only the window still
-        -- brackets what the span became.
-        local window_mark = Extmark._from_raw(self.bufnr, m.id, best.row0, best.col0, {
-          end_row = best.end_row,
-          end_col = best.end_col,
-        })
-        new_text = window_mark:_text()
-      else
-        new_text = ''
-      end
-    else
-      new_text = extmark:_text()
-    end
-    if m.tag.curr_text ~= new_text then
-      local mismatch = { extmark = extmark, tag = m.tag, text = new_text }
-      if m.tag.readonly then
-        table.insert(locked, mismatch)
-      else
-        table.insert(editable, mismatch)
+      local extmark = Extmark._from_raw(self.bufnr, ext[1], ext[2], ext[3], ext[4])
+      local new_text = extmark:_text()
+      if tag.curr_text ~= new_text then
+        local mismatch = { extmark = extmark, tag = tag, text = new_text }
+        table.insert(tag.readonly and locked or editable, mismatch)
       end
     end
   end
@@ -3170,8 +2953,9 @@ end
 --- Portal component: Renders children to a different buffer (like React portals)
 --- @param ctx morph.Ctx<morph.PortalProps, { document: morph.Morph, update?: fun(children: morph.Tree?) }>
 function Morph.Portal(ctx)
-  if ctx.phase == 'mount' then
-    local bufnr = ctx.props.bufnr
+  --- Mount the children into `bufnr` through a fresh inner document.
+  --- @param bufnr integer
+  local function mount_into(bufnr)
     -- Forward the enclosing renderer's readonly default so locked-by-default
     -- apps stay locked inside portals.
     local outer = ctx.document
@@ -3191,20 +2975,32 @@ function Morph.Portal(ctx)
     end
 
     document:mount(h(Content, {}, ctx.children), { debounce_ms = 0 })
+  end
+
+  if ctx.phase == 'mount' then
+    mount_into(ctx.props.bufnr)
     return nil
   end
 
-  local portal_state = ctx.state
-  if ctx.phase == 'update' and portal_state and portal_state.update then
-    portal_state.update(ctx.children)
-  elseif ctx.phase == 'unmount' then
+  local portal_state = assert(ctx.state)
+  if ctx.phase == 'unmount' then
     -- Release the inner document. Content stays in the portal buffer; a fresh
     -- Morph.new(bufnr) + mount is legal on re-mount because unmount cleared the
     -- buffer's mounted flag.
-    --- @diagnostic disable-next-line: need-check-nil
     portal_state.document:unmount()
+    return nil
   end
 
+  -- The inner document is bound to the buffer it mounted into, so a new
+  -- buffer (e.g. one recreated after a wipe) needs a new document; updating
+  -- the old one would render into the old buffer.
+  if ctx.props.bufnr ~= portal_state.document.bufnr then
+    portal_state.document:unmount()
+    mount_into(ctx.props.bufnr)
+    return nil
+  end
+
+  if portal_state.update then portal_state.update(ctx.children) end
   return nil
 end
 
@@ -3216,14 +3012,17 @@ end
 
 --- Transition to target_mode (via stopinsert/startinsert) and call callback
 --- once the mode change takes effect, confirmed via ModeChanged autocmd
---- (no timing dependency). If already in target_mode, calls callback
---- immediately. Safety fallback: if ModeChanged never fires, proceeds
---- after 500ms.
---- @param target_mode string  Single-char mode to transition to ('n' or 'i')
+--- (no timing dependency). If already in target_mode, or target_mode is
+--- neither 'n' nor 'i', calls callback immediately. Safety fallback: if
+--- ModeChanged never fires, proceeds after 500ms.
+--- @param target_mode string  Single-char mode the opener was in
 --- @param callback fun()
 local function restore_mode_and_wait(target_mode, callback)
   local current_mode = vim.fn.mode():sub(1, 1)
-  if current_mode == target_mode then
+  -- Only normal and insert have a command that enters them, so any other
+  -- target proceeds at once. That check must come before the fallback timer is
+  -- armed, or the timer fires the callback a second time 500ms later.
+  if current_mode == target_mode or (target_mode ~= 'n' and target_mode ~= 'i') then
     callback()
     return
   end
@@ -3255,11 +3054,8 @@ local function restore_mode_and_wait(target_mode, callback)
 
   if target_mode == 'n' then
     vim.cmd.stopinsert()
-  elseif target_mode == 'i' then
-    vim.cmd.startinsert()
   else
-    callback()
-    return
+    vim.cmd.startinsert()
   end
 end
 
@@ -3340,10 +3136,11 @@ function Morph.FloatingWindow(ctx)
     --- @param restore_focus boolean
     local function work(restore_focus)
       if is_unmount and state.autocmd_id then pcall(vim.api.nvim_del_autocmd, state.autocmd_id) end
-      if state.winnr and vim.api.nvim_win_is_valid(state.winnr) then
-        vim.api.nvim_win_close(state.winnr, true)
-        state.winnr = nil
-      end
+      -- Forget the window before closing it, so the WinClosed watcher sees a
+      -- close that morph made and does not report it as the user's.
+      local winnr = state.winnr
+      state.winnr = nil
+      if winnr and vim.api.nvim_win_is_valid(winnr) then vim.api.nvim_win_close(winnr, true) end
       if is_unmount and vim.api.nvim_buf_is_valid(state.bufnr) then
         vim.api.nvim_buf_delete(state.bufnr, { force = true })
       end
@@ -3389,7 +3186,27 @@ function Morph.FloatingWindow(ctx)
       end
 
       local enter = config.focusable ~= false
-      state.winnr = vim.api.nvim_open_win(state.bufnr, enter, config)
+      local winnr = vim.api.nvim_open_win(state.bufnr, enter, config)
+      state.winnr = winnr
+      -- The user can close the float behind the app's back (:q, or wiping its
+      -- buffer). The app still says open, so report the close the way an
+      -- app-driven close is reported, and let the app decide what comes next.
+      vim.api.nvim_create_autocmd('WinClosed', {
+        pattern = tostring(winnr),
+        once = true,
+        callback = function()
+          if state.winnr ~= winnr then return end
+          -- Record the float as closed, so a later render that still says open
+          -- takes the opening branch and reopens it.
+          state.winnr = nil
+          state.prev_open = false
+          state.prev_winnr, state.prev_cursor, state.prev_mode = nil, nil, nil
+          -- on_closed usually re-renders the app. When a wipe closed the float,
+          -- this callback runs while the buffer is still being wiped, and a
+          -- render from here hangs nvim, so wait until the close has finished.
+          if ctx.props.on_closed then vim.schedule(ctx.props.on_closed) end
+        end,
+      })
       -- Call on_win_create callback if provided
       if ctx.props.on_win_create then
         ctx:do_after_render(function()

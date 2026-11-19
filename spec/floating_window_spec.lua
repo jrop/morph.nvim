@@ -187,6 +187,101 @@ describe('FloatingWindow', function()
     cleanup_buffers { buf }
   end)
 
+  it('fires on_closed once when the user closes the float with :q', function()
+    local fired = 0
+    local App = float_app(true, function() fired = fired + 1 end)
+    local buf = create_test_buffer()
+    Morph.new(buf):mount(h(App))
+    local win = first_float_win()
+    assert.ok(win)
+
+    vim.api.nvim_set_current_win(win)
+    vim.cmd.quit()
+    vim.wait(100, function() return fired > 0 end, 5)
+    vim.wait(50)
+
+    assert.equal(fired, 1)
+    cleanup_buffers { buf }
+  end)
+
+  it('reopens a float closed with :q when the app still renders it open', function()
+    local App, box = float_app(true)
+    local buf = create_test_buffer()
+    Morph.new(buf):mount(h(App))
+    vim.api.nvim_set_current_win(assert(first_float_win()))
+    vim.cmd.quit()
+    assert.equal(count_float_wins(), 0)
+
+    box[1]:refresh()
+    local win = first_float_win()
+    assert.ok(win, 'the float did not reopen')
+    assert.deep_equal(
+      vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(win), 0, -1, false),
+      { 'Hello' }
+    )
+
+    close_all_floats()
+    cleanup_buffers { buf }
+  end)
+
+  it('fires on_closed once when the float buffer is wiped', function()
+    local fired = 0
+    local App = float_app(true, function() fired = fired + 1 end)
+    local buf = create_test_buffer()
+    Morph.new(buf):mount(h(App))
+    local win = assert(first_float_win())
+
+    vim.api.nvim_buf_delete(vim.api.nvim_win_get_buf(win), { force = true })
+    vim.wait(100, function() return fired > 0 end, 5)
+    vim.wait(50)
+
+    assert.equal(fired, 1)
+    cleanup_buffers { buf }
+  end)
+
+  it('reopens a wiped float with a fresh buffer when the app still renders it open', function()
+    local App, box = float_app(true)
+    local buf = create_test_buffer()
+    Morph.new(buf):mount(h(App))
+    local wiped = vim.api.nvim_win_get_buf(assert(first_float_win()))
+    vim.api.nvim_buf_delete(wiped, { force = true })
+
+    box[1]:refresh()
+    local win = first_float_win()
+    assert.ok(win, 'the float did not reopen')
+    local fresh = vim.api.nvim_win_get_buf(win)
+    assert.not_equal(fresh, wiped)
+    assert.deep_equal(vim.api.nvim_buf_get_lines(fresh, 0, -1, false), { 'Hello' })
+
+    close_all_floats()
+    cleanup_buffers { buf, fresh }
+  end)
+
+  it('applies a changed config to the float that is already open', function()
+    local box = {}
+    local function App(ctx)
+      if ctx.phase == 'mount' then ctx.state = { width = 40 } end
+      box[1] = ctx
+      return h(FloatingWindow, {
+        open = true,
+        config = vim.tbl_extend('force', CFG, { width = ctx.state.width }),
+      }, h('text', {}, { 'Hello' }))
+    end
+
+    local buf = create_test_buffer()
+    Morph.new(buf):mount(h(App))
+    local win = first_float_win()
+    assert.ok(win)
+    assert.equal(vim.api.nvim_win_get_width(win), 40)
+
+    box[1]:update { width = 25 }
+    assert.equal(first_float_win(), win, 'a config change must not reopen the float')
+    assert.equal(vim.api.nvim_win_get_width(win), 25)
+
+    close_all_floats()
+    cleanup_buffers { buf }
+  end)
+
   it('should render content to floating window buffer', function()
     local buf = create_test_buffer()
 
@@ -484,5 +579,94 @@ describe('FloatingWindow nested open from on_closed', function()
 
     assert.ok(b_buf, 'second float on_win_create never ran')
     assert.deep_equal(lines, { 'w' }, 'second float was not editable; startinsert was lost')
+  end)
+end)
+
+-- Closing a float restores the mode its opener was in. Only normal and insert
+-- have a command that enters them, so those are the modes the close waits on;
+-- every other mode proceeds at once. Each spec opens the float from one mode,
+-- changes mode inside the float, closes it, and then counts `on_closed` calls
+-- well past the 500ms fallback, because a fallback that was armed but never
+-- disarmed shows up only as a second, late call.
+describe('FloatingWindow mode restore on close', function()
+  --- @type test.Nvim?
+  local nv
+  before_each(function()
+    nv = util.start { columns = 80, rows = 20 }
+    nv:run(function()
+      local Morph = require 'morph'
+      local h = Morph.h
+      local util = dofile 'spec/util.lua'
+      util.scratch_buf { focus = true, lines = { 'hello world' } }
+      _G.closed = 0
+      local function App(ctx)
+        if ctx.phase == 'mount' then
+          ctx.state = { open = false }
+          _G.app = ctx
+        end
+        return h(Morph.FloatingWindow, {
+          open = ctx.state.open,
+          config = { relative = 'editor', row = 1, col = 1, width = 20, height = 3 },
+          on_closed = function() _G.closed = _G.closed + 1 end,
+        }, 'float')
+      end
+      Morph.new(util.scratch_buf {}):mount(h(App))
+    end)
+  end)
+  after_each(function()
+    if nv then nv:stop() end
+    nv = nil
+  end)
+
+  local function open()
+    nv:run(function() _G.app:update { open = true } end)
+  end
+  local function close()
+    nv:run(function() _G.app:update { open = false } end)
+  end
+  local function mode()
+    return nv:run(function() return vim.fn.mode() end)
+  end
+  --- Wait past the fallback in the child, and then read the call count.
+  --- @return integer
+  local function closed_after_fallback()
+    return nv:run(function()
+      vim.wait(700)
+      return _G.closed
+    end)
+  end
+
+  it('fires on_closed once when the opener was in a mode it cannot re-enter', function()
+    nv:input 'R'
+    open()
+    assert.equal(mode(), 'R')
+    nv:input '<Esc>'
+    assert.equal(mode(), 'n')
+
+    close()
+    assert.equal(closed_after_fallback(), 1)
+  end)
+
+  it('re-enters insert mode when the opener was in insert mode', function()
+    nv:input 'i'
+    open()
+    nv:input '<Esc>'
+    assert.equal(mode(), 'n')
+
+    close()
+    assert.equal(closed_after_fallback(), 1)
+    assert.equal(mode(), 'i')
+  end)
+
+  it('falls back to closing when the mode change never happens', function()
+    -- `:stopinsert` cannot leave visual mode, so no ModeChanged event arrives
+    -- and only the fallback timer finishes the close.
+    open()
+    nv:input 'v'
+    assert.equal(mode(), 'v')
+
+    close()
+    assert.equal(nv:run(function() return _G.closed end), 0)
+    assert.equal(closed_after_fallback(), 1)
   end)
 end)

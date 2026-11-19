@@ -374,6 +374,27 @@ describe('Morph', function()
       end)
     end)
 
+    it('pulls the view back when first-render inserts push the cursor off screen', function()
+      -- The scaffold's only line survives as the common suffix, so every new
+      -- line is inserted above the cursor, and nvim scrolls to follow it.
+      with_buf({ 'end' }, function()
+        local new = {}
+        for i = 1, 60 do
+          new[i] = 'line ' .. i
+        end
+        new[#new + 1] = 'end'
+        assert.ok(
+          vim.api.nvim_win_get_height(0) < 60,
+          'the window must be shorter than the inserts'
+        )
+
+        Morph.patch_lines(0, { 'end' }, new, { first = true })
+        assert.deep_equal(get_lines(), new)
+        assert.deep_equal(vim.api.nvim_win_get_cursor(0)[1], 1)
+        assert.deep_equal(vim.fn.winsaveview().topline, 1)
+      end)
+    end)
+
     it('uses full buffer replace when line count delta exceeds threshold', function()
       with_buf({}, function()
         local old = {}
@@ -2814,6 +2835,33 @@ describe('Morph', function()
         local ok = vim.wait(200, function() return render_count >= 2 end, 5)
         assert.equal(ok, true, 'debounce should fire trailing render after refresh')
         assert.deep_equal(render_count, 2)
+      end)
+    end)
+
+    it('waits a full window for an update that arrives after an idle stretch', function()
+      -- Time spent idle past the window does not count toward the next one,
+      -- so the first update after it still renders one window later, not at
+      -- once.
+      with_buf({}, function()
+        local render_count = 0
+        --- @type morph.Ctx<any, any>
+        local ctx_ref
+        local function Counter(ctx)
+          if ctx.phase == 'mount' then ctx.state = {} end
+          ctx_ref = ctx
+          render_count = render_count + 1
+          return { 'Count: ' .. render_count }
+        end
+
+        Morph.new():mount(h(Counter), { debounce_ms = 100 })
+        vim.wait(150)
+
+        ctx_ref:refresh()
+        vim.wait(20)
+        assert.deep_equal(render_count, 1, 'the render must not fire before its window')
+
+        local ok = vim.wait(500, function() return render_count >= 2 end, 5)
+        assert.equal(ok, true, 'the trailing render never fired')
       end)
     end)
 

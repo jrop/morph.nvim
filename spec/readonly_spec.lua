@@ -1135,4 +1135,21 @@ describe('readonly regions (in-process)', function()
       assert.deep_equal(locked.extmark.stop, Pos00.new(0, 3))
     end)
   end)
+
+  -- Each hole reads only what sits between its own extmarks, so replacing the
+  -- whole content of two holes in one burst gives each hole its own text.
+  it('gives each fully replaced hole its own text in one burst', function()
+    local seen = {}
+    local function hole(id, text)
+      return h('text', { id = id, on_change = function(e) seen[id] = e.text end }, text)
+    end
+    util.with_buf(nil, function()
+      Morph.new(0):render { '[', hole('a', 'a'), ']\n--\n[', hole('b', 'b'), ']' }
+      vim.api.nvim_buf_set_text(0, 0, 1, 0, 2, { 'x' })
+      vim.api.nvim_buf_set_text(0, 2, 1, 2, 2, { 'y' })
+      vim.cmd.doautocmd 'TextChanged'
+      util.drain()
+    end)
+    assert.deep_equal(seen, { a = 'x', b = 'y' })
+  end)
 end)

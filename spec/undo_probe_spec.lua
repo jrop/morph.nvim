@@ -575,18 +575,15 @@ describe('region-aware undo', function()
     assert.deep_equal(undone, 'X:[base]')
   end)
 
-  -- The probe governs by resolution, not declaration: any resolved-editable
-  -- tag is a region, so even a render of plain text with no declared holes
-  -- gets region-scoped undo instead of native undo.
-  it('engages region undo for a render with no declared holes', function()
+  -- A classic render of plain text has no tags, so there is no region for the
+  -- probe to scope, and native undo restores the text on its own.
+  it('undoes typing in a plain-text render with no tags', function()
     nv:run(function()
       local util = dofile 'spec/util.lua'
       local Morph = require 'morph'
       _G.m = Morph.new(util.scratch_buf { focus = true })
       _G.m:render { 'just chrome, no holes' }
     end)
-    local engaged = nv:run(function() return _G.m.probe ~= nil end)
-    assert.equal(engaged, true)
 
     nv:input 'iZ<Esc>'
     nv:input 'u'
